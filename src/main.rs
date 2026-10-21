@@ -1,8 +1,10 @@
 use copis_chrome::args::{self, Command};
-use copis_chrome::protocol::{response, Error, Result};
+use copis_chrome::mode::Mode;
+use copis_chrome::protocol::{response_for, Error, Result, Scope};
 use serde_json::{json, Value};
 
 fn main() {
+    let scope = Mode::current_executable().scope();
     let parsed = std::env::args_os()
         .skip(1)
         .map(|arg| {
@@ -10,24 +12,31 @@ fn main() {
                 .map_err(|_| Error::invalid("参数必须为有效 UTF-8"))
         })
         .collect::<Result<Vec<_>>>()
-        .and_then(args::parse);
+        .and_then(|args| args::parse_for_scope(args, scope));
     let result = match parsed {
         Ok(Command::Help) => {
-            print!("{}", args::HELP);
+            print!(
+                "{}",
+                if scope == Scope::Desktop {
+                    args::DESKTOP_HELP
+                } else {
+                    args::HELP
+                }
+            );
             return;
         }
         Ok(Command::Version) => Ok(json!({"version":env!("CARGO_PKG_VERSION")})),
-        Ok(command) => execute(command),
+        Ok(command) => execute(command, scope),
         Err(error) => Err(error),
     };
     let failed = result.is_err();
-    println!("{}", response(result));
+    println!("{}", response_for(result, scope));
     if failed {
         std::process::exit(1);
     }
 }
 #[cfg(unix)]
-fn execute(command: Command) -> Result<Value> {
+fn execute(command: Command, scope: Scope) -> Result<Value> {
     use copis_chrome::{
         daemon,
         runtime::{export_image, Runtime},
@@ -35,10 +44,10 @@ fn execute(command: Command) -> Result<Value> {
     if !cfg!(target_os = "macos") {
         return Err(Error::new(
             "UNSUPPORTED_PLATFORM",
-            "Chrome 桌面自动化仅支持 macOS 14 及以上版本",
+            "桌面自动化仅支持 macOS 14 及以上版本",
         ));
     }
-    let runtime = Runtime::from_env()?;
+    let runtime = Runtime::from_env_for_scope(scope)?;
     match command {
         Command::Daemon(subcommand) => match subcommand.as_str() {
             "start" => daemon::start(&runtime),
@@ -65,9 +74,9 @@ fn execute(command: Command) -> Result<Value> {
     }
 }
 #[cfg(not(unix))]
-fn execute(_: Command) -> Result<Value> {
+fn execute(_: Command, _: Scope) -> Result<Value> {
     Err(Error::new(
         "UNSUPPORTED_PLATFORM",
-        "Chrome 桌面自动化仅支持 macOS 14 及以上版本",
+        "桌面自动化仅支持 macOS 14 及以上版本",
     ))
 }

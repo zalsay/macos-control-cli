@@ -70,13 +70,15 @@ final class ChromeControlToast: NSObject {
     private var activationObserver: NSObjectProtocol?
     private var pointerMonitor: Any?
     private var countdownTimer: Timer?
+    private let desktopMode: Bool
     private let logoURL: URL
     private let stateLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private let executeButton = ChromeToastButton(title: "继续", target: nil, action: nil)
     private let pauseButton = ChromeToastButton(title: "暂停", target: nil, action: nil)
 
-    init(logoURL: URL? = nil) {
+    init(logoURL: URL? = nil, desktopMode: Bool = false) {
+        self.desktopMode = desktopMode
         self.logoURL = logoURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
             .deletingLastPathComponent().appendingPathComponent("assets/copis-logo.png")
         super.init()
@@ -88,7 +90,7 @@ final class ChromeControlToast: NSObject {
         let isNewExecution = execution?.lease != lease || execution?.cancellation !== cancellation
         if isNewExecution { stopWatching() }
         execution = Execution(lease: lease, generation: generation, target: target,
-                              title: title.isEmpty ? "当前Chrome页面" : title, cancellation: cancellation)
+                              title: title.isEmpty ? (desktopMode ? "当前应用窗口" : "当前Chrome页面") : title, cancellation: cancellation)
         if isNewExecution {
             guard cancellation.onExecutionEnd(lease: lease, handler: { [weak self, weak cancellation] in
                 DispatchQueue.main.async { [weak self, weak cancellation] in
@@ -150,7 +152,7 @@ final class ChromeControlToast: NSObject {
     }
 
     private func updateLabels(state: ChromeExecutionState, execution: Execution) {
-        let page = "「\(execution.title)」页面"
+        let page = "「\(execution.title)」\(desktopMode ? "窗口" : "页面")"
         switch state {
         case .countdown(let seconds):
             stateLabel.stringValue = "AI即将接管\(page)"
@@ -193,7 +195,7 @@ final class ChromeControlToast: NSObject {
               current.generation == generation, current.cancellation === cancellation,
               cancellation.snapshot() == generation, panel?.isVisible == true,
               let state = cancellation.executionState(lease: current.lease) else { return }
-        current.title = title.isEmpty ? "当前Chrome页面" : title
+        current.title = title.isEmpty ? (desktopMode ? "当前应用窗口" : "当前Chrome页面") : title
         execution = current
         updateLabels(state: state, execution: current)
     }
@@ -271,7 +273,7 @@ final class ChromeControlToast: NSObject {
     private func makePanel() -> ChromeToastPanel {
         let toast = ChromeToastPanel(contentRect: .zero, styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
                                      backing: .buffered, defer: false)
-        toast.title = "AI正在操作Chrome窗口..."
+        toast.title = desktopMode ? "AI正在操作应用窗口..." : "AI正在操作Chrome窗口..."
         toast.titleVisibility = .hidden
         toast.titlebarAppearsTransparent = true
         toast.isMovable = false
@@ -320,7 +322,7 @@ final class ChromeControlToast: NSObject {
             closeButton.target = self
             closeButton.action = #selector(closeClicked(_:))
             closeButton.setAccessibilityIdentifier("copis-chrome-close")
-            closeButton.setAccessibilityLabel("关闭Copis Chrome控制条")
+            closeButton.setAccessibilityLabel(desktopMode ? "关闭应用控制条" : "关闭Copis Chrome控制条")
         }
         for button in [executeButton, pauseButton] {
             button.bezelStyle = .rounded

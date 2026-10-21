@@ -1,5 +1,5 @@
 #!/bin/bash
-# 验证独立分发包与双语文档，不启动 daemon、Chrome 或系统输入。
+# 验证通用/Chrome双入口独立分发包与双语文档，不启动 daemon、Chrome 或系统输入。
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 python3 - "$root" <<'PY'
@@ -18,7 +18,7 @@ arch = {'arm64': 'arm64', 'x86_64': 'x64'}[platform.machine()]
 name = f'copis-chrome-{version}-darwin-{arch}'
 package = root / 'dist' / name
 archive = root / 'dist' / f'{name}.tar.gz'
-required = ['copis-chrome', 'copis-chrome-helper', 'module.json', 'LICENSE', 'USAGE.md',
+required = ['copis-chrome', 'desktop-control', 'copis-chrome-helper', 'module.json', 'LICENSE', 'USAGE.md',
             'README.md', 'README.zh-CN.md', 'assets/copis-logo.png', 'docs/AGENT-INTEGRATION.md',
             'source/Cargo.toml', 'source/Cargo.lock', 'source/build.sh', 'source/README.md',
             'source/README.zh-CN.md', 'source/src/main.rs', 'source/swift/main.swift']
@@ -46,5 +46,10 @@ for base in [root, package, package / 'source']:
                 assert (doc.parent / path).exists(), f'文档链接失效：{doc.name} -> {path}'
 reply = json.loads(subprocess.check_output([str(package / 'copis-chrome'), '--version'], text=True))
 assert reply['ok'] and reply['version'] == version
-print('PASS: 独立双二进制包、双语 README、源码完整性、文档链接、SHA256 与无运行数据；未启动桌面自动化')
+desktop = json.loads(subprocess.check_output([str(package / 'desktop-control'), '--version'], text=True))
+assert desktop['ok'] and desktop['version'] == version
+help_text = subprocess.check_output([str(package / 'desktop-control'), '--help'], text=True)
+assert 'apps' in help_text and '--app' in help_text
+
+print('PASS: 通用/Chrome双入口与原生helper、双语 README、源码完整性、文档链接、SHA256 与无运行数据；未启动桌面自动化')
 PY

@@ -46,6 +46,7 @@ struct WindowBounds {
 struct TargetWindow {
     let windowId: CGWindowID
     let pid: pid_t
+    var bundleId: String? = nil
 }
 
 // 解析完成才进入系统 API：非法请求永远不会触发授权、激活或输入。
@@ -65,12 +66,12 @@ struct NativeRequest {
     // 仅由 stdin 接收线程签发，协议请求不能自行指定或绕过暂停前的排队代次。
     var inputEpoch: UInt64?
 
-    static func decode(_ json: [String: Any]) throws -> NativeRequest {
+    static func decode(_ json: [String: Any], scope: DesktopScope = .chrome) throws -> NativeRequest {
         guard let id = json["id"] as? String, validRequestID(id),
               let action = json["action"] as? String else {
             throw HelperFailure(code: "INVALID_REQUEST", message: "请求必须包含有效的字符串 id 和 action")
         }
-        let fields: [String: Set<String>] = [
+        var fields: [String: Set<String>] = [
             "permissions": ["request"], "windows": [], "cancel": [],
             "window": ["windowId", "pid"],
             "observe": ["windowId", "pid", "imagePath", "maxEdge"],
@@ -80,6 +81,10 @@ struct NativeRequest {
             "press": ["windowId", "pid", "expectedBounds", "key"],
             "select-file": ["windowId", "pid", "path"],
         ]
+        if scope == .desktop { fields["apps"] = [] }
+        for key in Array(fields.keys) where fields[key]?.contains("windowId") == true {
+            fields[key]?.insert("bundleId")
+        }
         guard let allowed = fields[action] else {
             throw HelperFailure(code: "UNKNOWN_ACTION", message: "不支持该原生动作")
         }
@@ -98,6 +103,12 @@ struct NativeRequest {
                 windowId: CGWindowID(try integer(json["windowId"], range: 1...Int64(UInt32.max))),
                 pid: pid_t(try integer(json["pid"], range: 1...Int64(Int32.max)))
             )
+            if let value = json["bundleId"] {
+                guard let bundle = value as? String, !bundle.isEmpty, bundle.utf8.count <= 255,
+                      !bundle.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+                      scope == .desktop || bundle == "com.google.Chrome" else { throw HelperFailure.invalidArgument }
+                request.target?.bundleId = bundle
+            } else if scope == .desktop { throw HelperFailure.invalidArgument }
         }
         if allowed.contains("expectedBounds") {
             guard let bounds = json["expectedBounds"] as? [String: Any] else { throw HelperFailure.invalidArgument }

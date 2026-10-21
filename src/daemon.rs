@@ -1,6 +1,6 @@
 use crate::native::{Canceller, Helper};
 use crate::protocol::{
-    read_message, response, Error, Result, PROTOCOL_VERSION, USER_PAUSED_PUBLIC_MESSAGE,
+    read_message, response_for, Error, Result, Scope, PROTOCOL_VERSION, USER_PAUSED_PUBLIC_MESSAGE,
 };
 use crate::runtime::{helper_path, Runtime};
 use crate::service::Service;
@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Envelope {
     protocol_version: u32,
+    #[serde(default)]
+    scope: Scope,
     request: Value,
 }
 
@@ -31,9 +33,8 @@ pub fn call(runtime: &Runtime, request: Value) -> Result<Value> {
         .set_read_timeout(Some(Duration::from_secs(55)))
         .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(5))))
         .map_err(|e| Error::io("无法设置连接超时", e))?;
-    let mut bytes =
-        serde_json::to_vec(&json!({"protocolVersion":PROTOCOL_VERSION,"request":request}))
-            .map_err(|_| Error::new("PROTOCOL_ERROR", "请求编码失败"))?;
+    let mut bytes = serde_json::to_vec(&client_envelope(runtime.scope, request))
+        .map_err(|_| Error::new("PROTOCOL_ERROR", "请求编码失败"))?;
     bytes.push(b'\n');
     stream
         .write_all(&bytes)
@@ -46,6 +47,7 @@ pub fn call(runtime: &Runtime, request: Value) -> Result<Value> {
             "后台进程协议版本或响应格式无效",
         ));
     }
+    validate_response_scope(&value, runtime.scope)?;
     if value["ok"] == false {
         return Err(relayed_error(&value["error"])?);
     }
@@ -55,8 +57,32 @@ pub fn call(runtime: &Runtime, request: Value) -> Result<Value> {
         .ok_or_else(|| Error::new("PROTOCOL_ERROR", "后台进程未返回对象"))?;
     object.remove("ok");
     object.remove("protocolVersion");
+    object.remove("scope");
     Ok(Value::Object(object))
 }
+fn client_envelope(scope: Scope, request: Value) -> Value {
+    let mut envelope = json!({"protocolVersion":PROTOCOL_VERSION,"request":request});
+    if scope == Scope::Desktop {
+        envelope["scope"] = json!(scope.name());
+    }
+    envelope
+}
+
+fn validate_response_scope(value: &Value, expected: Scope) -> Result<()> {
+    let response_scope = value
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("chrome");
+    if response_scope == expected.name() {
+        Ok(())
+    } else {
+        Err(Error::new(
+            "SCOPE_MISMATCH",
+            "后台进程桌面控制模式与当前 CLI 不一致",
+        ))
+    }
+}
+
 fn relayed_error(value: &Value) -> Result<Error> {
     if value["code"] == "FOCUS_LOST" && value["reason"] == "USER_PAUSED" {
         return Ok(Error::new("USER_PAUSED", USER_PAUSED_PUBLIC_MESSAGE));
@@ -92,9 +118,10 @@ pub fn status(runtime: &Runtime) -> Result<Value> {
 }
 pub fn start(runtime: &Runtime) -> Result<Value> {
     if available(runtime)? {
+        call(runtime, json!({"action":"status"}))?;
         return Ok(json!({"running":true}));
     }
-    helper_path()?;
+    helper_path(runtime.scope)?;
     runtime.prepare()?;
     let stderr = runtime.log()?;
     let executable = std::env::current_exe().map_err(|e| Error::io("无法定位 CLI", e))?;
@@ -179,9 +206,13 @@ pub fn run(runtime: &Runtime) -> Result<Value> {
             let _ = fs::remove_file(entry.path());
         }
     }
-    let helper = Helper::spawn(&helper_path()?)?;
+    let helper = Helper::spawn_for_scope(&helper_path(runtime.scope)?, runtime.scope)?;
     let canceller = helper.canceller();
-    let service = Arc::new(Mutex::new(Service::new(helper, runtime.frames.clone())));
+    let service = Arc::new(Mutex::new(Service::with_scope(
+        helper,
+        runtime.frames.clone(),
+        runtime.scope,
+    )));
     let stopping = Arc::new(AtomicBool::new(false));
     let listener =
         UnixListener::bind(&runtime.socket).map_err(|e| Error::io("无法创建本地 socket", e))?;
@@ -211,15 +242,17 @@ pub fn run(runtime: &Runtime) -> Result<Value> {
                     let _ = write_response(
                         &mut stream,
                         Err(Error::new("BUSY", "本地连接过多，请稍后重试")),
+                        runtime.scope,
                     );
                     continue;
                 }
                 let service = service.clone();
                 let stopping = stopping.clone();
                 let cancel = canceller.clone();
+                let scope = runtime.scope;
                 workers.push(thread::spawn(move || {
-                    let result = handle(&stream, &service, &stopping, &cancel);
-                    let _ = write_response(&mut stream, result);
+                    let result = handle(&stream, &service, &stopping, &cancel, scope);
+                    let _ = write_response(&mut stream, result, scope);
                 }));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -251,6 +284,7 @@ fn handle(
     service: &Mutex<Service<Helper>>,
     stopping: &AtomicBool,
     canceller: &Canceller,
+    scope: Scope,
 ) -> Result<Value> {
     let request =
         read_message(&mut BufReader::new(stream))?.ok_or_else(|| Error::invalid("请求为空"))?;
@@ -258,6 +292,12 @@ fn handle(
         .map_err(|_| Error::new("PROTOCOL_ERROR", "请求信封格式无效"))?;
     if envelope.protocol_version != PROTOCOL_VERSION {
         return Err(Error::new("PROTOCOL_VERSION_MISMATCH", "不支持的协议版本"));
+    }
+    if envelope.scope != scope {
+        return Err(Error::new(
+            "SCOPE_MISMATCH",
+            "请求桌面控制模式与后台进程不一致",
+        ));
     }
     if envelope.request == json!({"action":"daemon_stop"}) {
         stopping.store(true, Ordering::Release);
@@ -281,8 +321,8 @@ fn handle(
     }
     result
 }
-fn write_response(stream: &mut UnixStream, result: Result<Value>) -> Result<()> {
-    let mut bytes = serde_json::to_vec(&response(result))
+fn write_response(stream: &mut UnixStream, result: Result<Value>, scope: Scope) -> Result<()> {
+    let mut bytes = serde_json::to_vec(&response_for(result, scope))
         .map_err(|_| Error::new("PROTOCOL_ERROR", "响应编码失败"))?;
     bytes.push(b'\n');
     stream
@@ -293,6 +333,83 @@ fn write_response(stream: &mut UnixStream, result: Result<Value>) -> Result<()> 
 #[cfg(test)]
 mod relayed_error_tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn given_legacy_chrome_daemon_when_building_client_envelope_then_omit_scope() {
+        assert_eq!(
+            client_envelope(Scope::Chrome, json!({"action":"status"})),
+            json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "request": {"action":"status"}
+            })
+        );
+        assert_eq!(
+            client_envelope(Scope::Desktop, json!({"action":"status"}))["scope"],
+            "desktop"
+        );
+    }
+
+    #[test]
+    fn given_desktop_stop_envelope_when_chrome_daemon_handles_it_then_scope_mismatch_does_not_stop_daemon(
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "scope-stop-{}",
+            crate::protocol::random_id().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let helper_path = root.join("helper.sh");
+        fs::write(&helper_path, "#!/bin/sh\nsleep 5\n").unwrap();
+        fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let helper = Helper::with_timeout(&helper_path, Duration::from_secs(1)).unwrap();
+        let canceller = helper.canceller();
+        let service = Arc::new(Mutex::new(Service::new(helper, root.join("frames"))));
+        let stopping = AtomicBool::new(false);
+        let (server, mut client) = UnixStream::pair().unwrap();
+        serde_json::to_writer(
+            &mut client,
+            &json!({"protocolVersion":PROTOCOL_VERSION,"scope":"desktop","request":{"action":"daemon_stop"}}),
+        ).unwrap();
+        client.write_all(b"\n").unwrap();
+
+        let error = handle(&server, &service, &stopping, &canceller, Scope::Chrome).unwrap_err();
+
+        assert_eq!(error.code, "SCOPE_MISMATCH");
+        assert!(!stopping.load(Ordering::Acquire));
+        drop(service);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn given_legacy_envelope_without_scope_when_decoding_then_treat_it_as_chrome() {
+        let envelope: Envelope = serde_json::from_value(json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "request": {"action":"daemon_stop"}
+        }))
+        .unwrap();
+        assert_eq!(envelope.scope, Scope::Chrome);
+        let legacy_response = json!({"protocolVersion":PROTOCOL_VERSION,"ok":true});
+        assert!(validate_response_scope(&legacy_response, Scope::Chrome).is_ok());
+    }
+
+    #[test]
+    fn given_desktop_daemon_response_without_scope_when_relaying_then_reject_as_mismatch() {
+        let runtime = Runtime {
+            root: PathBuf::from("/tmp/desktop-runtime"),
+            socket: PathBuf::from("/tmp/desktop-runtime/daemon.sock"),
+            frames: PathBuf::from("/tmp/desktop-runtime/frames"),
+            scope: Scope::Desktop,
+        };
+        let value = json!({"protocolVersion":PROTOCOL_VERSION,"ok":true,"running":true});
+        assert_eq!(
+            validate_response_scope(&value, runtime.scope)
+                .unwrap_err()
+                .code,
+            "SCOPE_MISMATCH"
+        );
+        let desktop = json!({"protocolVersion":PROTOCOL_VERSION,"scope":"desktop","ok":true});
+        assert!(validate_response_scope(&desktop, runtime.scope).is_ok());
+    }
 
     #[test]
     fn given_response_larger_than_socket_buffer_when_sending_then_preserve_whole_json_line() {
@@ -300,10 +417,13 @@ mod relayed_error_tests {
         let (mut sender, mut receiver) = UnixStream::pair().unwrap();
         sender.set_nonblocking(true).unwrap();
         configure_client_stream(&sender).unwrap();
-        receiver.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
         let value = json!({"ocr":{"items":[{"text":"字".repeat(6000)}]}});
-        let expected = response(Ok(value.clone()));
-        let writer = std::thread::spawn(move || write_response(&mut sender, Ok(value)));
+        let expected = response_for(Ok(value.clone()), Scope::Chrome);
+        let writer =
+            std::thread::spawn(move || write_response(&mut sender, Ok(value), Scope::Chrome));
         std::thread::sleep(Duration::from_millis(50));
         let mut bytes = Vec::new();
         receiver.read_to_end(&mut bytes).unwrap();

@@ -74,7 +74,9 @@ impl Native for Desktop {
                         response["imageTransform"] = image_transform.clone();
                     }
                 }
-                if let Some(ocr) = self.ocr.lock().unwrap().as_ref() { response["ocr"] = ocr.clone(); }
+                if let Some(ocr) = self.ocr.lock().unwrap().as_ref() {
+                    response["ocr"] = ocr.clone();
+                }
                 Ok(response)
             }
             _ => Ok(json!({"sent":true})),
@@ -516,12 +518,21 @@ fn given_same_frame_ocr_when_observing_then_forward_text_without_triggering_inpu
     let ocr = json!({"status":"ok","items":[{"text":"上传视频","bbox":{"x":10,"y":20,"width":100,"height":40},"center":{"x":60,"y":40},"confidence":0.9}],"truncated":false});
     *desktop.ocr.lock().unwrap() = Some(ocr.clone());
     let connection = connect(&mut service);
-    let frame = service.execute(json!({"action":"observe","connectionId":connection})).unwrap();
+    let frame = service
+        .execute(json!({"action":"observe","connectionId":connection}))
+        .unwrap();
     assert_eq!(frame["ocr"], ocr);
     assert_eq!(frame["untrusted"], true);
-    assert!(!desktop.calls.lock().unwrap().iter().any(|v| ["click","press","type","scroll"].contains(&v["action"].as_str().unwrap())));
+    assert!(!desktop
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|v| ["click", "press", "type", "scroll"].contains(&v["action"].as_str().unwrap())));
     *desktop.ocr.lock().unwrap() = Some(json!({"status":"bad"}));
-    let frame = service.execute(json!({"action":"observe","connectionId":connection})).unwrap();
+    let frame = service
+        .execute(json!({"action":"observe","connectionId":connection}))
+        .unwrap();
     assert_eq!(frame["ocr"]["status"], "unavailable");
     assert!(frame["frameId"].is_string());
     std::fs::remove_dir_all(path).unwrap();

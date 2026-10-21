@@ -1,15 +1,15 @@
-# Chrome Control CLI
+# macOS Control CLI
 
 [简体中文](README.zh-CN.md) · [Usage reference](USAGE.md) · [Agent integration](docs/AGENT-INTEGRATION.md)
 
-A standalone **Rust + Swift** CLI for observing and controlling a local Google Chrome window on macOS. Designed for agents that can execute commands and read local images. **No Electron, Node.js, Bun, browser extension, or Chrome remote-debugging port is required.**
+A standalone **Rust + Swift** CLI for observing and controlling local macOS application windows. Designed for agents that can execute commands and read local images. **No Electron, Node.js, Bun, browser extension, or Chrome remote-debugging port is required.**
 
-The executable remains **`copis-chrome`** for compatibility with existing clients. This repository extracts the independent Chrome desktop component from Copis; the initial standalone version is **0.1.11**, with JSON protocol **1**.
+Version **0.2.0** adds **`desktop-control`** for ordinary application windows. **`copis-chrome` remains Chrome-only** for compatibility with existing clients. Both use JSON protocol **1** and the same native capture/input implementation.
 
 ## Features
 
-- List Chrome windows and connect to one exact window/PID.
-- Observe the window without activating it; return the original-pixel JPEG and frame metadata.
+- List ordinary applications/windows and bind a connection to an exact window/PID/bundle ID.
+- Observe the selected window without activating it; return the original-pixel JPEG and frame metadata.
 - Recognize Chinese/English text locally with Apple Vision. Return **text, bounding boxes, centers, and OCR confidence — no inferred control types**.
 - Click, scroll, type Unicode text, and send a restricted set of keys.
 - Select a local file through the connected Chrome window's native Open dialog.
@@ -17,34 +17,35 @@ The executable remains **`copis-chrome`** for compatibility with existing client
 - Show a native control panel with a three-second takeover countdown, pause/resume, and close controls.
 - Pause input when the user takes over the mouse or switches applications. Existing queued input is not replayed.
 
-This is **desktop GUI automation**, not DOM automation or an isolated browser. Input may activate Chrome and use the real desktop mouse and keyboard. Observation does not require bringing Chrome to the foreground.
+This is **desktop GUI automation**, not DOM automation or an isolated browser. Input may activate the selected application and use the real desktop mouse and keyboard. Observation does not require bringing it to the foreground.
 
 ## Requirements
 
 | | Requirement |
 |---|---|
-| Runtime | macOS 14 or later; Google Chrome stable |
+| Runtime | macOS 14 or later; an open ordinary application window (Chrome stable for the legacy entry point) |
 | Observe | Screen Recording permission |
 | Input | Accessibility and system event-posting permission |
 | Build | Rust 1.89 or later and Xcode Command Line Tools |
 | Architectures | Build natively on Apple Silicon or Intel; no cross-platform package substitution |
 
-Binary users do not need Rust or Xcode. Apple Silicon has been exercised locally; Intel distribution needs a native Intel build and validation. Safari, Chromium forks, Windows, and Linux desktop automation are not supported.
+Binary users do not need Rust or Xcode. Apple Silicon has been exercised locally; Intel distribution needs a native Intel build and validation. Other applications require per-app validation; this does not promise compatibility with every macOS application. Windows and Linux desktop automation are not supported.
 
 ## Build from source
 
 ```bash
-git clone git@github.com:zalsay/chrome-control-cli.git
-cd chrome-control-cli
+git clone git@github.com:zalsay/macos-control-cli.git
+cd macos-control-cli
 bash ./build.sh
 ```
 
-On Apple Silicon, version 0.1.11 produces:
+On Apple Silicon, version 0.2.0 produces:
 
 ```text
 dist/
-  copis-chrome-0.1.11-darwin-arm64/
+  copis-chrome-0.2.0-darwin-arm64/
     copis-chrome
+    desktop-control
     copis-chrome-helper
     module.json
     README.md
@@ -54,20 +55,39 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.1.11-darwin-arm64.tar.gz
-  copis-chrome-0.1.11-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.2.0-darwin-arm64.tar.gz
+  copis-chrome-0.2.0-darwin-arm64.tar.gz.sha256
 ```
 
-Intel uses `darwin-x64`. `bash ./build.sh debug` builds a debug package. Keep both executables and `assets/` together at a stable installation path. You can use the build output directly or copy the entire versioned directory to a location you control; do not copy only the CLI executable.
+Intel uses `darwin-x64`. `bash ./build.sh debug` builds a debug package. Keep the CLI entry points, native helper, and `assets/` together at a stable installation path. You can use the build output directly or copy the entire versioned directory to a location you control; do not copy only the CLI executable.
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.1.11-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.0-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
 Use the actual version/architecture directory produced by your build. The default ad-hoc signature is for local use, **not notarized distribution**. Developer ID signing can be selected with `COPIS_CHROME_SIGN_IDENTITY`; notarization remains a separate release step. macOS may require permission to be granted again after moving or re-signing binaries.
 
-## Quick start
+## General application control
+
+Keep `desktop-control`, `copis-chrome-helper`, and `assets/` together. Example after a native ARM build:
+
+```bash
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.0-darwin-arm64/desktop-control"
+export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
+"$DESKTOP_CONTROL_CLI" apps
+"$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit
+"$DESKTOP_CONTROL_CLI" windows --app com.apple.finder
+# Select an actual windowId from the list, then connect/observe/click as below.
+```
+
+`apps` lists ordinary running applications that currently have eligible on-screen windows; it excludes background/accessory processes. `windows` includes `appName` and `bundleId`; `--app` filters by exact bundle identifier. A connection binds the window ID, PID, and bundle ID. The tool does not start arbitrary applications or implicitly switch to another window or modal dialog.
+
+The general default runtime is `~/.copis/desktop-control-cli`, overridden by `COPIS_DESKTOP_RUNTIME_DIR`. The Chrome entry point retains `~/.copis/chrome-desktop-cli` and `COPIS_CHROME_RUNTIME_DIR`. Requests to a daemon of the other mode are rejected, including stop requests. Separate runtimes still share the real desktop input devices.
+
+Generic `observe`, OCR, `click`, `scroll`, `type`, `press`, countdown, pause/resume, and cleanup follow the same contracts as the Chrome examples below. The control panel shows the application name and window title. **`select-file` currently retains only the verified Chrome adapter**; other apps return `FILE_DIALOG_UNSUPPORTED`. Menu bars, arbitrary sheets, and child windows are not implicitly included in a connection.
+
+## Chrome-compatible quick start
 
 Open a normal Chrome window. Use a private runtime for each agent task:
 
@@ -172,13 +192,15 @@ Desktop smoke tests are **explicit opt-in**: they can open/activate a fixture Ch
 ```bash
 bash tests/file-dialog-smoke.sh "$COPIS_CHROME_CLI"
 bash tests/file-dialog-smoke.sh "$COPIS_CHROME_CLI" --execution-control
+# General app fixtures / 通用应用隔离测试
+bash tests/application-smoke.sh "$DESKTOP_CONTROL_CLI"
 ```
 
 These file-picker fixtures do not upload files. See [documentation index](docs/README.md) for verification records and test boundaries.
 
 ## Limitations and provenance
 
-- No background-isolated mouse/keyboard session, DOM selectors, or guaranteed semantic UI classification.
+- No background-isolated mouse/keyboard session, DOM selectors, guaranteed semantic UI classification, or automatic control of arbitrary dialogs.
 - Minimized windows, other Spaces, locking the screen, or real overlays may prevent capture/input.
 - Exact native window/pointer ownership uses non-public macOS symbols. OS updates can break this mapping; uncertain ownership is rejected, not bypassed.
 - The `copis-chrome` name, Copis logo, default `~/.copis/chrome-desktop-cli` runtime, and AGPL license are retained from the original independent Copis component. Existing integrations remain compatible. Prefer a private runtime for standalone use.

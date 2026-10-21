@@ -47,6 +47,9 @@ final class ChromeFileSelector {
 
     func select(_ request: NativeRequest, generation: UInt64) throws -> [String: Any] {
         guard let target = request.target else { throw HelperFailure.invalidArgument }
+        guard (target.bundleId ?? "com.google.Chrome") == "com.google.Chrome" else {
+            throw HelperFailure(code: "FILE_DIALOG_UNSUPPORTED", message: "该应用尚无已验证的文件选择适配，请勿向未知原生对话框发送输入")
+        }
         // 不读取文件内容。原生层再次校验，避免绕过 CLI 直接调用 helper 时选择目录或无效路径。
         let file = URL(fileURLWithPath: request.filePath).resolvingSymlinksInPath()
         guard file.path.utf8.count <= 4096,

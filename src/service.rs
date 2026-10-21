@@ -1,5 +1,5 @@
 use crate::protocol::{
-    fields, integer, random_id, string, Error, Result, USER_PAUSED_PUBLIC_MESSAGE,
+    fields, integer, random_id, string, Error, Result, Scope, USER_PAUSED_PUBLIC_MESSAGE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -39,6 +39,10 @@ pub struct Window {
     pub window_id: u32,
     pub pid: i32,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
     pub bounds: Bounds,
 }
 #[derive(Clone)]
@@ -58,20 +62,27 @@ struct Connection {
 pub struct Service<N: Native> {
     native: N,
     frames_dir: PathBuf,
+    scope: Scope,
     connection: Option<Connection>,
 }
 impl<N: Native> Service<N> {
     pub fn new(native: N, frames_dir: PathBuf) -> Self {
+        Self::with_scope(native, frames_dir, Scope::Chrome)
+    }
+
+    pub fn with_scope(native: N, frames_dir: PathBuf, scope: Scope) -> Self {
         Self {
             native,
             frames_dir,
+            scope,
             connection: None,
         }
     }
     pub fn execute(&mut self, request: Value) -> Result<Value> {
         let action = string(&request, "action")?;
         let allowed: &[&str] = match action {
-            "status" | "windows" => &["action"],
+            "status" | "apps" => &["action"],
+            "windows" => &["action", "bundleId"],
             "permissions" => &["action", "request"],
             "connect" => &["action", "windowId"],
             "observe" | "disconnect" => &["action", "connectionId"],
@@ -87,7 +98,11 @@ impl<N: Native> Service<N> {
             "status" => Ok(
                 json!({"running":true,"connected":self.connection.is_some(),"window":self.connection.as_ref().map(|c| &c.window)}),
             ),
-            "windows" => self.native.request(json!({"action":"windows"})),
+            "apps" => {
+                self.require_scope(Scope::Desktop)?;
+                self.native.request(json!({"action":"apps"}))
+            }
+            "windows" => self.windows(&request),
             "permissions" => {
                 if request.get("request").is_some_and(|v| !v.is_boolean()) {
                     return Err(Error::invalid("request 必须为布尔值"));
@@ -134,6 +149,36 @@ impl<N: Native> Service<N> {
         }
         result
     }
+    fn require_scope(&self, expected: Scope) -> Result<()> {
+        if self.scope == expected {
+            Ok(())
+        } else {
+            Err(Error::new(
+                "SCOPE_MISMATCH",
+                "该命令不适用于当前桌面控制模式",
+            ))
+        }
+    }
+
+    fn windows(&mut self, request: &Value) -> Result<Value> {
+        let bundle_id = match request.get("bundleId") {
+            None => None,
+            Some(Value::String(value)) if valid_bundle_id(value) => Some(value.as_str()),
+            Some(_) => return Err(Error::invalid("bundleId 必须为非空字符串")),
+        };
+        if bundle_id.is_some() {
+            self.require_scope(Scope::Desktop)?;
+        }
+        let mut result = self.native.request(json!({"action":"windows"}))?;
+        if let Some(bundle_id) = bundle_id {
+            let windows = result["windows"]
+                .as_array_mut()
+                .ok_or_else(|| Error::new("HELPER_PROTOCOL", "原生窗口列表无效"))?;
+            windows.retain(|window| window["bundleId"] == bundle_id);
+        }
+        Ok(result)
+    }
+
     fn cancel_native(&mut self) -> Result<()> {
         let receipt = self.native.request(json!({"action":"cancel"}))?;
         if receipt["cancelled"] != true {
@@ -194,12 +239,25 @@ impl<N: Native> Service<N> {
             .ok_or_else(|| {
                 Error::new(
                     "WINDOW_UNAVAILABLE",
-                    "找不到指定 Chrome 窗口，请重新执行 windows",
+                    "找不到指定应用窗口，请重新执行 windows",
                 )
             })?;
         let window: Window = decode(selected)?;
         if !window.bounds.valid() || window.pid <= 0 {
             return Err(Error::new("HELPER_PROTOCOL", "原生窗口几何或身份无效"));
+        }
+        match (self.scope, window.bundle_id.as_deref()) {
+            (Scope::Desktop, Some(bundle_id)) if valid_bundle_id(bundle_id) => {}
+            (Scope::Desktop, _) => {
+                return Err(Error::new("HELPER_PROTOCOL", "通用模式窗口应用身份无效"));
+            }
+            (Scope::Chrome, Some("com.google.Chrome")) | (Scope::Chrome, None) => {}
+            (Scope::Chrome, Some(_)) => {
+                return Err(Error::new(
+                    "HELPER_PROTOCOL",
+                    "Chrome 模式返回了其他应用身份",
+                ));
+            }
         }
         let id = random_id()?;
         let result =
@@ -214,32 +272,58 @@ impl<N: Native> Service<N> {
     }
     fn current_window(&mut self) -> Result<Window> {
         let target = &self.connection.as_ref().expect("已校验连接").window;
-        let response = self
-            .native
-            .request(json!({"action":"window","windowId":target.window_id,"pid":target.pid}))?;
+        let mut request = json!({"action":"window","windowId":target.window_id,"pid":target.pid});
+        if let Some(bundle_id) = &target.bundle_id {
+            request["bundleId"] = json!(bundle_id);
+        }
+        let response = self.native.request(request)?;
         let window: Window = decode(response["window"].clone())?;
         if window.window_id != target.window_id
             || window.pid != target.pid
+            || window.bundle_id != target.bundle_id
+            || (self.scope == Scope::Desktop && window.bundle_id.is_none())
             || !window.bounds.valid()
         {
             return Err(Error::new(
                 "WINDOW_UNAVAILABLE",
-                "目标 Chrome 窗口身份或几何发生异常",
+                "目标应用窗口身份或几何发生异常",
             ));
         }
         Ok(window)
     }
     fn select_file(&mut self, request: &Value) -> Result<Value> {
+        let identity = &self
+            .connection
+            .as_ref()
+            .expect("已校验连接")
+            .window
+            .bundle_id;
+        if self.scope == Scope::Desktop && identity.as_deref() != Some("com.google.Chrome") {
+            return Err(Error::new(
+                "FILE_DIALOG_UNSUPPORTED",
+                "原生文件选择当前仅支持 Google Chrome",
+            ));
+        }
         let path = selectable_file_path(string(request, "path")?)?;
         let window = self.current_window()?;
+        let mut native_request = json!({
+            "action":"select-file",
+            "windowId":window.window_id,
+            "pid":window.pid,
+            "path":path,
+        });
+        if let Some(bundle_id) = &self
+            .connection
+            .as_ref()
+            .expect("已校验连接")
+            .window
+            .bundle_id
+        {
+            native_request["bundleId"] = json!(bundle_id);
+        }
         let receipt = self
             .native
-            .request(json!({
-                "action":"select-file",
-                "windowId":window.window_id,
-                "pid":window.pid,
-                "path":path,
-            }))
+            .request(native_request)
             .map_err(sanitize_file_selection_error)?;
         if receipt["selected"] != true || receipt["dialogClosed"] != true {
             return Err(Error::new(
@@ -265,7 +349,17 @@ impl<N: Native> Service<N> {
         result
     }
     fn capture(&mut self, window: &Window, id: &str, path: &std::path::Path) -> Result<Value> {
-        let image = self.native.request(json!({"action":"observe","windowId":window.window_id,"pid":window.pid,"imagePath":path,"maxEdge":1600}))?;
+        let mut request = json!({"action":"observe","windowId":window.window_id,"pid":window.pid,"imagePath":path,"maxEdge":1600});
+        if let Some(bundle_id) = &self
+            .connection
+            .as_ref()
+            .expect("已校验连接")
+            .window
+            .bundle_id
+        {
+            request["bundleId"] = json!(bundle_id);
+        }
+        let image = self.native.request(request)?;
         let width = dimension(&image, "width")?;
         let height = dimension(&image, "height")?;
         let bounds: Bounds = decode(image["bounds"].clone())?;
@@ -398,6 +492,15 @@ impl<N: Native> Service<N> {
         }
         native["windowId"] = json!(window.window_id);
         native["pid"] = json!(window.pid);
+        if let Some(bundle_id) = &self
+            .connection
+            .as_ref()
+            .expect("已校验连接")
+            .window
+            .bundle_id
+        {
+            native["bundleId"] = json!(bundle_id);
+        }
         let receipt = self.native.request(native)?;
         if receipt["sent"] != true {
             return Err(Error::new("HELPER_PROTOCOL", "原生输入未返回投递回执"));
@@ -421,6 +524,10 @@ impl<N: Native> Drop for Service<N> {
         self.clear();
     }
 }
+fn valid_bundle_id(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 255 && !value.chars().any(char::is_control)
+}
+
 fn selectable_file_path(value: &str) -> Result<PathBuf> {
     if value.len() > 4096
         || value.chars().any(char::is_control)

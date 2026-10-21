@@ -1,4 +1,4 @@
-# Chrome Control CLI — 使用说明
+# macOS Control CLI — 使用说明
 
 独立的 macOS Chrome 桌面自动化功能包，使用 Rust + Swift。其他 Agent 只需能执行命令并读取本地图片，无需启动 Copis 或安装 Node/Bun。第一版支持 macOS 14+ 和 Google Chrome 正式版。
 
@@ -6,16 +6,22 @@
 
 其他 Agent 的安装定位、调用流程、图像接入、错误恢复和 Python 示例见 [Agent 接入指南](docs/AGENT-INTEGRATION.md)（源码目录入口；独立功能包中对应 `source/docs/AGENT-INTEGRATION.md`）。
 
+## 通用入口（v0.2.0）
+
+新增 `desktop-control`，支持已打开的普通应用窗口；`copis-chrome` 继续仅支持 Chrome。运行 `desktop-control apps` 或 `desktop-control windows --app <bundleId>`，从实际窗口列表选择目标再 connect；观察与输入命令和原入口一致。
+
+使用 `COPIS_DESKTOP_RUNTIME_DIR` 指定通用私有 runtime，默认 `~/.copis/desktop-control-cli`。Chrome 的原变量与默认目录不变。不要将两种模式放入同一个正在使用的 runtime；跨模式请求会返回 `SCOPE_MISMATCH`。连接保存窗口ID/PID/bundleId，每次原生查询重新确认。通用模式不是对子窗口、弹窗或系统菜单的任意授权；未覆盖的原生文件选择器返回不支持。
+
 ## 构建与安装
 
 开发机器需要 Rust 1.89+ 和 Xcode Command Line Tools；分发包的使用者不需要编译环境。
 
 ```bash
-cd chrome-control-cli
+cd macos-control-cli
 bash ./build.sh
 ```
 
-`dist/copis-chrome-0.1.11-darwin-arm64/`（Intel 为 `x64`）包含两个可执行文件、协议版本元数据、本说明、AGPL-3.0-only 许可证及 `source/` 完整功能包源码；同目录生成 `.tar.gz` 和 SHA256。保持 `copis-chrome` 与 `copis-chrome-helper` 相邻，放到固定的安装目录，再把该目录加入 PATH。`./build.sh debug` 可生成开发版本；仅在本机原生构建，不跨平台混用产物。
+`dist/copis-chrome-0.2.0-darwin-arm64/`（Intel 为 `x64`）包含两个可执行文件、协议版本元数据、本说明、AGPL-3.0-only 许可证及 `source/` 完整功能包源码；同目录生成 `.tar.gz` 和 SHA256。保持 `copis-chrome` 与 `copis-chrome-helper` 相邻，放到固定的安装目录，再把该目录加入 PATH。`./build.sh debug` 可生成开发版本；仅在本机原生构建，不跨平台混用产物。
 
 默认本地 ad-hoc 签名不等于公证分发。公开分发时设置 `COPIS_CHROME_SIGN_IDENTITY` 使用 Developer ID 签名，并在发布流程完成公证。系统权限取决于 macOS 的代码身份和安装路径，移动或重新签名二进制后可能需要重新授予；构建脚本不承诺保留 TCC 授权。
 
@@ -178,7 +184,7 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ./build.sh
-bash tests/native-smoke.sh dist/copis-chrome-0.1.11-darwin-arm64/copis-chrome-helper
+bash tests/native-smoke.sh dist/copis-chrome-0.2.0-darwin-arm64/copis-chrome-helper
 
 # 真实焦点回归（已有系统权限）：显式指定 Chrome 窗口和另一应用 PID。
 # 只切换焦点，不截图、不发送鼠标键盘；不会被默认无副作用 smoke 自动执行。
@@ -194,7 +200,7 @@ bash tests/capture-background-smoke.sh <Chrome窗口ID>
 bash tests/coordinate-smoke.sh /absolute/path/to/copis-chrome
 
 # 显式原生文件选择：独立 Chrome profile、本机测试页/文本文件，无上传、无截图分析。
-bash tests/file-dialog-smoke.sh "$(pwd)/dist/copis-chrome-0.1.11-darwin-arm64/copis-chrome"
+bash tests/file-dialog-smoke.sh "$(pwd)/dist/copis-chrome-0.2.0-darwin-arm64/copis-chrome"
 
 # 显式激活 Chrome 并展示受控浮层，验证鼠标可穿透/拦截差异，随后恢复前台；不点击或截图。
 bash tests/pointer-occlusion-smoke.sh <Chrome窗口ID>

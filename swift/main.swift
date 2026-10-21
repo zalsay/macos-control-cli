@@ -7,12 +7,14 @@ setbuf(stdout, nil)
 signal(SIGPIPE, SIG_IGN)
 let cancellation = InputCancellation()
 let writer = JSONLWriter(onDisconnect: { cancellation.cancel() })
-if CommandLine.arguments.count != 1 {
-    writer.failure(id: "", HelperFailure(code: "INVALID_ARGUMENT", message: "原生 helper 仅接受 stdin JSONL，不接受命令行参数"))
+let desktopMode = CommandLine.arguments == [CommandLine.arguments[0], "--desktop"]
+if CommandLine.arguments.count != 1 && !desktopMode {
+    writer.failure(id: "", HelperFailure(code: "INVALID_ARGUMENT", message: "原生 helper 接受 stdin JSONL，仅支持可选的 --desktop 启动模式"))
     exit(1)
 }
 _ = NSApplication.shared.setActivationPolicy(.accessory)
-let desktop = ChromeDesktop()
+let scope: DesktopScope = desktopMode ? .desktop : .chrome
+let desktop = ChromeDesktop(scope: scope)
 let capture = ChromeCapture(desktop: desktop, cancellation: cancellation)
 let input = ChromeInput(desktop: desktop, cancellation: cancellation)
 let fileSelector = ChromeFileSelector(desktop: desktop, cancellation: cancellation)
@@ -30,7 +32,7 @@ func handleLine(_ line: Data, oversized: Bool) {
             throw HelperFailure(code: "INVALID_REQUEST", message: "每行必须是有效的 JSON 请求对象")
         }
         if let id = json["id"] as? String, validRequestID(id) { responseID = id }
-        var decodedRequest = try NativeRequest.decode(json)
+        var decodedRequest = try NativeRequest.decode(json, scope: scope)
         if ["click", "scroll", "type", "press", "select-file"].contains(decodedRequest.action) {
             decodedRequest.inputEpoch = cancellation.inputSnapshot()
         }
@@ -49,6 +51,7 @@ func handleLine(_ line: Data, oversized: Bool) {
                     switch request.action {
                     case "permissions": result = desktop.permissions(request: request.requestPermissions)
                     case "windows": result = ["windows": desktop.windows().map(\.json)]
+                    case "apps": result = ["apps": desktop.apps()]
                     case "window":
                         guard let target = request.target else { throw HelperFailure.invalidArgument }
                         result = ["window": try desktop.window(target).json]

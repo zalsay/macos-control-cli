@@ -1,4 +1,4 @@
-use crate::protocol::{read_message, Error, Result};
+use crate::protocol::{read_message, Error, Result, Scope};
 use crate::service::Native;
 use serde_json::{json, Value};
 use std::io::{BufReader, Write};
@@ -74,9 +74,15 @@ pub struct Helper {
 }
 impl Helper {
     pub fn spawn(path: &Path) -> Result<Self> {
-        Self::with_timeout(path, Duration::from_secs(45))
+        Self::spawn_for_scope(path, Scope::Chrome)
+    }
+    pub fn spawn_for_scope(path: &Path, scope: Scope) -> Result<Self> {
+        Self::with_timeout_for_scope(path, scope, Duration::from_secs(45))
     }
     pub fn with_timeout(path: &Path, timeout: Duration) -> Result<Self> {
+        Self::with_timeout_for_scope(path, Scope::Chrome, timeout)
+    }
+    pub fn with_timeout_for_scope(path: &Path, scope: Scope, timeout: Duration) -> Result<Self> {
         #[cfg(unix)]
         let (stdin, child_stdin) =
             UnixStream::pair().map_err(|e| Error::io("无法创建原生输入通道", e))?;
@@ -100,6 +106,9 @@ impl Helper {
         #[cfg(not(unix))]
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
         // 原生进程 stderr 不可信，不能把可能回显的文本或连接信息写入 daemon.log。
+        if scope == Scope::Desktop {
+            command.arg("--desktop");
+        }
         let child = command
             .stderr(Stdio::null())
             .spawn()

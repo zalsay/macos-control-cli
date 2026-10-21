@@ -4,6 +4,22 @@ use std::fmt;
 use std::io::{BufRead, Read};
 
 pub const PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    #[default]
+    Chrome,
+    Desktop,
+}
+impl Scope {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Chrome => "chrome",
+            Self::Desktop => "desktop",
+        }
+    }
+}
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub(crate) const USER_PAUSED_PUBLIC_MESSAGE: &str =
     "桌面输入已暂停，请点击屏幕上方控制条的继续按钮并等待 3 秒倒计时；暂停不会自动恢复，也不会重放旧输入";
@@ -36,7 +52,11 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub fn response(result: Result<Value>) -> Value {
-    match result {
+    response_for(result, Scope::Chrome)
+}
+
+pub fn response_for(result: Result<Value>, scope: Scope) -> Value {
+    let mut value = match result {
         Ok(Value::Object(mut data)) => {
             data.insert("protocolVersion".into(), json!(PROTOCOL_VERSION));
             data.insert("ok".into(), json!(true));
@@ -53,7 +73,11 @@ pub fn response(result: Result<Value>) -> Value {
             }
         }),
         Err(error) => json!({"protocolVersion":PROTOCOL_VERSION,"ok":false,"error":error}),
+    };
+    if scope == Scope::Desktop {
+        value["scope"] = json!(scope.name());
     }
+    value
 }
 
 pub fn random_id() -> Result<String> {
@@ -147,6 +171,14 @@ mod tests {
         let value = response(Err(Error::new("FOCUS_LOST", USER_PAUSED_PUBLIC_MESSAGE)));
         assert_eq!(value["error"]["code"], "FOCUS_LOST");
         assert!(value["error"].get("reason").is_none());
+    }
+
+    #[test]
+    fn given_chrome_response_when_serialized_then_keep_legacy_envelope_without_scope() {
+        let value = response_for(Ok(json!({"running":true})), Scope::Chrome);
+        assert!(value.get("scope").is_none());
+        let desktop = response_for(Ok(json!({"running":true})), Scope::Desktop);
+        assert_eq!(desktop["scope"], "desktop");
     }
 
     #[test]

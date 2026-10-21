@@ -40,6 +40,7 @@ impl Fixture {
             root: self.root.clone(),
             socket: self.root.join("daemon.sock"),
             frames: self.root.join("frames"),
+            scope: copis_chrome::protocol::Scope::Chrome,
         }
     }
     fn helper(&self, script: &str) -> Helper {
@@ -246,6 +247,7 @@ fn given_non_utf8_runtime_when_preparing_then_it_returns_error_without_panicking
         root: fixture.root.join(std::ffi::OsString::from_vec(vec![0xff])),
         socket: fixture.root.join("socket"),
         frames: fixture.root.join("frames"),
+        scope: copis_chrome::protocol::Scope::Chrome,
     };
     assert_eq!(runtime.prepare().unwrap_err().code, "INVALID_ARGUMENT");
 }
@@ -309,6 +311,51 @@ fn given_start_loser_when_winner_takes_longer_than_200ms_then_start_waits_for_wi
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn given_helper_spawn_scope_when_launching_then_only_desktop_receives_desktop_flag() {
+    use copis_chrome::protocol::Scope;
+    let fixture = Fixture::new();
+    let path = fixture.root.join("scope-helper.sh");
+    fs::write(
+        &path,
+        r##"#!/bin/sh
+printf '%s' "$*" > "$0.args"
+while IFS= read -r line; do
+  printf '{"id":"1","ok":true,"data":{"sent":true}}\n'
+done
+"##,
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut desktop =
+        Helper::with_timeout_for_scope(&path, Scope::Desktop, Duration::from_secs(1)).unwrap();
+    let started = Instant::now();
+    while !path.with_extension("sh.args").exists() {
+        assert!(started.elapsed() < STARTUP_TIMEOUT);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        fs::read_to_string(path.with_extension("sh.args")).unwrap(),
+        "--desktop"
+    );
+    desktop.request(json!({"action":"status"})).unwrap();
+    drop(desktop);
+
+    fs::remove_file(path.with_extension("sh.args")).unwrap();
+    let _chrome =
+        Helper::with_timeout_for_scope(&path, Scope::Chrome, Duration::from_secs(1)).unwrap();
+    let started = Instant::now();
+    while !path.with_extension("sh.args").exists() {
+        assert!(started.elapsed() < STARTUP_TIMEOUT);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        fs::read_to_string(path.with_extension("sh.args")).unwrap(),
+        ""
     );
 }
 

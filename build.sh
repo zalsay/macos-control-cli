@@ -31,13 +31,15 @@ mkdir -p "$PACKAGE_BUILD"
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --manifest-path "$PACKAGE_DIR/Cargo.toml" --target-dir "$PACKAGE_DIR/target" --target "$RUST_HOST" --profile "$BUILD_PROFILE" >&2
 swiftc -O -target "$SWIFT_TARGET" "$PACKAGE_DIR"/swift/*.swift -o "$PACKAGE_BUILD/copis-chrome-helper"
 cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/copis-chrome" "$PACKAGE_BUILD/copis-chrome"
-chmod 755 "$PACKAGE_BUILD/copis-chrome" "$PACKAGE_BUILD/copis-chrome-helper"
+cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/desktop-control" "$PACKAGE_BUILD/desktop-control"
+chmod 755 "$PACKAGE_BUILD/copis-chrome" "$PACKAGE_BUILD/desktop-control" "$PACKAGE_BUILD/copis-chrome-helper"
 
 # 为两项二进制设置明确 identifier；系统权限是否沿用仍由 macOS TCC 决定。
 # 分发时可通过 COPIS_CHROME_SIGN_IDENTITY 指定 Developer ID；默认仅本机 ad-hoc 签名。
 PACKAGE_SIGN_IDENTITY="${COPIS_CHROME_SIGN_IDENTITY:--}"
 codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.chrome-desktop.helper "$PACKAGE_BUILD/copis-chrome-helper"
 codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.chrome-desktop.cli "$PACKAGE_BUILD/copis-chrome"
+codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.desktop-control.cli "$PACKAGE_BUILD/desktop-control"
 cp "$PACKAGE_DIR/USAGE.md" "$PACKAGE_BUILD/USAGE.md"
 cp "$PACKAGE_DIR/LICENSE" "$PACKAGE_BUILD/LICENSE"
 cp "$PACKAGE_DIR/README.md" "$PACKAGE_DIR/README.zh-CN.md" "$PACKAGE_BUILD/"

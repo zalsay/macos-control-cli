@@ -1,4 +1,4 @@
-use crate::protocol::{Error, Result};
+use crate::protocol::{Error, Result, Scope};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -14,6 +14,10 @@ pub enum Command {
     },
 }
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command> {
+    parse_for_scope(args, Scope::Chrome)
+}
+
+pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> Result<Command> {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
         return Ok(Command::Help);
@@ -36,7 +40,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command> {
         return Ok(Command::Daemon(subcommand));
     }
     let allowed: &[&str] = match command.as_str() {
-        "status" | "windows" => &[],
+        "status" => &[],
+        "apps" if scope == Scope::Desktop => &[],
+        "windows" if scope == Scope::Desktop => &["app"],
+        "windows" => &[],
         "permissions" => &["request"],
         "connect" => &["window"],
         "observe" => &["connection", "out"],
@@ -78,6 +85,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command> {
         }
         let name = match key.as_str() {
             "window" => "windowId",
+            "app" => "bundleId",
             "connection" => "connectionId",
             "frame" => "frameId",
             "count" => "clickCount",
@@ -94,6 +102,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command> {
             json!(value)
         };
         request.insert(name.into(), value);
+    }
+    if let Some(bundle_id) = options.get("app") {
+        if bundle_id.trim().is_empty()
+            || bundle_id.len() > 255
+            || bundle_id.chars().any(char::is_control)
+        {
+            return Err(Error::invalid("app bundleId 必须为 1–255 个非控制字符"));
+        }
     }
     let required: &[&str] = match command.as_str() {
         "connect" => &["windowId"],
@@ -113,6 +129,26 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command> {
         output: options.get("out").map(PathBuf::from),
     })
 }
+
+pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面自动化工具（Rust + Swift）
+
+用法（默认单行 JSON，--json 可选）：
+  desktop-control apps
+  desktop-control windows [--app <bundleId>]
+  desktop-control connect --window <windowId>
+  desktop-control status
+  desktop-control observe --connection <id> [--out <new.jpg>]
+  desktop-control click --connection <id> --frame <id> --x <n> --y <n> [--count 1|2]
+  desktop-control scroll --connection <id> --frame <id> --x <n> --y <n> --delta-y <n>
+  desktop-control type --connection <id> --frame <id> --text <text>
+  desktop-control press --connection <id> --frame <id> --key <key>
+  desktop-control select-file --connection <id> --path <absolute-file>
+  desktop-control disconnect --connection <id>
+  desktop-control daemon start|stop|status|run
+  desktop-control --help | --version
+
+窗口连接固定应用 bundleId；原生文件选择暂仅支持 Google Chrome。
+"#;
 
 pub const HELP: &str = r#"copis-chrome — 独立的 macOS Chrome 桌面自动化工具（Rust + Swift）
 
@@ -166,6 +202,55 @@ mod tests {
         assert!(request.get("frameId").is_none());
         assert!(output.is_none());
         assert!(HELP.contains("select-file --connection <id> --path <absolute-file>"));
+    }
+
+    #[test]
+    fn given_desktop_scope_when_parsing_apps_and_app_filter_then_emit_bundle_id_requests() {
+        let apps = parse_for_scope(["apps".to_owned()], Scope::Desktop).unwrap();
+        let Command::Request { request, .. } = apps else {
+            panic!("apps 应生成请求");
+        };
+        assert_eq!(request, json!({"action":"apps"}));
+
+        let windows = parse_for_scope(
+            [
+                "windows".to_owned(),
+                "--app".to_owned(),
+                "com.apple.finder".to_owned(),
+            ],
+            Scope::Desktop,
+        )
+        .unwrap();
+        let Command::Request { request, .. } = windows else {
+            panic!("windows 应生成请求");
+        };
+        assert_eq!(
+            request,
+            json!({"action":"windows","bundleId":"com.apple.finder"})
+        );
+    }
+
+    #[test]
+    fn given_chrome_scope_when_parsing_generic_app_commands_then_reject() {
+        assert_eq!(
+            parse_for_scope(["apps".to_owned()], Scope::Chrome)
+                .unwrap_err()
+                .code,
+            "INVALID_ARGUMENT"
+        );
+        assert_eq!(
+            parse_for_scope(
+                [
+                    "windows".to_owned(),
+                    "--app".to_owned(),
+                    "com.apple.finder".to_owned()
+                ],
+                Scope::Chrome
+            )
+            .unwrap_err()
+            .code,
+            "INVALID_ARGUMENT"
+        );
     }
 
     #[test]

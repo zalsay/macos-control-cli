@@ -43,6 +43,9 @@ swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
   "$root/tests/execution-control/main.swift" -o "$scratch/execution-control-tests"
 swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
   "$root/tests/text-recognition/main.swift" -o "$scratch/text-recognition-tests"
+swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
+  "$root/tests/application-scope/main.swift" -o "$scratch/application-scope-tests"
+"$scratch/application-scope-tests"
 "$scratch/text-recognition-tests"
 "$scratch/execution-control-tests"
 "$scratch/file-dialog-tests"

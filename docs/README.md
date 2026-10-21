@@ -8,6 +8,7 @@
 - [Agent 接入、协议与 Python 调用闭环](AGENT-INTEGRATION.md)
 - [执行门禁与暂停/继续](EXECUTION-CONTROL.md)
 - [v0.1.11 OCR 验证记录](OCR-VERIFICATION.md)
+- [v0.2.0 通用应用窗口验证](GENERAL-APPS-VERIFICATION.md)
 
 Build from the repository root with `bash ./build.sh`; no Copis/Electron/Bun deployment scripts are needed. Version 0.1.11 preserves the original executable name and protocol.
 

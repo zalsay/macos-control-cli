@@ -1,14 +1,14 @@
-# Chrome Control CLI
+# macOS Control CLI
 
 [English](README.md) · [完整使用说明](USAGE.md) · [Agent 接入指南](docs/AGENT-INTEGRATION.md)
 
-使用 **Rust + Swift** 实现的独立 macOS Chrome 桌面自动化 CLI。面向能执行命令、读取本地图片的 Agent，**不依赖 Electron、Node.js、Bun、浏览器扩展或 Chrome 远程调试端口**。
+使用 **Rust + Swift** 实现的独立 macOS 应用窗口自动化 CLI。面向能执行命令、读取本地图片的 Agent，**不依赖 Electron、Node.js、Bun、浏览器扩展或 Chrome 远程调试端口**。
 
-为兼容已有调用方，可执行文件继续命名为 **`copis-chrome`**。本仓库从 Copis 的独立 Chrome 桌面组件提取，初始独立版本为 **0.1.11**，JSON 协议版本为 **1**。
+**0.2.0** 新增 **`desktop-control`** 通用应用入口；**`copis-chrome` 保持仅支持 Chrome**，兼容已有调用方。两者复用同一套原生截图与输入链路，JSON 协议仍为 **1**。
 
 ## 功能
 
-- 列出 Chrome 窗口，连接到精确的窗口 ID 与 PID。
+- 列出普通应用及窗口，连接到精确的窗口 ID、PID 与 bundle ID。
 - 不切前台即可观察窗口，返回原像素 JPEG 和帧元数据。
 - 使用 Apple Vision 本地识别中英文，提供**文字、文字框、中心坐标和 OCR 置信度，不推测控件类型**。
 - 点击、滚动、Unicode 文本输入及白名单按键。
@@ -17,34 +17,35 @@
 - 原生控制条，支持三秒接管倒计时、暂停/继续和关闭。
 - 用户接管鼠标或切换应用时暂停输入，不重放旧的排队动作。
 
-这是**本机 GUI 自动化**，不是 DOM 自动化或隔离浏览器。输入可能唤起 Chrome 并占用真实桌面的鼠标键盘；只读观察不需要 Chrome 切到前台。
+这是**本机 GUI 自动化**，不是 DOM 自动化或隔离浏览器。输入可能唤起所选应用并占用真实桌面的鼠标键盘；只读观察不需要目标应用切到前台。
 
 ## 环境要求
 
 | 项目 | 要求 |
 |---|---|
-| 运行 | macOS 14+，Google Chrome 正式版 |
+| 运行 | macOS 14+、已打开的普通应用窗口；兼容入口仅支持 Google Chrome 正式版 |
 | 观察 | 屏幕录制权限 |
 | 输入 | 辅助功能及系统事件投递权限 |
 | 构建 | Rust 1.89+、Xcode Command Line Tools |
 | 架构 | Apple Silicon 或 Intel 本机编译，不能混用其他平台产物 |
 
-二进制使用者无需安装 Rust 或 Xcode。Apple Silicon 已在本机验证；Intel 分发仍需要在 Intel Mac 上原生构建和验证。暂不支持 Safari、其他 Chromium 分支及 Windows/Linux 桌面自动化。
+二进制使用者无需安装 Rust 或 Xcode。Apple Silicon 已在本机验证；Intel 分发仍需要在 Intel Mac 上原生构建和验证。其他应用需逐项验证，不承诺所有 macOS 软件均兼容；不支持 Windows/Linux 桌面自动化。
 
 ## 从源码构建
 
 ```bash
-git clone git@github.com:zalsay/chrome-control-cli.git
-cd chrome-control-cli
+git clone git@github.com:zalsay/macos-control-cli.git
+cd macos-control-cli
 bash ./build.sh
 ```
 
-Apple Silicon 上的 0.1.11 产物：
+Apple Silicon 上的 0.2.0 产物：
 
 ```text
 dist/
-  copis-chrome-0.1.11-darwin-arm64/
+  copis-chrome-0.2.0-darwin-arm64/
     copis-chrome
+    desktop-control
     copis-chrome-helper
     module.json
     README.md
@@ -54,20 +55,39 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.1.11-darwin-arm64.tar.gz
-  copis-chrome-0.1.11-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.2.0-darwin-arm64.tar.gz
+  copis-chrome-0.2.0-darwin-arm64.tar.gz.sha256
 ```
 
-Intel 后缀为 `darwin-x64`。`bash ./build.sh debug` 可生成调试包。可以直接使用构建目录，也可将整个版本目录复制到稳定安装位置；两个可执行文件和 `assets/` 必须保持相邻，不要只复制 CLI。
+Intel 后缀为 `darwin-x64`。`bash ./build.sh debug` 可生成调试包。可以直接使用构建目录，也可将整个版本目录复制到稳定安装位置；CLI 入口、原生 helper 和 `assets/` 必须保持相邻，不要只复制 CLI。
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.1.11-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.0-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
 路径中的版本/架构要与实际构建产物一致。默认 ad-hoc 签名用于本机，**不代表已公证分发**。设置 `COPIS_CHROME_SIGN_IDENTITY` 可使用 Developer ID 签名；公证仍需独立执行。移动或重新签名后，macOS 可能要求重新授予权限。
 
-## 快速上手
+## 通用应用控制
+
+`desktop-control` 与 `copis-chrome-helper`、`assets/` 保持在同一目录。ARM 本机构建示例：
+
+```bash
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.0-darwin-arm64/desktop-control"
+export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
+"$DESKTOP_CONTROL_CLI" apps
+"$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit
+"$DESKTOP_CONTROL_CLI" windows --app com.apple.finder
+# 从实际列表选择 windowId，再按下文 connect/observe/click 流程调用。
+```
+
+`apps` 只列有合格屏幕窗口的普通运行应用，排除后台/辅助进程。窗口元数据增加 `appName` 和 `bundleId`，`--app` 按完整 bundle ID 筛选。连接固定窗口 ID、PID 与 bundle ID，不隐式换窗、不自动启动任意应用、不把授权扩展到弹窗。
+
+通用模式默认 runtime 为 `~/.copis/desktop-control-cli`，使用 `COPIS_DESKTOP_RUNTIME_DIR`；Chrome 兼容模式保留原目录和 `COPIS_CHROME_RUNTIME_DIR`。两种模式的跨模式请求（含停止）会被拒绝，避免共享目录误控。不同 runtime 仍共用真实鼠标键盘。
+
+通用模式的截图/OCR、点击、滚动、输入、按键、倒计时、暂停和退出清理沿用下文契约；控制条显示应用名与窗口标题。**`select-file` 暂时只保留已验证的 Chrome 适配**，其他应用明确返回 `FILE_DIALOG_UNSUPPORTED`。系统菜单、任意 sheet、子窗口不自动纳入连接。
+
+## Chrome 兼容入口快速上手
 
 先打开普通 Chrome 窗口，每个 Agent 任务使用私有 runtime：
 
@@ -172,6 +192,8 @@ Rust 测试使用受控 helper；原生 smoke 包含离线 OCR 和协议测试�
 ```bash
 bash tests/file-dialog-smoke.sh "$COPIS_CHROME_CLI"
 bash tests/file-dialog-smoke.sh "$COPIS_CHROME_CLI" --execution-control
+# General app fixtures / 通用应用隔离测试
+bash tests/application-smoke.sh "$DESKTOP_CONTROL_CLI"
 ```
 
 这些文件选择 fixture 不上传文件。历史验证和测试边界见 [文档索引](docs/README.md)。

@@ -1,4 +1,4 @@
-use crate::protocol::{Error, Result};
+use crate::protocol::{Error, Result, Scope};
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -8,32 +8,58 @@ pub struct Runtime {
     pub root: PathBuf,
     pub socket: PathBuf,
     pub frames: PathBuf,
+    pub scope: Scope,
 }
 impl Runtime {
     pub fn from_env() -> Result<Self> {
-        let root = match std::env::var_os("COPIS_CHROME_RUNTIME_DIR") {
+        Self::from_env_for_scope(Scope::Chrome)
+    }
+
+    pub fn from_env_for_scope(scope: Scope) -> Result<Self> {
+        let (runtime_variable, default_directory) = match scope {
+            Scope::Chrome => ("COPIS_CHROME_RUNTIME_DIR", "chrome-desktop-cli"),
+            Scope::Desktop => ("COPIS_DESKTOP_RUNTIME_DIR", "desktop-control-cli"),
+        };
+        Self::from_values(
+            scope,
+            runtime_variable,
+            default_directory,
+            std::env::var_os(runtime_variable),
+            std::env::var_os("HOME"),
+        )
+    }
+
+    fn from_values(
+        scope: Scope,
+        runtime_variable: &str,
+        default_directory: &str,
+        override_path: Option<std::ffi::OsString>,
+        home: Option<std::ffi::OsString>,
+    ) -> Result<Self> {
+        let root = match override_path {
             Some(path) => PathBuf::from(path),
-            None => PathBuf::from(std::env::var_os("HOME").ok_or_else(|| {
+            None => PathBuf::from(home.ok_or_else(|| {
                 Error::new(
                     "RUNTIME_UNAVAILABLE",
-                    "HOME 未设置；请指定 COPIS_CHROME_RUNTIME_DIR",
+                    &format!("HOME 未设置；请指定 {runtime_variable}"),
                 )
             })?)
-            .join(".copis/chrome-desktop-cli"),
+            .join(format!(".copis/{default_directory}")),
         };
         if !root.is_absolute() {
             return Err(Error::invalid("运行目录必须是绝对路径"));
         }
         let socket = root.join("daemon.sock");
         if socket.as_os_str().as_encoded_bytes().len() > 100 {
-            return Err(Error::invalid(
-                "运行目录过长，无法创建 macOS Unix socket；请设置较短的 COPIS_CHROME_RUNTIME_DIR",
-            ));
+            return Err(Error::invalid(&format!(
+                "运行目录过长，无法创建 macOS Unix socket；请设置较短的 {runtime_variable}"
+            )));
         }
         let runtime = Self {
             frames: root.join("frames"),
             root,
             socket,
+            scope,
         };
         runtime.validate_paths()?;
         Ok(runtime)
@@ -145,8 +171,12 @@ fn secure_file(path: &Path) -> Result<File> {
         Err(error) => Err(Error::io("无法创建私有运行文件", error)),
     }
 }
-pub fn helper_path() -> Result<PathBuf> {
-    let path = if let Some(path) = std::env::var_os("COPIS_CHROME_HELPER") {
+pub fn helper_path(scope: Scope) -> Result<PathBuf> {
+    let variable = match scope {
+        Scope::Chrome => "COPIS_CHROME_HELPER",
+        Scope::Desktop => "COPIS_DESKTOP_HELPER",
+    };
+    let path = if let Some(path) = std::env::var_os(variable) {
         PathBuf::from(path)
     } else {
         let executable =
@@ -195,4 +225,48 @@ pub fn export_image(source: &Path, destination: &Path) -> Result<PathBuf> {
         return Err(Error::io("无法写入输出截图", error));
     }
     Ok(absolute)
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn given_runtime_override_for_each_mode_then_keep_private_roots_separate() {
+        let chrome = Runtime::from_values(
+            Scope::Chrome,
+            "COPIS_CHROME_RUNTIME_DIR",
+            "chrome-desktop-cli",
+            Some(OsString::from("/tmp/chrome-private")),
+            None,
+        )
+        .unwrap();
+        let desktop = Runtime::from_values(
+            Scope::Desktop,
+            "COPIS_DESKTOP_RUNTIME_DIR",
+            "desktop-control-cli",
+            Some(OsString::from("/tmp/desktop-private")),
+            None,
+        )
+        .unwrap();
+        assert_eq!(chrome.root, PathBuf::from("/tmp/chrome-private"));
+        assert_eq!(desktop.root, PathBuf::from("/tmp/desktop-private"));
+    }
+
+    #[test]
+    fn given_no_desktop_override_then_use_desktop_default_under_home() {
+        let desktop = Runtime::from_values(
+            Scope::Desktop,
+            "COPIS_DESKTOP_RUNTIME_DIR",
+            "desktop-control-cli",
+            None,
+            Some(OsString::from("/Users/tester")),
+        )
+        .unwrap();
+        assert_eq!(
+            desktop.root,
+            PathBuf::from("/Users/tester/.copis/desktop-control-cli")
+        );
+    }
 }
