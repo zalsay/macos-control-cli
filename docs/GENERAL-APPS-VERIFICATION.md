@@ -13,7 +13,7 @@
 
 ## 自动化验证
 
-- `cargo test --locked`：90项通过，包含新模式、应用筛选、固定bundle、身份替换、非法请求拒绝、跨模式停止拒绝、旧Chrome信封兼容与helper启动参数。
+- `cargo test --locked`：91项通过，包含新模式、应用筛选、固定bundle、身份替换、非法请求拒绝、跨模式停止拒绝、旧Chrome信封兼容与helper启动参数。
 - `cargo fmt --check` 与 `git diff --check` 通过。
 - `tests/native-smoke.sh`：153项JSONL协议smoke及原有原生BDD通过；新增应用范围BDD验证Chrome默认不扩权、普通应用筛选与缺失/替换身份拒绝。
 - `tests/application-toast-smoke.sh`：通用标题、无键盘焦点、标题更新及取消清理通过；未向用户应用投递输入。
@@ -42,3 +42,7 @@
 ## 限制
 
 仅验证本机macOS ARM64。其他应用、Intel、多显示器/其他Space、特殊弹窗与安全输入仍需专门验证。输入仍会使用真实鼠标键盘，Spaces不提供独立输入设备。没有新增AX语义操作或虚拟机隔离。分发包为本机ad-hoc签名，没有声称Developer ID公证发布。
+
+## 合并前启动竞争回归
+
+合并后完整复测捕获了已有启动竞争：Unix socket 在 bind 后、chmod 0600 前短暂可见，使启动等待者触发 INSECURE_RUNTIME。现改为在私有临时路径完成权限和非阻塞设置后，再原子重命名发布daemon.sock；仍拒绝不安全路径，不增加绕过或重试例外。确定性BDD覆盖配置期间正式路径不可见、成功后权限0600且可连接、配置失败清理以及临时普通文件不被覆盖；原启动竞争fixture同步使用生产发布路径，并响应慢冷启动下的合法status查询，避免仅监听却不回包造成假超时。

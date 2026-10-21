@@ -8,8 +8,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufReader, Write};
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::fs::FileTypeExt;
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -214,14 +216,8 @@ pub fn run(runtime: &Runtime) -> Result<Value> {
         runtime.scope,
     )));
     let stopping = Arc::new(AtomicBool::new(false));
-    let listener =
-        UnixListener::bind(&runtime.socket).map_err(|e| Error::io("无法创建本地 socket", e))?;
+    let listener = runtime.bind_listener()?;
     let _socket = SocketGuard(runtime.socket.clone());
-    fs::set_permissions(&runtime.socket, fs::Permissions::from_mode(0o600))
-        .map_err(|e| Error::io("无法保护 socket", e))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| Error::io("无法设置 socket 模式", e))?;
     let mut workers: Vec<thread::JoinHandle<()>> = Vec::new();
     while !stopping.load(Ordering::Acquire) {
         let mut index = 0;

@@ -21,7 +21,7 @@
 2. Swift进程模式/应用目录/身份复核/采集：BDD失败→实现→测试。
 3. 构建产物、双语文档与分发包 smoke 更新。
 4. 独立源码测试、原生 smoke、构建、真实隔离窗口验证、简化审查。
-5. 本地交付；未请求新的公开发布，不推送或创建 Release。
+5. 本地交付；用户明确要求后合并main并推送指定仓库，不擅自创建二进制 Release。
 
 ## 验收与限制
 
@@ -29,4 +29,4 @@
 
 ## 完成记录
 
-通用和Chrome双入口、模式隔离、固定应用身份与双语文档已实现。90项Rust与原生smoke/应用范围BDD通过；TextEdit和Finder真实隔离输入验证通过。SCK遗留Chrome过滤及后台AX查询顺序已通过真实失败→修正→成功闭环处理。完整证据与限制见[验证记录](../GENERAL-APPS-VERIFICATION.md)。
+通用和Chrome双入口、模式隔离、固定应用身份与双语文档已实现。91项Rust与原生smoke/应用范围BDD通过；TextEdit和Finder真实隔离输入验证通过。SCK遗留Chrome过滤及后台AX查询顺序已通过真实失败→修正→成功闭环处理。完整证据与限制见[验证记录](../GENERAL-APPS-VERIFICATION.md)。

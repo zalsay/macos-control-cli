@@ -2,6 +2,7 @@ use crate::protocol::{Error, Result, Scope};
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 
 pub struct Runtime {
@@ -97,6 +98,50 @@ impl Runtime {
             Err(error) => Err(Error::io("无法验证 socket", error)),
         }
     }
+    // 调用方持有 runtime 锁；先配置私有临时socket，再原子发布正式路径。
+    pub fn bind_listener(&self) -> Result<UnixListener> {
+        self.bind_listener_with_setup(|listener, path| {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| Error::io("无法保护 socket", e))?;
+            listener
+                .set_nonblocking(true)
+                .map_err(|e| Error::io("无法设置 socket 模式", e))
+        })
+    }
+
+    fn bind_listener_with_setup(
+        &self,
+        setup: impl FnOnce(&UnixListener, &Path) -> Result<()>,
+    ) -> Result<UnixListener> {
+        self.validate()?;
+        if fs::symlink_metadata(&self.socket).is_ok() {
+            return Err(Error::new(
+                "INSECURE_RUNTIME",
+                "正式 socket 路径已存在，拒绝覆盖",
+            ));
+        }
+        // 名称短于daemon.sock，保留原有Unix socket路径长度契约。
+        let pending = self.root.join(".socket");
+        if let Ok(metadata) = fs::symlink_metadata(&pending) {
+            if !metadata.file_type().is_socket() || metadata.uid() != uid() {
+                return Err(Error::new(
+                    "INSECURE_RUNTIME",
+                    "临时 socket 路径无效，拒绝删除",
+                ));
+            }
+            fs::remove_file(&pending).map_err(|e| Error::io("无法清理旧临时 socket", e))?;
+        }
+        let listener =
+            UnixListener::bind(&pending).map_err(|e| Error::io("无法创建本地 socket", e))?;
+        if let Err(error) = setup(&listener, &pending).and_then(|()| {
+            fs::rename(&pending, &self.socket).map_err(|e| Error::io("无法发布本地 socket", e))
+        }) {
+            let _ = fs::remove_file(&pending);
+            return Err(error);
+        }
+        Ok(listener)
+    }
+
     pub fn lock(&self) -> Result<File> {
         let path = self.root.join("daemon.lock");
         let file = secure_file(&path)?;
@@ -231,6 +276,63 @@ pub fn export_image(source: &Path, destination: &Path) -> Result<PathBuf> {
 mod scope_tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn given_socket_initialization_when_configuring_permissions_then_final_path_stays_unpublished()
+    {
+        let root = PathBuf::from(format!(
+            "/tmp/socket-publish-{}",
+            crate::protocol::random_id().unwrap()
+        ));
+        let runtime = Runtime::from_values(
+            Scope::Chrome,
+            "COPIS_CHROME_RUNTIME_DIR",
+            "chrome-desktop-cli",
+            Some(root.clone().into_os_string()),
+            None,
+        )
+        .unwrap();
+        runtime.prepare().unwrap();
+        let listener = runtime
+            .bind_listener_with_setup(|listener, path| {
+                assert!(
+                    !runtime.socket.exists(),
+                    "客户端不应看到尚未设为0600的socket"
+                );
+                assert_ne!(path, runtime.socket);
+                runtime.validate().unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+                listener.set_nonblocking(true).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        runtime.validate().unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&runtime.socket)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(std::os::unix::net::UnixStream::connect(&runtime.socket).is_ok());
+        drop(listener);
+        fs::remove_file(&runtime.socket).unwrap();
+        // 配置失败不发布半成品，也不能覆盖临时路径上的普通文件。
+        let failed =
+            runtime.bind_listener_with_setup(|_, _| Err(Error::new("TEST_FAILED", "模拟配置失败")));
+        assert_eq!(failed.unwrap_err().code, "TEST_FAILED");
+        assert!(!runtime.socket.exists());
+        let pending = root.join(".socket");
+        assert!(!pending.exists());
+        fs::write(&pending, b"keep").unwrap();
+        assert_eq!(
+            runtime.bind_listener().unwrap_err().code,
+            "INSECURE_RUNTIME"
+        );
+        assert_eq!(fs::read(&pending).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn given_runtime_override_for_each_mode_then_keep_private_roots_separate() {

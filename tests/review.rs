@@ -299,11 +299,32 @@ fn given_start_loser_when_winner_takes_longer_than_200ms_then_start_waits_for_wi
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_millis(700));
-    let _listener = UnixListener::bind(&runtime.socket).unwrap();
-    fs::set_permissions(&runtime.socket, fs::Permissions::from_mode(0o600)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // 使用生产发布路径模拟获锁者，不能让fixture自身暴露未完成权限设置的socket。
+    let listener = runtime.bind_listener().unwrap();
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
     while child.try_wait().unwrap().is_none() {
         assert!(Instant::now() < deadline);
+        // 冷启动较慢时，子进程可能在socket发布后才进入首次status查询。
+        // fixture必须响应协议，不能只listen却让合法客户端一直等待。
+        while let Ok((mut stream, _)) = listener.accept() {
+            use std::io::{BufReader, Write};
+            // available()的探测连接会立即关闭；与生产worker一致，忽略已失效连接。
+            if stream.set_nonblocking(false).is_err()
+                || stream
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .is_err()
+            {
+                continue;
+            }
+            if let Ok(Some(request)) =
+                copis_chrome::protocol::read_message(&mut BufReader::new(&stream))
+            {
+                assert_eq!(request["request"]["action"], "status");
+                let reply =
+                    copis_chrome::protocol::response(Ok(json!({"running":true,"connected":false})));
+                let _ = writeln!(stream, "{reply}");
+            }
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
     let output = child.wait_with_output().unwrap();
