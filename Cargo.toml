@@ -1,0 +1,18 @@
+[package]
+name = "copis-chrome"
+version = "0.1.11"
+edition = "2021"
+rust-version = "1.89"
+description = "独立的 macOS Chrome 桌面自动化 CLI（Rust + Swift）"
+license = "AGPL-3.0-only"
+publish = false
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
