@@ -25,7 +25,14 @@ env = dict(os.environ, COPIS_CHROME_RUNTIME_DIR=str(scratch / 'runtime'))
 fixture = '''<!doctype html><meta charset="utf-8"><title>CopisCoordinateFixture</title>
 <style>body{margin:0}button,input{position:absolute;left:160px;width:240px;height:56px;border:0;border-radius:0;box-sizing:border-box}#top{top:90px;background:#f00}#middle{top:290px;background:#0f0}#bottom{top:490px;background:#00f}</style>
 <button id="top">Copis target top</button><input id="middle" aria-label="Copis target middle"><button id="bottom">Copis target bottom</button>
-<script>document.addEventListener('click', e=>{document.title='CopisCoordinateFixture:'+JSON.stringify({target:e.target.id,screenX:e.screenX,screenY:e.screenY,clientX:e.clientX,clientY:e.clientY})})</script>'''.encode()
+<script>
+let movements=0,trusted=true;
+document.addEventListener('mousemove',e=>{movements++;trusted=trusted&&e.isTrusted});
+document.addEventListener('click',e=>{
+ document.title='CopisCoordinateFixture:'+JSON.stringify({target:e.target.id,screenX:e.screenX,screenY:e.screenY,clientX:e.clientX,clientY:e.clientY,movements,trusted,detail:e.detail});
+ movements=0;trusted=true;
+});
+</script>'''.encode()
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -140,15 +147,30 @@ try:
             error = [round(event['screenX'] - screen_x, 2), round(event['screenY'] - screen_y, 2)]
             print('LANDING', json.dumps({'target': target, 'image': [x, y], 'expectedScreen': [screen_x, screen_y], 'event': event, 'error': error}))
             assert max(abs(v) for v in error) <= 2, error
+            # 后两次目标相距200px，应有多个真实mousemove事件，而非一次瞬移。
+            if target != 'top':
+                assert event['movements'] >= 3 and event['trusted'], ('缺少真实连续移动', event)
             if target == 'middle':
                 call('type', '--connection', connection, '--frame', observed['frameId'], '--text', '名筑')
                 value = ax(owned.pid, window['windowId'], 'element', 'Copis target middle')['value']
                 assert value == '名筑', value
                 call('press', '--connection', connection, '--frame', observed['frameId'], '--key', 'Cmd+A')
                 call('press', '--connection', connection, '--frame', observed['frameId'], '--key', 'Backspace')
+        # 双击只在第一下之前移动，第二下仍保留系统double-click语义。
+        marker = markers['top']
+        receipt = call('click', '--connection', connection, '--frame', observed['frameId'], '--x', round(marker['x']), '--y', round(marker['y']), '--count', 2)
+        deadline = time.monotonic() + 2
+        while True:
+            title = ax(owned.pid, window['windowId'], 'title')['title']
+            event = json.JSONDecoder().raw_decode(title.split(':', 1)[1])[0] if ':' in title else {}
+            if event.get('detail') == 2 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        assert event.get('target') == 'top' and event.get('detail') == 2 and event.get('movements') == 0, ('双击之间不应重新移动', event)
+        print('PASS: 实际页面收到连续mousemove且双击之间无重复移动', geometry)
     call('disconnect', '--connection', connection)
     assert tested_geometries > 0, '主屏逻辑区域不足，无法验证坐标；需要至少容纳一个测试窗口'
-    print(f'PASS: {tested_geometries} 种窗口几何、三个色块图像位置与 AX 几何一致，图像坐标点击落点正确；同帧多次输入、中文输入通过')
+    print(f'PASS: {tested_geometries} 种窗口几何、图像与落点正确、连续拟人移动、双击只移动一次；同帧输入通过')
 finally:
     try:
         call('daemon', 'stop')

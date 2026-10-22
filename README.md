@@ -39,11 +39,11 @@ cd macos-control-cli
 bash ./build.sh
 ```
 
-On Apple Silicon, version 0.2.0 produces:
+On Apple Silicon, version 0.2.1 produces:
 
 ```text
 dist/
-  copis-chrome-0.2.0-darwin-arm64/
+  copis-chrome-0.2.1-darwin-arm64/
     copis-chrome
     desktop-control
     copis-chrome-helper
@@ -55,14 +55,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.2.0-darwin-arm64.tar.gz
-  copis-chrome-0.2.0-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.2.1-darwin-arm64.tar.gz
+  copis-chrome-0.2.1-darwin-arm64.tar.gz.sha256
 ```
 
 Intel uses `darwin-x64`. `bash ./build.sh debug` builds a debug package. Keep the CLI entry points, native helper, and `assets/` together at a stable installation path. You can use the build output directly or copy the entire versioned directory to a location you control; do not copy only the CLI executable.
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.0-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.1-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -73,7 +73,7 @@ Use the actual version/architecture directory produced by your build. The defaul
 Keep `desktop-control`, `copis-chrome-helper`, and `assets/` together. Example after a native ARM build:
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.0-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.1-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit
@@ -155,6 +155,14 @@ This is a format example, not a complete CLI response. `bbox` encloses **text**,
 | `daemon start\|stop\|status` | Manage the local daemon |
 
 Use `"$COPIS_CHROME_CLI" --help` for arguments and [USAGE.md](USAGE.md) for the key whitelist, error behavior, and detailed examples. Successful file selection does **not** mean an upload completed or a post was published.
+
+## Smooth click movement (v0.2.1)
+
+Each `click` now moves from the current cursor location along a mildly curved cubic Bézier path with minimum-jerk timing, then clicks the **unchanged target coordinate**. The start is read after takeover/activation, not before the countdown. Planned movement takes about 150–700 ms, with a target sampling rate of 60 Hz; this is not a real-time guarantee. No random click offsets, overshoot, or target jitter are added. A double click moves only before the first click; scroll and drag behavior are not changed.
+
+Movement is bounded by active display regions. A curve that would leave the display falls back to a smoothly timed straight path; a route through a gap between displays is rejected before movement. Pause/cancel stops movement without completing or replaying the click. Window geometry is checked during movement, and the original focus/pointer checks run again before mouse-down. Screenshots and OCR coordinates keep the existing contract.
+
+Details and verification: [cursor motion](docs/CURSOR-MOTION.md). This feature improves visible movement, not target recognition or isolation from the user's mouse.
 
 ## Agent safety and lifecycle
 

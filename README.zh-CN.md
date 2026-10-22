@@ -39,11 +39,11 @@ cd macos-control-cli
 bash ./build.sh
 ```
 
-Apple Silicon 上的 0.2.0 产物：
+Apple Silicon 上的 0.2.1 产物：
 
 ```text
 dist/
-  copis-chrome-0.2.0-darwin-arm64/
+  copis-chrome-0.2.1-darwin-arm64/
     copis-chrome
     desktop-control
     copis-chrome-helper
@@ -55,14 +55,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.2.0-darwin-arm64.tar.gz
-  copis-chrome-0.2.0-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.2.1-darwin-arm64.tar.gz
+  copis-chrome-0.2.1-darwin-arm64.tar.gz.sha256
 ```
 
 Intel 后缀为 `darwin-x64`。`bash ./build.sh debug` 可生成调试包。可以直接使用构建目录，也可将整个版本目录复制到稳定安装位置；CLI 入口、原生 helper 和 `assets/` 必须保持相邻，不要只复制 CLI。
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.0-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.1-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -73,7 +73,7 @@ export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.0-darwin-arm64/copis-chrome"
 `desktop-control` 与 `copis-chrome-helper`、`assets/` 保持在同一目录。ARM 本机构建示例：
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.0-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.1-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit
@@ -155,6 +155,14 @@ FRAME_ID='your-frame-id'
 | `daemon start\|stop\|status` | 管理本地守护进程 |
 
 完整参数通过 `"$COPIS_CHROME_CLI" --help` 查看；按键白名单和错误处理见 [USAGE.md](USAGE.md)。文件选择成功**不代表**网页上传完成或已发布。
+
+## 点击前平滑移动（v0.2.1）
+
+每次 `click` 在倒计时和激活结束后读取当前光标位置，沿轻微弧形的三次 Bézier 路径、使用 minimum-jerk 时间缓动移动，再点击**原定坐标**。计划移动时长约150–700ms，目标采样60Hz，不是硬实时保证。终点不随机偏移，不增加过冲、目标附近抖动或反复修正。双击只在第一下前移动一次；不改变滚动和拖动行为。
+
+轨迹限制在有效屏幕区域内；曲线越界时回退为平滑直线，经过多屏间无显示区域的路线在移动前拒绝。暂停/取消后停止移动，不补完或重放点击；移动中复核窗口几何，按下前仍执行原焦点/指针归属校验。截图与OCR坐标契约不变。
+
+算法、边界与验证见[鼠标轨迹说明](docs/CURSOR-MOTION.md)。该功能只改善可见移动，不提高目标识别准确率，也不隔离用户鼠标。
 
 ## Agent 安全与生命周期
 

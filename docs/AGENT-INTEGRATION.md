@@ -1,6 +1,6 @@
 # Agent 接入 Chrome Control CLI
 
-本文面向能够执行本机命令的 Agent，以及为 Agent 编写工具适配器的开发者。命令与响应按 `copis-chrome v0.2.0`、JSON 协议 `1` 核对。快速交给 Agent 使用时，提供 CLI 绝对路径并复制第 9 节的调用约定；程序化集成可参考第 7 节。
+本文面向能够执行本机命令的 Agent，以及为 Agent 编写工具适配器的开发者。命令与响应按 `copis-chrome v0.2.1`、JSON 协议 `1` 核对。快速交给 Agent 使用时，提供 CLI 绝对路径并复制第 9 节的调用约定；程序化集成可参考第 7 节。
 
 接入方式是 **执行 CLI → 解析 JSON → 读取本地截图 → 决策 → 执行动作 → 观察确认**。CLI 提供原生窗口截图、鼠标和键盘输入；页面理解、操作决策和任务结果判断由调用方完成。它没有 DOM、CSS selector、按网页文字定位按钮或执行页面 JavaScript 的接口。
 
@@ -16,7 +16,7 @@
 将对应架构的归档解压到稳定位置。ARM Mac 使用 `darwin-arm64`，Intel Mac 使用 `darwin-x64`。保持可执行文件与资源目录在同一个版本目录：
 
 ```text
-copis-chrome-0.2.0-darwin-arm64/
+copis-chrome-0.2.1-darwin-arm64/
 ├── copis-chrome
 ├── copis-chrome-helper
 ├── module.json
@@ -26,7 +26,7 @@ copis-chrome-0.2.0-darwin-arm64/
 配置调用方使用的绝对路径，然后检查版本：
 
 ```bash
-export COPIS_CHROME_CLI='/绝对路径/copis-chrome-0.2.0-darwin-arm64/copis-chrome'
+export COPIS_CHROME_CLI='/绝对路径/copis-chrome-0.2.1-darwin-arm64/copis-chrome'
 "$COPIS_CHROME_CLI" --version
 "$COPIS_CHROME_CLI" --help
 ```
@@ -426,3 +426,7 @@ Observe 自动增加可选 `ocr:{status,items,truncated}`。每条 item 仅含 `
 通用入口使用 `COPIS_DESKTOP_RUNTIME_DIR`，默认 `~/.copis/desktop-control-cli`；Chrome入口及runtime继续兼容。每个连接固定PID/windowId/bundleId，不能由单次动作指定另一个应用。跨模式后台请求被拒绝，不能用另一入口停止不属于自己的后台。
 
 控制条显示应用名和窗口标题。OCR仍仅提供文字原像素位置，不推测控件类型；输入仍需前台焦点和指针归属。原生文件选择目前仅保留Chrome适配，其他应用返回FILE_DIALOG_UNSUPPORTED；需要额外对话框能力时应明确适配，不能绕过校验。
+
+## v0.2.1 点击前平滑移动
+
+Click的参数、frameId与原像素坐标不变。CLI内部在接管/激活后读取当前鼠标位置，沿Bézier与minimum-jerk缓动轨迹移动，再点击原目标。额外计划时长150–700ms、约60Hz，实际受调度与安全查询影响，不是新命令总超时。双击只在第一下前移动一次。暂停/取消/窗口变化会中止，不补完或重放输入；不要因看到鼠标尚在移动就并发发送另一动作。屏幕外或跨屏空洞无安全路线时失败，不用裸事件兜底。

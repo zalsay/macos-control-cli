@@ -286,17 +286,33 @@ final class ChromeInput {
             Thread.sleep(forTimeInterval: 0.008)
             try cancellation.checkInput(permit)
         }
-        switch request.action {
-        case "click", "scroll":
-            guard let point = request.point else { throw HelperFailure.invalidArgument }
-            try verify(pointer: point)
+        func movePointer(to point: CGPoint) throws {
             guard let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
                 throw eventFailure()
             }
             move.flags = []
             try cancellation.post(move, permit: permit)
-            Thread.sleep(forTimeInterval: 0.01)
+        }
+        switch request.action {
+        case "click", "scroll":
+            guard let point = request.point else { throw HelperFailure.invalidArgument }
+            try verify(pointer: point)
             if request.action == "click" {
+                // 激活/接管结束后才读取当前位置，不沿用倒计时之前的鼠标快照。
+                guard let current = CGEvent(source: nil)?.location else { throw eventFailure() }
+                let motion = try makeCursorMotion(from: current, to: point, displays: cursorDisplayBounds(),
+                                                  bend: Double.random(in: -1...1), timing: Double.random(in: -1...1))
+                var lastGeometryCheck = ProcessInfo.processInfo.systemUptime
+                try playCursorMotion(motion, check: {
+                    try self.cancellation.checkInput(permit)
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if now - lastGeometryCheck >= 0.05 {
+                        try self.desktop.verifyGeometry(target, expected: bounds)
+                        lastGeometryCheck = now
+                    }
+                }, emit: { try movePointer(to: $0) })
+                Thread.sleep(forTimeInterval: 0.01)
+                // 一次click命令（包括双击）只规划一次移动；每次按下前仍执行原精确焦点/指针校验。
                 for index in 1...request.clickCount {
                     let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
                     let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
@@ -307,6 +323,9 @@ final class ChromeInput {
                     if index < request.clickCount { Thread.sleep(forTimeInterval: 0.03) }
                 }
             } else {
+                // 滚动保留原有移动行为，不引入拟人轨迹或拖动事件。
+                try movePointer(to: point)
+                Thread.sleep(forTimeInterval: 0.01)
                 try verify(pointer: point)
                 guard let scroll = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1,
                                            wheel1: Int32(-request.deltaY), wheel2: 0, wheel3: 0) else { throw eventFailure() }
