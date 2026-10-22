@@ -5,6 +5,21 @@ func require(_ value: Bool, _ message: String) {
 }
 func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
 func pump(_ duration: TimeInterval = 0.3) { RunLoop.main.run(until: Date(timeIntervalSinceNow: duration)) }
+func requireVisibleControls(_ panel: NSWindow) {
+    guard let background = panel.contentView else { require(false, "缺少控制条内容区"); return }
+    background.layoutSubtreeIfNeeded()
+    let views = descendants(background)
+    // stringValue 正确不代表可见；底边偏移写反时，控件仍存在但全部落到内容区外。
+    for identifier in ["copis-chrome-toast-primary", "copis-chrome-toast-secondary", "copis-chrome-toast-logo",
+                       "copis-chrome-execute", "copis-chrome-pause"] {
+        guard let view = views.first(where: { $0.accessibilityIdentifier() == identifier }) else {
+            require(false, "缺少控件：\(identifier)"); return
+        }
+        let rect = view.convert(view.bounds, to: background)
+        require(rect.width > 0 && rect.height > 0 && background.bounds.contains(rect) && !view.isHiddenOrHasHiddenAncestor,
+                "控件必须完整位于内容区：\(identifier)，frame=\(rect)，content=\(background.bounds)")
+    }
+}
 _ = NSApplication.shared.setActivationPolicy(.accessory)
 guard let screen = NSScreen.screens.first, let previousPID = NSWorkspace.shared.frontmostApplication?.processIdentifier else { exit(2) }
 let toast = ChromeControlToast()
@@ -32,7 +47,8 @@ require(panel.frame.height == 72 && background.material == .hudWindow && backgro
         "保持当前毛玻璃，仅压缩为顶部72pt提示条")
 require(!panel.canBecomeKey && !panel.canBecomeMain, "不能抢键盘焦点")
 require(secondary.stringValue.contains("将点击"), "倒计时显示待执行操作")
-background.layoutSubtreeIfNeeded()
+require(!primary.stringValue.isEmpty, "主标题不能空白")
+requireVisibleControls(panel)
 for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
     guard let button = panel.standardWindowButton(kind), let parent = button.superview else { exit(1) }
     let rect = parent.convert(button.frame, to: background)
@@ -40,10 +56,12 @@ for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
 }
 now += 3; pump()
 require(secondary.stringValue == "正在：点击", "运行时显示当前操作")
+requireVisibleControls(panel)
 toast.updateOperation(target: target, label: "输入文字", finished: false, succeeded: true, cancellation: cancellation, generation: 0)
 require(secondary.stringValue == "正在：输入文字", "输入状态不包含输入内容")
 toast.updateOperation(target: target, label: nil, finished: true, succeeded: true, cancellation: cancellation, generation: 0)
 require(secondary.stringValue == "已完成：输入文字", "完成状态不能继续假装在执行")
+requireVisibleControls(panel)
 let original = panel.frame
 anchorLock.lock()
 anchor = ChromeToastAnchor(window: WindowBounds(x: 220, y: 160, width: 1000, height: 700), toolbar: WindowBounds(x: 220, y: 160, width: 1000, height: 86))
@@ -56,6 +74,15 @@ toast.avoidPointer(covered)
 require(panel.frame.minY == y && !panel.frame.contains(CGPoint(x: covered.x, y: screen.frame.maxY - covered.y)), "只横向避让，不进入网页")
 let avoided = panel.frame; pump()
 require(panel.frame == avoided, "定位timer不能把避让后的控制条移回鼠标目标")
+// Given 最窄的受支持工具栏，Then 文本可以截断，但两行文字、Logo 与操作按钮不能被裁出窗口。
+anchorLock.lock()
+anchor = ChromeToastAnchor(window: WindowBounds(x: 220, y: 160, width: 328, height: 700),
+                          toolbar: WindowBounds(x: 220, y: 160, width: 328, height: 86))
+anchorLock.unlock()
+try toast.show(over: anchor!.window, target: target, title: String(repeating: "很长的页面标题", count: 20), toolbar: anchor!.toolbar,
+               anchorProvider: provider, cancellation: cancellation, generation: 0)
+require(panel.frame.width == 320, "覆盖最小320pt提示条")
+requireVisibleControls(panel)
 anchorLock.lock(); blockProbe = true; anchorLock.unlock()
 pump(0.4)
 require(probeStarted.wait(timeout: .now()) == .success, "模拟的定位查询必须已在后台等待")
@@ -90,4 +117,4 @@ do {
 } catch let error as HelperFailure { require(error.code == "USER_PAUSED", "布局失败应保留暂停门禁") }
 cancellation.cancel()
 require(NSWorkspace.shared.frontmostApplication?.processIdentifier == previousPID, "整个对象回归不切换用户应用")
-print("PASS: 顶部紧凑毛玻璃、当前操作/完成状态、窗口跟随、横向避让与关闭不复活；未截图/投递输入")
+print("PASS: 顶部紧凑毛玻璃、560/320pt控件可见范围、当前操作/完成状态、窗口跟随、横向避让与关闭不复活；未截图/投递输入")

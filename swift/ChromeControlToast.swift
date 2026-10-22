@@ -497,18 +497,19 @@ final class ChromeControlToast: NSObject {
             view.translatesAutoresizingMaskIntoConstraints = false
             background.addSubview(view)
         }
+        // bottomAnchor 向内容区内的偏移必须为负，正值会把紧凑模式控件排到毛玻璃外。
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 12),
             icon.widthAnchor.constraint(equalToConstant: 36), icon.heightAnchor.constraint(equalToConstant: 36),
-            icon.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? 25 : 12),
+            icon.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? -25 : 12),
             stateLabel.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
             stateLabel.trailingAnchor.constraint(equalTo: executeButton.leadingAnchor, constant: -10),
-            stateLabel.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? 36 : 4),
+            stateLabel.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? -36 : 4),
             detailLabel.leadingAnchor.constraint(equalTo: stateLabel.leadingAnchor),
             detailLabel.trailingAnchor.constraint(equalTo: stateLabel.trailingAnchor),
-            detailLabel.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? 16 : 24),
+            detailLabel.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? -16 : 24),
             executeButton.widthAnchor.constraint(equalToConstant: 52), executeButton.heightAnchor.constraint(equalToConstant: 28),
-            executeButton.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? 25 : 12),
+            executeButton.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? -25 : 12),
             pauseButton.leadingAnchor.constraint(equalTo: executeButton.trailingAnchor, constant: 8),
             pauseButton.widthAnchor.constraint(equalToConstant: 52), pauseButton.heightAnchor.constraint(equalToConstant: 28),
             pauseButton.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -12),
