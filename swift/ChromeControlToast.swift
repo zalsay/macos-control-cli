@@ -24,6 +24,75 @@ func chromeToastFrame(window: WindowBounds, screens: [ChromeToastScreen]) -> CGR
                   width: width, height: height)
 }
 
+struct ChromeToastAnchor {
+    let window: WindowBounds
+    let toolbar: WindowBounds?
+}
+
+func sameToastTarget(_ a: TargetWindow, _ b: TargetWindow) -> Bool {
+    a.windowId == b.windowId && a.pid == b.pid && (a.bundleId ?? "com.google.Chrome") == (b.bundleId ?? "com.google.Chrome")
+}
+
+struct ChromePreparedToastAnchor {
+    let target: TargetWindow
+    let anchor: ChromeToastAnchor
+
+    func forFileSelection(target current: TargetWindow, window: WindowBounds, selecting: TargetWindow?) -> ChromeToastAnchor? {
+        guard let selecting, sameToastTarget(selecting, current), sameToastTarget(target, current),
+              anchor.window.matches(window), anchor.toolbar != nil else { return nil }
+        return anchor
+    }
+}
+
+private func appKitRect(_ bounds: WindowBounds, primary: ChromeToastScreen) -> CGRect {
+    CGRect(x: bounds.x, y: primary.frame.maxY - bounds.y - bounds.height, width: bounds.width, height: bounds.height)
+}
+
+func chromeToastToolbarFrame(window: WindowBounds, toolbar: WindowBounds, screens: [ChromeToastScreen]) -> CGRect? {
+    guard let primary = screens.first, toolbar.y == window.y, toolbar.x == window.x,
+          toolbar.width == window.width, toolbar.height <= min(160, window.height) else { return nil }
+    let windowRect = appKitRect(window, primary: primary)
+    let region = appKitRect(toolbar, primary: primary)
+    guard windowRect.contains(region) else { return nil }
+    let visible = screens.map { region.intersection($0.visibleFrame) }.filter { !$0.isNull }
+        .max { $0.width * $0.height < $1.width * $1.height }
+    guard let visible, visible.width >= 328, visible.height >= 80 else { return nil }
+    let width = min(560, visible.width - 8)
+    return CGRect(x: visible.midX - width / 2, y: visible.maxY - 4 - 72, width: width, height: 72)
+}
+
+func chromeToastToolbarFrameAvoidingPointer(frame: CGRect, screenPoint: CGPoint, toolbar: WindowBounds,
+                                          screens: [ChromeToastScreen]) -> CGRect {
+    guard let primary = screens.first else { return frame }
+    let point = CGPoint(x: screenPoint.x, y: primary.frame.maxY - screenPoint.y)
+    guard frame.insetBy(dx: -16, dy: -4).contains(point) else { return frame }
+    let region = appKitRect(toolbar, primary: primary)
+    let candidates = [
+        CGRect(x: region.minX + 4, y: frame.minY, width: max(0, point.x - 20 - region.minX - 4), height: frame.height),
+        CGRect(x: point.x + 20, y: frame.minY, width: max(0, region.maxX - 4 - point.x - 20), height: frame.height)
+    ].sorted { $0.width > $1.width }
+    for space in candidates where space.width >= 320 {
+        let candidate = CGRect(x: space.minX, y: frame.minY, width: min(frame.width, space.width), height: frame.height)
+        if !candidate.contains(point), region.contains(candidate), screens.contains(where: { $0.visibleFrame.contains(candidate) }) {
+            return candidate
+        }
+    }
+    // 顶部无安全空间时交给原指针校验拒绝，绝不移进网页。
+    return frame
+}
+
+func chromeToastOperationLabel(action: String, key: String = "", clickCount: Int = 1) -> String {
+    switch action {
+    case "click": return clickCount == 2 ? "双击" : "点击"
+    case "scroll": return "滚动"
+    case "type": return "输入文字"
+    case "press": return allowedKeys[key] == nil ? "按键" : "按键 \(key)"
+    case "select-file": return "选择文件"
+    case "observe": return "观察页面"
+    default: return "等待下一步"
+    }
+}
+
 func shouldPauseChromeForPointer(sourcePID: Int64?, helperPID: pid_t, insideControls: Bool) -> Bool {
     !insideControls && sourcePID != Int64(helperPID)
 }
@@ -63,6 +132,11 @@ final class ChromeControlToast: NSObject {
         let target: TargetWindow
         var title: String
         let cancellation: InputCancellation
+        var anchor: ChromeToastAnchor
+        var operation: String
+        var operationFinished = false
+        var operationSucceeded = true
+        var anchorProvider: (() -> ChromeToastAnchor?)?
     }
 
     private var panel: ChromeToastPanel?
@@ -70,6 +144,11 @@ final class ChromeControlToast: NSObject {
     private var activationObserver: NSObjectProtocol?
     private var pointerMonitor: Any?
     private var countdownTimer: Timer?
+    private var anchorTimer: Timer?
+    private let anchorQueue = DispatchQueue(label: "com.copis.chrome-cli.toast-anchor", qos: .userInitiated)
+    private var anchorRevision: UInt64 = 0
+    private var anchorCheckInFlight = false
+    private var compactLayout = false
     private let desktopMode: Bool
     private let logoURL: URL
     private let stateLabel = NSTextField(labelWithString: "")
@@ -84,13 +163,28 @@ final class ChromeControlToast: NSObject {
         super.init()
     }
 
-    func show(over window: WindowBounds, target: TargetWindow, title: String = "",
+    func show(over window: WindowBounds, target: TargetWindow, title: String = "", toolbar: WindowBounds? = nil,
+              operation: String? = nil, anchorProvider: (() -> ChromeToastAnchor?)? = nil,
               cancellation: InputCancellation, generation: UInt64) throws {
         let lease = try cancellation.beginExecution(generation: generation)
+        let screens = NSScreen.screens.map { ChromeToastScreen(frame: $0.frame, visibleFrame: $0.visibleFrame) }
+        let frame = toolbar.flatMap { chromeToastToolbarFrame(window: window, toolbar: $0, screens: screens) }
+            ?? (toolbar == nil ? chromeToastFrame(window: window, screens: screens) : nil)
+        guard let frame else {
+            _ = cancellation.pauseExecution(lease: lease)
+            dismiss()
+            throw HelperFailure(code: "FOCUS_UNVERIFIED", message: "目标窗口顶部区域不足以显示接管提示，未发送输入")
+        }
         let isNewExecution = execution?.lease != lease || execution?.cancellation !== cancellation
         if isNewExecution { stopWatching() }
+        let previous = execution
         execution = Execution(lease: lease, generation: generation, target: target,
-                              title: title.isEmpty ? (desktopMode ? "当前应用窗口" : "当前Chrome页面") : title, cancellation: cancellation)
+                              title: title.isEmpty ? (desktopMode ? "当前应用窗口" : "当前Chrome页面") : title,
+                              cancellation: cancellation, anchor: ChromeToastAnchor(window: window, toolbar: toolbar),
+                              operation: operation ?? (isNewExecution ? "等待下一步" : previous?.operation ?? "等待下一步"),
+                              operationFinished: operation == nil && !isNewExecution ? previous?.operationFinished ?? false : false,
+                              operationSucceeded: operation == nil && !isNewExecution ? previous?.operationSucceeded ?? true : true,
+                              anchorProvider: anchorProvider)
         if isNewExecution {
             guard cancellation.onExecutionEnd(lease: lease, handler: { [weak self, weak cancellation] in
                 DispatchQueue.main.async { [weak self, weak cancellation] in
@@ -103,14 +197,16 @@ final class ChromeControlToast: NSObject {
             }
             watchExecution(lease: lease, cancellation: cancellation)
         }
-        let screens = NSScreen.screens.map { ChromeToastScreen(frame: $0.frame, visibleFrame: $0.visibleFrame) }
-        guard let frame = chromeToastFrame(window: window, screens: screens) else {
-            throw HelperFailure(code: "FOCUS_UNVERIFIED", message: "无法在目标屏幕显示接管倒计时，未发送输入")
+        let compact = toolbar != nil
+        if panel == nil || compactLayout != compact {
+            panel?.orderOut(nil)
+            panel = makePanel(compact: compact)
+            compactLayout = compact
         }
-        if panel == nil { panel = makePanel() }
         try cancellation.effect(generation: generation) { panel?.setFrame(frame, display: false) }
         panel?.contentView?.layoutSubtreeIfNeeded()
         refresh(lease: lease)
+        startAnchorTimer()
         // 先展示控制条再开始计时，不能把 UI 创建时间计入用户的三秒准备时间。
         cancellation.startCountdown(lease: lease)
         try cancellation.check(generation)
@@ -156,13 +252,14 @@ final class ChromeControlToast: NSObject {
         switch state {
         case .countdown(let seconds):
             stateLabel.stringValue = "AI即将接管\(page)"
-            detailLabel.stringValue = "\(seconds)秒后接管 · 请松开鼠标"
+            detailLabel.stringValue = "\(seconds)秒后接管 · 请松开鼠标" + (execution.operation == "等待下一步" ? "" : " · 将\(execution.operation)")
         case .running:
             stateLabel.stringValue = "AI正在操作\(page)"
-            detailLabel.stringValue = "您可以随时暂停并接管"
+            detailLabel.stringValue = execution.operation == "等待下一步" ? "您可以随时暂停并接管" :
+                "\(execution.operationFinished ? (execution.operationSucceeded ? "已完成" : "未完成") : "正在")：\(execution.operation)"
         case .paused:
             stateLabel.stringValue = "AI已暂停\(page)"
-            detailLabel.stringValue = "点击继续后将重新倒计时 3 秒"
+            detailLabel.stringValue = (execution.operation == "等待下一步" ? "" : "\(execution.operation) · ") + "点击继续后将重新倒计时 3 秒"
         }
     }
 
@@ -198,6 +295,65 @@ final class ChromeControlToast: NSObject {
         current.title = title.isEmpty ? (desktopMode ? "当前应用窗口" : "当前Chrome页面") : title
         execution = current
         updateLabels(state: state, execution: current)
+    }
+
+    func updateOperation(target: TargetWindow, label: String?, finished: Bool, succeeded: Bool,
+                         cancellation: InputCancellation, generation: UInt64) {
+        guard var current = execution, current.target.windowId == target.windowId, current.target.pid == target.pid,
+              current.cancellation === cancellation, current.generation == generation,
+              cancellation.snapshot() == generation, panel?.isVisible == true,
+              let state = cancellation.executionState(lease: current.lease) else { return }
+        if let label { current.operation = label }
+        current.operationFinished = finished
+        current.operationSucceeded = succeeded
+        execution = current
+        updateLabels(state: state, execution: current)
+    }
+
+    private func startAnchorTimer() {
+        anchorTimer?.invalidate()
+        anchorRevision &+= 1
+        guard execution?.anchorProvider != nil else { return }
+        let revision = anchorRevision
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self, let current = self.execution, let panel = self.panel, panel.isVisible,
+                  !self.anchorCheckInFlight, current.cancellation.snapshot() == current.generation,
+                  let provider = current.anchorProvider else { return }
+            self.anchorCheckInFlight = true
+            // AX远程查询不能阻塞暂停/关闭按钮；只允许一个在途查询，不堆积任务。
+            self.anchorQueue.async { [weak self] in
+                let anchor = provider()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.anchorCheckInFlight = false
+                    guard self.anchorRevision == revision else { return }
+                    guard var latest = self.execution, let panel = self.panel, panel.isVisible,
+                          self.isCurrent(lease: current.lease, cancellation: current.cancellation),
+                          current.cancellation.snapshot() == current.generation else { return }
+                    guard let anchor else {
+                        _ = latest.cancellation.pauseExecution(lease: latest.lease)
+                        self.dismiss()
+                        return
+                    }
+                    if !anchor.window.matches(latest.anchor.window) || anchor.toolbar?.rect != latest.anchor.toolbar?.rect {
+                        let screens = NSScreen.screens.map { ChromeToastScreen(frame: $0.frame, visibleFrame: $0.visibleFrame) }
+                        let frame = anchor.toolbar.flatMap { chromeToastToolbarFrame(window: anchor.window, toolbar: $0, screens: screens) }
+                            ?? (anchor.toolbar == nil ? chromeToastFrame(window: anchor.window, screens: screens) : nil)
+                        guard let frame else {
+                            _ = latest.cancellation.pauseExecution(lease: latest.lease)
+                            self.dismiss()
+                            return
+                        }
+                        latest.anchor = anchor
+                        self.execution = latest
+                        do { try latest.cancellation.effect(generation: latest.generation) { panel.setFrame(frame, display: true) } }
+                        catch { self.dismiss() }
+                    }
+                }
+            }
+        }
+        anchorTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func isCurrent(lease: UInt64, cancellation: InputCancellation) -> Bool {
@@ -243,6 +399,9 @@ final class ChromeControlToast: NSObject {
     }
 
     private func stopWatching() {
+        anchorRevision &+= 1
+        anchorTimer?.invalidate()
+        anchorTimer = nil
         stopCountdownTimer()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
         activationObserver = nil
@@ -258,19 +417,24 @@ final class ChromeControlToast: NSObject {
 
     deinit { stopWatching() }
 
-    func avoidPointer(_ screenPoint: CGPoint) {
+    @discardableResult
+    func avoidPointer(_ screenPoint: CGPoint) -> Bool {
         guard let execution, execution.cancellation.executionPaused(lease: execution.lease) != nil,
-              let panel, panel.isVisible else { return }
+              let panel, panel.isVisible else { return false }
         let screens = NSScreen.screens.map { ChromeToastScreen(frame: $0.frame, visibleFrame: $0.visibleFrame) }
-        let moved = chromeToastFrameAvoidingPointer(frame: panel.frame, screenPoint: screenPoint, screens: screens)
+        let moved = execution.anchor.toolbar.map {
+            chromeToastToolbarFrameAvoidingPointer(frame: panel.frame, screenPoint: screenPoint, toolbar: $0, screens: screens)
+        } ?? chromeToastFrameAvoidingPointer(frame: panel.frame, screenPoint: screenPoint, screens: screens)
         if moved != panel.frame {
             do {
                 try execution.cancellation.effect(generation: execution.generation) { panel.setFrame(moved, display: true) }
+                return true
             } catch { dismiss() }
         }
+        return false
     }
 
-    private func makePanel() -> ChromeToastPanel {
+    private func makePanel(compact: Bool) -> ChromeToastPanel {
         let toast = ChromeToastPanel(contentRect: .zero, styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
                                      backing: .buffered, defer: false)
         toast.title = desktopMode ? "AI正在操作应用窗口..." : "AI正在操作Chrome窗口..."
@@ -301,7 +465,7 @@ final class ChromeControlToast: NSObject {
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.setAccessibilityIdentifier("copis-chrome-toast-logo")
         for (label, identifier, size, weight) in [
-            (stateLabel, "copis-chrome-toast-primary", CGFloat(16), NSFont.Weight.medium),
+            (stateLabel, "copis-chrome-toast-primary", CGFloat(compact ? 14 : 16), NSFont.Weight.medium),
             (detailLabel, "copis-chrome-toast-secondary", CGFloat(12), NSFont.Weight.regular),
         ] {
             label.setAccessibilityIdentifier(identifier)
@@ -336,15 +500,15 @@ final class ChromeControlToast: NSObject {
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 12),
             icon.widthAnchor.constraint(equalToConstant: 36), icon.heightAnchor.constraint(equalToConstant: 36),
-            icon.centerYAnchor.constraint(equalTo: background.centerYAnchor, constant: 12),
+            icon.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? 25 : 12),
             stateLabel.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
             stateLabel.trailingAnchor.constraint(equalTo: executeButton.leadingAnchor, constant: -10),
-            stateLabel.centerYAnchor.constraint(equalTo: background.centerYAnchor, constant: 4),
+            stateLabel.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? 36 : 4),
             detailLabel.leadingAnchor.constraint(equalTo: stateLabel.leadingAnchor),
             detailLabel.trailingAnchor.constraint(equalTo: stateLabel.trailingAnchor),
-            detailLabel.centerYAnchor.constraint(equalTo: background.centerYAnchor, constant: 24),
+            detailLabel.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? 16 : 24),
             executeButton.widthAnchor.constraint(equalToConstant: 52), executeButton.heightAnchor.constraint(equalToConstant: 28),
-            executeButton.centerYAnchor.constraint(equalTo: background.centerYAnchor, constant: 12),
+            executeButton.centerYAnchor.constraint(equalTo: compact ? background.bottomAnchor : background.centerYAnchor, constant: compact ? 25 : 12),
             pauseButton.leadingAnchor.constraint(equalTo: executeButton.trailingAnchor, constant: 8),
             pauseButton.widthAnchor.constraint(equalToConstant: 52), pauseButton.heightAnchor.constraint(equalToConstant: 28),
             pauseButton.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -12),

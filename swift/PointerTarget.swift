@@ -21,6 +21,27 @@ func verifyPointerOwnership(target: TargetWindow, eventTarget: () throws -> Targ
     try requirePointerTarget(eventTarget(), expected: target)
 }
 
+// 仅在自己的提示条刚移动后等待WindowServer/AX同步；每次都重新执行完整校验，不豁免遮挡。
+func waitForPointerAfterToastMove(check: () throws -> Void = {}, verify: () throws -> Void,
+                                 clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+                                 sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) throws {
+    let deadline = clock() + 0.2
+    while true {
+        try check()
+        do { try verify() }
+        catch {
+            // 查询期间发生的取消/暂停/失焦优先返回，不能误分类成持续遮挡。
+            try check()
+            guard let failure = error as? HelperFailure,
+                  ["POINTER_OBSCURED", "POINTER_UNVERIFIED"].contains(failure.code), clock() < deadline else { throw error }
+            sleep(max(0, min(0.01, deadline - clock())))
+            continue
+        }
+        try check()
+        return
+    }
+}
+
 func conservativePointerTarget(at point: CGPoint, windows: [[String: Any]]) throws -> TargetWindow {
     for info in windows {
         guard let raw = info[kCGWindowBounds as String] as? [String: Any],

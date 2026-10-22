@@ -49,6 +49,10 @@ final class ChromeCapture {
         try cancellation.check(generation)
         try desktop.requireScreenPermission()
         let before = try desktop.window(target)
+        desktop.updateOperation(target, label: chromeToastOperationLabel(action: "observe"), finished: false,
+                                cancellation: cancellation, generation: generation)
+        var completed = false
+        defer { desktop.updateOperation(target, finished: true, succeeded: completed, cancellation: cancellation, generation: generation) }
         let image = try captureStrategy.capture(primary: {
             try screenCaptureKitImage(target, before: before, generation: generation)
         }, fallback: {
@@ -78,6 +82,7 @@ final class ChromeCapture {
             _ = unlink(imagePath)
             throw error
         }
+        completed = true
         return ["imagePath": imagePath, "width": image.width, "height": image.height,
                 "bounds": before.bounds.json, "capturedAtMs": capturedAtMs,
                 "coordinateSpace": "frame-pixels", "imageTransform": "crop-only", "captureBackend": captureStrategy.usesFallback ? "screencapture" : "screen-capture-kit", "ocr": ocr.json]

@@ -39,11 +39,11 @@ cd macos-control-cli
 bash ./build.sh
 ```
 
-On Apple Silicon, version 0.2.1 produces:
+On Apple Silicon, version 0.2.2 produces:
 
 ```text
 dist/
-  copis-chrome-0.2.1-darwin-arm64/
+  copis-chrome-0.2.2-darwin-arm64/
     copis-chrome
     desktop-control
     copis-chrome-helper
@@ -55,14 +55,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.2.1-darwin-arm64.tar.gz
-  copis-chrome-0.2.1-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.2.2-darwin-arm64.tar.gz
+  copis-chrome-0.2.2-darwin-arm64.tar.gz.sha256
 ```
 
 Intel uses `darwin-x64`. `bash ./build.sh debug` builds a debug package. Keep the CLI entry points, native helper, and `assets/` together at a stable installation path. You can use the build output directly or copy the entire versioned directory to a location you control; do not copy only the CLI executable.
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.1-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.2-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -73,7 +73,7 @@ Use the actual version/architecture directory produced by your build. The defaul
 Keep `desktop-control`, `copis-chrome-helper`, and `assets/` together. Example after a native ARM build:
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.1-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.2-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit
@@ -155,6 +155,14 @@ This is a format example, not a complete CLI response. `bbox` encloses **text**,
 | `daemon start\|stop\|status` | Manage the local daemon |
 
 Use `"$COPIS_CHROME_CLI" --help` for arguments and [USAGE.md](USAGE.md) for the key whitelist, error behavior, and detailed examples. Successful file selection does **not** mean an upload completed or a post was published.
+
+## Chrome toolbar overlay (v0.2.2)
+
+For Chrome targets, the existing frosted control panel is now anchored inside the native **tab/address-bar region**, not the webpage or the screen's top edge. It follows the selected window, uses a compact 72pt layout, and moves sideways within that region before an overlapping input. If a narrow window has no safe space, the original pointer guard rejects the input; it does not move the panel over page content. Other application targets keep their existing positioning.
+
+The panel shows the current operation (click/double click, typing, scrolling, a whitelisted key, file selection, or observation) and whether it completed. Typed text, clipboard contents, and file paths are not displayed. Countdown, pause, native close controls, and the existing visual-effect material remain in place. If Chrome's native toolbar cannot be verified or cannot fit the panel, input fails before takeover rather than guessing a page overlay location.
+
+See [toolbar overlay verification](docs/TOOLBAR-TOAST.md). The compact visual appearance should be confirmed in the actual app window.
 
 ## Smooth click movement (v0.2.1)
 

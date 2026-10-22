@@ -10,6 +10,7 @@
 - [v0.1.11 OCR 验证记录](OCR-VERIFICATION.md)
 - [v0.2.0 通用应用窗口验证](GENERAL-APPS-VERIFICATION.md)
 - [v0.2.1 点击前鼠标轨迹](CURSOR-MOTION.md)
+- [v0.2.2 Chrome顶部提示条](TOOLBAR-TOAST.md)
 
 Build from the repository root with `bash ./build.sh`; no Copis/Electron/Bun deployment scripts are needed. Version 0.1.11 preserves the original executable name and protocol.
 

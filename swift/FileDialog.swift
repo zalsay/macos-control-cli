@@ -58,7 +58,11 @@ final class ChromeFileSelector {
               FileManager.default.isReadableFile(atPath: file.path) else {
             throw HelperFailure(code: "FILE_NOT_READABLE", message: "请选择存在且可读取的普通文件")
         }
-        let permit = try desktop.prepareInput(target, cancellation: cancellation, generation: generation, expectedEpoch: request.inputEpoch)
+        desktop.setSelectingFile(target, active: true)
+        defer { desktop.setSelectingFile(target, active: false) }
+        let permit = try desktop.prepareInput(target, cancellation: cancellation, generation: generation, expectedEpoch: request.inputEpoch, operation: chromeToastOperationLabel(action: "select-file"))
+        var completed = false
+        defer { desktop.updateOperation(target, finished: true, succeeded: completed, cancellation: cancellation, generation: generation) }
         let deadline = ProcessInfo.processInfo.systemUptime + 12
         func check() throws {
             try cancellation.checkInput(permit)
@@ -219,6 +223,7 @@ final class ChromeFileSelector {
             return !current.contains { self.desktop.identifier($0) == panelID }
         }
         // 只能确认原生对话框已完成选择，网页是否上传完成仍需要观察。
+        completed = true
         return ["selected": true, "dialogClosed": true]
     }
 

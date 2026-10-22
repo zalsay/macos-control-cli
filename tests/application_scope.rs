@@ -299,3 +299,19 @@ fn given_desktop_scope_when_selecting_file_for_google_chrome_then_fixed_identity
     assert_eq!(request["bundleId"], "com.google.Chrome");
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn given_connection_when_selecting_target_then_revalidate_native_window_before_input() {
+    let native = DesktopNative::default();
+    let calls = native.calls.clone();
+    let mut service = service(native, Scope::Desktop);
+    connect(&mut service, 51).unwrap();
+    let calls = calls.lock().unwrap();
+    let primed = calls
+        .iter()
+        .find(|v| v["action"] == "window")
+        .expect("连接时必须只读复核目标窗口，为原生顶部提示预读几何");
+    assert_eq!(primed["windowId"], 51);
+    assert_eq!(primed["pid"], 501);
+    assert_eq!(primed["bundleId"], "com.apple.TextEdit");
+}

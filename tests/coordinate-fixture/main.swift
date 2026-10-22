@@ -35,6 +35,27 @@ guard let root = (attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []).f
 let title = attribute(root, kAXTitleAttribute) as? String ?? ""
 guard title.hasPrefix("CopisCoordinateFixture") else { fail("只能操作隔离坐标测试页") }
 let action = CommandLine.arguments[3]
+if action == "address" || action == "focused-address" {
+    var queue = action == "focused-address" ? (attribute(app, kAXFocusedUIElementAttribute).map { [unsafeBitCast($0, to: AXUIElement.self)] } ?? []) : [root]
+    var index = 0
+    while index < queue.count, index < 256 {
+        let node = queue[index]; index += 1
+        let role = attribute(node, kAXRoleAttribute) as? String ?? ""
+        if ["AXWebArea", "AXScrollArea"].contains(role) { continue }
+        let value = attribute(node, kAXValueAttribute) as? String ?? ""
+        if ["AXTextField", "AXComboBox"].contains(role), value.contains("127.0.0.1:") {
+            var point = CGPoint.zero, size = CGSize.zero
+            guard let p = attribute(node, kAXPositionAttribute), let s = attribute(node, kAXSizeAttribute),
+                  CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID(),
+                  AXValueGetValue(unsafeBitCast(p, to: AXValue.self), .cgPoint, &point),
+                  AXValueGetValue(unsafeBitCast(s, to: AXValue.self), .cgSize, &size) else { fail("地址栏无可核对几何") }
+            output(["x": point.x, "y": point.y, "width": size.width, "height": size.height, "focused": action == "focused-address"])
+            exit(0)
+        }
+        if action == "address" { queue.append(contentsOf: attribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? []) }
+    }
+    fail("未找到本机fixture地址栏或未真正取得焦点")
+}
 if action == "title" { output(["title": title]); exit(0) }
 // 仅识别隔离测试页的三种固定色块，校验 CLI 图像协议的内容原点与比例。
 if action == "markers", CommandLine.arguments.count == 5 {

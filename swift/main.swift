@@ -54,7 +54,9 @@ func handleLine(_ line: Data, oversized: Bool) {
                     case "apps": result = ["apps": desktop.apps()]
                     case "window":
                         guard let target = request.target else { throw HelperFailure.invalidArgument }
-                        result = ["window": try desktop.window(target).json]
+                        let window = try desktop.window(target)
+                        if request.prepareToast { desktop.prepareToolbarAnchor(window) }
+                        result = ["window": window.json]
                     case "observe":
                         guard let target = request.target else { throw HelperFailure.invalidArgument }
                         result = try capture.observe(target, imagePath: request.imagePath, generation: generation)

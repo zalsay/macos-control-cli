@@ -57,6 +57,9 @@ swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
   "$root/tests/toast-layout/main.swift" -o "$scratch/toast-layout-tests"
 "$scratch/toast-layout-tests"
 swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
+  "$root/tests/toolbar-toast/main.swift" -o "$scratch/toolbar-toast-tests"
+"$scratch/toolbar-toast-tests"
+swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
   "$root/tests/capture-fallback/main.swift" -o "$scratch/capture-fallback-tests"
 "$scratch/capture-fallback-tests"
 swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \

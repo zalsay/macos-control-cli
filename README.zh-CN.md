@@ -39,11 +39,11 @@ cd macos-control-cli
 bash ./build.sh
 ```
 
-Apple Silicon 上的 0.2.1 产物：
+Apple Silicon 上的 0.2.2 产物：
 
 ```text
 dist/
-  copis-chrome-0.2.1-darwin-arm64/
+  copis-chrome-0.2.2-darwin-arm64/
     copis-chrome
     desktop-control
     copis-chrome-helper
@@ -55,14 +55,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.2.1-darwin-arm64.tar.gz
-  copis-chrome-0.2.1-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.2.2-darwin-arm64.tar.gz
+  copis-chrome-0.2.2-darwin-arm64.tar.gz.sha256
 ```
 
 Intel 后缀为 `darwin-x64`。`bash ./build.sh debug` 可生成调试包。可以直接使用构建目录，也可将整个版本目录复制到稳定安装位置；CLI 入口、原生 helper 和 `assets/` 必须保持相邻，不要只复制 CLI。
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.1-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.2-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -73,7 +73,7 @@ export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.1-darwin-arm64/copis-chrome"
 `desktop-control` 与 `copis-chrome-helper`、`assets/` 保持在同一目录。ARM 本机构建示例：
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.1-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.2-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit
@@ -155,6 +155,14 @@ FRAME_ID='your-frame-id'
 | `daemon start\|stop\|status` | 管理本地守护进程 |
 
 完整参数通过 `"$COPIS_CHROME_CLI" --help` 查看；按键白名单和错误处理见 [USAGE.md](USAGE.md)。文件选择成功**不代表**网页上传完成或已发布。
+
+## Chrome 顶部毛玻璃提示条（v0.2.2）
+
+操作 Chrome 时，提示条只覆盖原生**标签栏和地址栏区域**，不进入网页内容区，也不再固定到整个屏幕顶部。保留现有毛玻璃材质和原生三联按钮，采用72pt紧凑布局，随目标窗口移动。输入目标被遮挡时仅在顶部横向避让；窗口太窄、没有安全位置时由原指针校验拒绝输入，不把面板挪到网页里。其他应用的定位沿用原行为。
+
+新增当前操作与完成状态：点击/双击、输入文字、滚动、白名单按键、选择文件、观察页面；不显示输入正文、剪贴板内容或文件路径。倒计时、暂停、关闭和执行门禁保留。无法验证Chrome原生工具栏或区域不足时，在接管前失败，不猜测网页覆盖位置。
+
+详细边界见[顶部提示条验证](docs/TOOLBAR-TOAST.md)，紧凑布局的实际视觉效果需在应用窗口确认。
 
 ## 点击前平滑移动（v0.2.1）
 

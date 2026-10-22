@@ -259,6 +259,23 @@ impl<N: Native> Service<N> {
                 ));
             }
         }
+        // 仅对已选窗口只读复核，并让原生层在进入模态对话框前准备顶部提示区域。
+        let mut query = json!({"action":"window","windowId":window.window_id,"pid":window.pid,"prepareToast":true});
+        if let Some(bundle_id) = &window.bundle_id {
+            query["bundleId"] = json!(bundle_id);
+        }
+        let verified: Window = decode(self.native.request(query)?["window"].clone())?;
+        if verified.window_id != window.window_id
+            || verified.pid != window.pid
+            || verified.bundle_id != window.bundle_id
+            || !verified.bounds.valid()
+        {
+            return Err(Error::new(
+                "WINDOW_UNAVAILABLE",
+                "连接期间目标应用窗口身份变化",
+            ));
+        }
+        let window = verified;
         let id = random_id()?;
         let result =
             json!({"connectionId":id,"connected":true,"window":window,"permissions":permissions});
@@ -733,6 +750,7 @@ mod tests {
             replies: VecDeque::from([
                 Ok(json!({"screenRecording": true})),
                 Ok(json!({"windows": [window()]})),
+                Ok(json!({"window":window()})),
                 Ok(json!({
                     "window": {
                         "windowId":7,
@@ -1156,7 +1174,7 @@ mod tests {
             })
         );
         assert_eq!(
-            service.native.requests[2],
+            service.native.requests[3],
             json!({
                 "action":"window",
                 "windowId":7,
@@ -1164,7 +1182,7 @@ mod tests {
             })
         );
         assert_eq!(
-            service.native.requests[3],
+            service.native.requests[4],
             json!({
                 "action":"select-file",
                 "windowId":7,
@@ -1189,7 +1207,7 @@ mod tests {
         let error = service.execute(request).unwrap_err();
 
         assert_eq!(error.code, "INVALID_ARGUMENT");
-        assert_eq!(service.native.requests.len(), 2);
+        assert_eq!(service.native.requests.len(), 3);
     }
 
     #[test]
@@ -1233,7 +1251,7 @@ mod tests {
             );
             assert_eq!(
                 service.native.requests.len(),
-                2,
+                3,
                 "invalid path must not open native dialog"
             );
         }
@@ -1257,7 +1275,7 @@ mod tests {
             );
             assert_eq!(
                 service.native.requests.len(),
-                2,
+                3,
                 "unreadable path must not open native dialog"
             );
         }
@@ -1281,7 +1299,7 @@ mod tests {
             .execute(select_request(&connection_id, link.to_str().unwrap()))
             .unwrap();
 
-        assert_eq!(service.native.requests[3]["path"], canonical_target);
+        assert_eq!(service.native.requests[4]["path"], canonical_target);
     }
 
     #[test]
@@ -1390,7 +1408,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code, "FILE_NOT_READABLE");
             assert!(!error.to_string().contains("private"));
-            assert_eq!(service.native.requests.len(), 2);
+            assert_eq!(service.native.requests.len(), 3);
             assert_eq!(
                 service.execute(json!({"action":"status"})).unwrap()["connected"],
                 true
@@ -1419,6 +1437,7 @@ mod tests {
             vec![
                 json!({"action":"permissions","request":false}),
                 json!({"action":"windows"}),
+                json!({"action":"window","windowId":7,"pid":42,"prepareToast":true}),
                 json!({"action":"window","windowId":7,"pid":42}),
                 json!({
                     "action":"select-file",

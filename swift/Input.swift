@@ -265,13 +265,18 @@ final class ChromeInput {
 
     func send(_ request: NativeRequest, generation: UInt64) throws -> [String: Any] {
         guard let target = request.target, let bounds = request.expectedBounds else { throw HelperFailure.invalidArgument }
-        let permit = try desktop.prepareInput(target, cancellation: cancellation, generation: generation, expectedEpoch: request.inputEpoch)
+        let operation = chromeToastOperationLabel(action: request.action, key: request.key, clickCount: request.clickCount)
+        let permit = try desktop.prepareInput(target, cancellation: cancellation, generation: generation, expectedEpoch: request.inputEpoch, operation: operation)
+        var completed = false
+        defer { desktop.updateOperation(target, finished: true, succeeded: completed, cancellation: cancellation, generation: generation) }
         try desktop.activate(target, expected: bounds, cancellation: cancellation, generation: generation, permit: permit)
         guard let source = CGEventSource(stateID: .privateState) else { throw eventFailure() }
         func verify(pointer: CGPoint? = nil) throws {
             try cancellation.checkInput(permit)
             if let point = pointer {
-                try desktop.verifyPointer(point, target: target, expected: bounds)
+                try desktop.verifyPointer(point, target: target, expected: bounds, checkInput: {
+                    try self.cancellation.checkInput(permit)
+                })
                 try desktop.verifyGeometry(target, expected: bounds)
             }
             // 可能耗时的遮挡/几何查询完成后，最后复核精确窗口焦点再提交输入。
@@ -362,6 +367,7 @@ final class ChromeInput {
             try pair(down, up)
         default: throw HelperFailure.invalidArgument
         }
+        completed = true
         return ["sent": true]
     }
 

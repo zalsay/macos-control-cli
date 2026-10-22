@@ -63,6 +63,7 @@ struct NativeRequest {
     var imagePath = ""
     var filePath = ""
     var requestPermissions = false
+    var prepareToast = false
     // 仅由 stdin 接收线程签发，协议请求不能自行指定或绕过暂停前的排队代次。
     var inputEpoch: UInt64?
 
@@ -73,7 +74,7 @@ struct NativeRequest {
         }
         var fields: [String: Set<String>] = [
             "permissions": ["request"], "windows": [], "cancel": [],
-            "window": ["windowId", "pid"],
+            "window": ["windowId", "pid", "prepareToast"],
             "observe": ["windowId", "pid", "imagePath", "maxEdge"],
             "click": ["windowId", "pid", "expectedBounds", "screenX", "screenY", "clickCount"],
             "scroll": ["windowId", "pid", "expectedBounds", "screenX", "screenY", "deltaY"],
@@ -97,6 +98,10 @@ struct NativeRequest {
                 throw HelperFailure.invalidArgument
             }
             request.requestPermissions = number.boolValue
+        }
+        if let value = json["prepareToast"] {
+            guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { throw HelperFailure.invalidArgument }
+            request.prepareToast = number.boolValue
         }
         if allowed.contains("windowId") {
             request.target = TargetWindow(

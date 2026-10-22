@@ -40,6 +40,10 @@ final class ChromeDesktop {
         operationToast = ChromeControlToast(desktopMode: scope == .desktop)
     }
     private lazy var eventHitReader = WindowEventHitReader()
+    private let toolbarStateLock = NSLock()
+    private var preparedToolbar: ChromePreparedToastAnchor?
+    private var selectingFileTarget: TargetWindow?
+
 
     func permissions(request: Bool) -> [String: Any] {
         if request {
@@ -165,12 +169,21 @@ final class ChromeDesktop {
         return window
     }
 
-    private func verifyAXGeometry(_ window: AXUIElement, expected: WindowBounds) throws {
-        var positionValue: CFTypeRef?
-        var sizeValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
-              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
-              let positionValue, let sizeValue,
+    private func axValue(_ element: AXUIElement, _ name: String, deadline: TimeInterval? = nil) -> CFTypeRef? {
+        if let deadline {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { return nil }
+            AXUIElementSetMessagingTimeout(element, Float(min(0.1, remaining)))
+        }
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+        if let deadline, ProcessInfo.processInfo.systemUptime >= deadline { return nil }
+        return status == .success ? value : nil
+    }
+
+    private func axBounds(_ window: AXUIElement, deadline: TimeInterval? = nil) throws -> WindowBounds {
+        guard let positionValue = axValue(window, kAXPositionAttribute, deadline: deadline),
+              let sizeValue = axValue(window, kAXSizeAttribute, deadline: deadline),
               CFGetTypeID(positionValue) == AXValueGetTypeID(), CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
             throw HelperFailure(code: "FOCUS_UNVERIFIED", message: "无法确认辅助功能窗口的实际几何区域")
         }
@@ -182,10 +195,95 @@ final class ChromeDesktop {
               AXValueGetValue(position, .cgPoint, &origin), AXValueGetValue(size, .cgSize, &dimensions) else {
             throw HelperFailure(code: "FOCUS_UNVERIFIED", message: "系统返回了无效的辅助功能窗口几何")
         }
-        let bounds = WindowBounds(x: origin.x, y: origin.y, width: dimensions.width, height: dimensions.height)
-        guard bounds.matches(expected) else {
+        return WindowBounds(x: origin.x, y: origin.y, width: dimensions.width, height: dimensions.height)
+    }
+
+    private func verifyAXGeometry(_ window: AXUIElement, expected: WindowBounds) throws {
+        guard try axBounds(window).matches(expected) else {
             throw HelperFailure(code: "IMAGE_GEOMETRY_CHANGED", message: "辅助功能窗口几何已变化，请重新观察")
         }
+    }
+
+    private func chromeToolbarBounds(_ target: TargetWindow, window: WindowBounds) throws -> WindowBounds {
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.6
+        let app = axApplication(target.pid)
+        func isTargetWindow(_ element: AXUIElement) -> Bool {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { return false }
+            AXUIElementSetMessagingTimeout(element, Float(min(0.1, remaining)))
+            var id: CGWindowID = 0, pid: pid_t = 0
+            return AXUIElementGetPid(element, &pid) == .success && pid == target.pid &&
+                axWindowID(element, &id) == .success && id == target.windowId
+        }
+        var root: AXUIElement?
+        repeat {
+            let windows = axValue(app, kAXWindowsAttribute, deadline: deadline) as? [AXUIElement] ?? []
+            root = windows.first(where: isTargetWindow)
+            if root == nil, let raw = axValue(app, kAXFocusedWindowAttribute, deadline: deadline),
+               CFGetTypeID(raw) == AXUIElementGetTypeID() {
+                // AppKit sheet出现时AXWindows可能短暂无值；沿原生焦点窗口的父链找回精确主窗。
+                // 仍逐节点验证PID/CGWindowID，不按标题或近似坐标替代身份检查。
+                var element = unsafeBitCast(raw, to: AXUIElement.self)
+                for _ in 0..<8 {
+                    if isTargetWindow(element) { root = element; break }
+                    guard let parent = axValue(element, kAXParentAttribute, deadline: deadline),
+                          CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+                    element = unsafeBitCast(parent, to: AXUIElement.self)
+                }
+            }
+            if root == nil { Thread.sleep(forTimeInterval: 0.02) }
+        } while root == nil && ProcessInfo.processInfo.systemUptime < deadline - 0.15
+        guard let root else {
+            throw HelperFailure(code: "FOCUS_UNVERIFIED", message: "无法定位Chrome原生工具栏窗口，请显示浏览器工具栏后重试")
+        }
+        var queue = [root], index = 0, bottom: Double?
+        while index < queue.count && index < 256 && ProcessInfo.processInfo.systemUptime < deadline {
+            let element = queue[index]; index += 1
+            guard let role = axValue(element, kAXRoleAttribute, deadline: deadline) as? String else { continue }
+            if ["AXWebArea", "AXScrollArea", "AXSheet", "AXTextArea"].contains(role) { continue }
+            if role == "AXToolbar", let bar = try? axBounds(element, deadline: deadline),
+               bar.width >= window.width * 0.65, bar.y >= window.y,
+               bar.y + bar.height <= window.y + min(160, window.height) {
+                bottom = min(bottom ?? .greatestFiniteMagnitude, bar.y + bar.height)
+            }
+            if let children = axValue(element, kAXChildrenAttribute, deadline: deadline) as? [AXUIElement] {
+                queue.append(contentsOf: children)
+            }
+        }
+        guard ProcessInfo.processInfo.systemUptime < deadline, let bottom else {
+            throw HelperFailure(code: "FOCUS_UNVERIFIED", message: "无法确认Chrome标签栏和地址栏区域，请显示浏览器工具栏后重试")
+        }
+        return WindowBounds(x: window.x, y: window.y, width: window.width, height: bottom - window.y)
+    }
+
+    func prepareToolbarAnchor(_ current: ChromeWindow) {
+        guard current.target.bundleId == "com.google.Chrome" else { return }
+        let bar = AXIsProcessTrusted() ? try? chromeToolbarBounds(current.target, window: current.bounds) : nil
+        toolbarStateLock.lock(); defer { toolbarStateLock.unlock() }
+        preparedToolbar = bar.map { ChromePreparedToastAnchor(target: current.target, anchor: ChromeToastAnchor(window: current.bounds, toolbar: $0)) }
+    }
+
+    func setSelectingFile(_ target: TargetWindow, active: Bool) {
+        toolbarStateLock.lock(); defer { toolbarStateLock.unlock() }
+        if active { selectingFileTarget = target }
+        else if selectingFileTarget.map({ sameToastTarget($0, target) }) == true { selectingFileTarget = nil }
+    }
+
+    private func toastAnchor(_ target: TargetWindow) throws -> ChromeToastAnchor {
+        let current = try window(target)
+        guard current.target.bundleId == "com.google.Chrome" else {
+            return ChromeToastAnchor(window: current.bounds, toolbar: nil)
+        }
+        toolbarStateLock.lock()
+        let cached = preparedToolbar
+        let selecting = selectingFileTarget
+        toolbarStateLock.unlock()
+        // 文件选择的模态循环可能不响应AXWindows。仅在专用选择动作期间复用已验证且几何未变的区域。
+        // 这只稳定提示位置；文件选择仍必须通过原有原生sheet身份与焦点校验。
+        if let anchor = cached?.forFileSelection(target: current.target, window: current.bounds, selecting: selecting) { return anchor }
+        let anchor = ChromeToastAnchor(window: current.bounds, toolbar: try chromeToolbarBounds(target, window: current.bounds))
+        toolbarStateLock.lock(); preparedToolbar = ChromePreparedToastAnchor(target: current.target, anchor: anchor); toolbarStateLock.unlock()
+        return anchor
     }
 
     func frontmostAXWindow(_ target: TargetWindow, app: AXUIElement) throws -> AXUIElement {
@@ -233,13 +331,13 @@ final class ChromeDesktop {
     }
 
     func prepareInput(_ target: TargetWindow, cancellation: InputCancellation, generation: UInt64,
-                      expectedEpoch: UInt64? = nil) throws -> ChromeInputPermit {
+                      expectedEpoch: UInt64? = nil, operation: String? = nil) throws -> ChromeInputPermit {
         try cancellation.check(generation)
         try requireInputPermission()
         let current = try window(target)
         _ = try cancellation.beginExecution(generation: generation)
         // 首次输入先显示 3 秒倒计时；尚未完成前不激活 Chrome 或移动指针。
-        try showOperationToast(target, bounds: current.bounds, cancellation: cancellation, generation: generation)
+        try showOperationToast(target, bounds: current.bounds, cancellation: cancellation, generation: generation, operation: operation)
         return try cancellation.waitForInput(generation: generation, expectedEpoch: expectedEpoch)
     }
 
@@ -298,12 +396,25 @@ final class ChromeDesktop {
         guard activated else { throw HelperFailure(code: "ACTIVATION_FAILED", message: "系统未允许激活目标应用 窗口") }
     }
 
-    func showOperationToast(_ target: TargetWindow, bounds: WindowBounds, cancellation: InputCancellation, generation: UInt64) throws {
+    func showOperationToast(_ target: TargetWindow, bounds: WindowBounds, cancellation: InputCancellation,
+                            generation: UInt64, operation: String? = nil) throws {
         let current = try window(target)
         let title = scope == .desktop ? "\(current.appName) · \(current.title)" : current.title
+        let anchor = try toastAnchor(target)
         try onMain {
-            try operationToast.show(over: bounds, target: target, title: title,
-                                    cancellation: cancellation, generation: generation)
+            try operationToast.show(over: anchor.window, target: target, title: title, toolbar: anchor.toolbar,
+                                    operation: operation, anchorProvider: { [weak self] in
+                guard let self else { return nil }
+                return try? self.toastAnchor(target)
+            }, cancellation: cancellation, generation: generation)
+        }
+    }
+
+    func updateOperation(_ target: TargetWindow, label: String? = nil, finished: Bool,
+                         succeeded: Bool = true, cancellation: InputCancellation, generation: UInt64) {
+        onMain {
+            operationToast.updateOperation(target: target, label: label, finished: finished, succeeded: succeeded,
+                                           cancellation: cancellation, generation: generation)
         }
     }
 
@@ -320,16 +431,24 @@ final class ChromeDesktop {
         }
     }
 
-    func verifyPointer(_ point: CGPoint, target: TargetWindow, expected: WindowBounds) throws {
+    func verifyPointer(_ point: CGPoint, target: TargetWindow, expected: WindowBounds, checkInput: () throws -> Void = {}) throws {
         guard expected.contains(point) else { throw HelperFailure.invalidArgument }
-        onMain { operationToast.avoidPointer(point) }
-        try verifyPointerOwnership(target: target, eventTarget: {
-            if self.eventHitReader.isAvailable { return try self.eventHitReader.target(at: point) }
-            // 较旧系统缺少只读命中 SPI 时仍使用原保守检查，不能忽略未知绘制窗口。
-            return try conservativePointerTarget(at: point, windows: self.windowList())
-        }, accessibilityTarget: {
-            try self.accessibilityPointerTarget(at: point)
-        })
+        let moved = onMain { operationToast.avoidPointer(point) }
+        let verify = {
+            try verifyPointerOwnership(target: target, eventTarget: {
+                if self.eventHitReader.isAvailable { return try self.eventHitReader.target(at: point) }
+                // 较旧系统缺少只读命中 SPI 时仍使用原保守检查，不能忽略未知绘制窗口。
+                return try conservativePointerTarget(at: point, windows: self.windowList())
+            }, accessibilityTarget: {
+                try self.accessibilityPointerTarget(at: point)
+            })
+        }
+        if moved {
+            try waitForPointerAfterToastMove(check: {
+                try checkInput()
+                try self.verifyFocus(target, expected: expected)
+            }, verify: verify)
+        } else { try verify() }
     }
 
     private func accessibilityPointerTarget(at point: CGPoint) throws -> TargetWindow {

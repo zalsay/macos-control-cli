@@ -168,6 +168,14 @@ try:
             time.sleep(0.05)
         assert event.get('target') == 'top' and event.get('detail') == 2 and event.get('movements') == 0, ('双击之间不应重新移动', event)
         print('PASS: 实际页面收到连续mousemove且双击之间无重复移动', geometry)
+        # 鼠标点击被顶部HUD覆盖的地址栏，验证横向避让后真正取得原生焦点。
+        address = ax(owned.pid, window['windowId'], 'address')
+        address_x = round((address['x'] + address['width']/2 - bounds['x']) * observed['width']/bounds['width'])
+        address_y = round((address['y'] + address['height']/2 - bounds['y']) * observed['height']/bounds['height'])
+        call('click', '--connection', connection, '--frame', observed['frameId'], '--x', address_x, '--y', address_y)
+        assert ax(owned.pid, window['windowId'], 'focused-address')['focused'] is True
+        call('press', '--connection', connection, '--frame', observed['frameId'], '--key', 'Escape')
+        print('PASS: 顶部HUD横向避让后地址栏取得真实焦点，未导航或输入', geometry)
     call('disconnect', '--connection', connection)
     assert tested_geometries > 0, '主屏逻辑区域不足，无法验证坐标；需要至少容纳一个测试窗口'
     print(f'PASS: {tested_geometries} 种窗口几何、图像与落点正确、连续拟人移动、双击只移动一次；同帧输入通过')

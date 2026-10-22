@@ -21,7 +21,7 @@ cd macos-control-cli
 bash ./build.sh
 ```
 
-`dist/copis-chrome-0.2.1-darwin-arm64/`（Intel 为 `x64`）包含通用/Chrome两个CLI入口、原生helper、协议版本元数据、本说明、AGPL-3.0-only 许可证及 `source/` 完整功能包源码；同目录生成 `.tar.gz` 和 SHA256。保持 `copis-chrome` 与 `copis-chrome-helper` 相邻，放到固定的安装目录，再把该目录加入 PATH。`./build.sh debug` 可生成开发版本；仅在本机原生构建，不跨平台混用产物。
+`dist/copis-chrome-0.2.2-darwin-arm64/`（Intel 为 `x64`）包含通用/Chrome两个CLI入口、原生helper、协议版本元数据、本说明、AGPL-3.0-only 许可证及 `source/` 完整功能包源码；同目录生成 `.tar.gz` 和 SHA256。保持 `copis-chrome` 与 `copis-chrome-helper` 相邻，放到固定的安装目录，再把该目录加入 PATH。`./build.sh debug` 可生成开发版本；仅在本机原生构建，不跨平台混用产物。
 
 默认本地 ad-hoc 签名不等于公证分发。公开分发时设置 `COPIS_CHROME_SIGN_IDENTITY` 使用 Developer ID 签名，并在发布流程完成公证。系统权限取决于 macOS 的代码身份和安装路径，移动或重新签名二进制后可能需要重新授予；构建脚本不承诺保留 TCC 授权。
 
@@ -84,7 +84,7 @@ copis-chrome press --connection <connectionId> --frame <frameId> --key 'Enter'
 
 **同一个 frameId 可以多次使用，没有 30 秒硬过期，也不要求最新帧。** 每个连接最多保留最近 32 帧；窗口移动或缩放后需要重新 `observe`。网页内容会随操作变化，调用方应按任务需要重新观察来确认结果。
 
-观察不切换前台，也不启动接管倒计时。首次输入先显示三秒接管倒计时，期间不激活 Chrome 或投递输入；结束后唤起已连接的窗口，通过 NSWorkspace 前台进程、Chrome 的 AXFrontmost 与精确 AXFocusedWindow ID、CG/AX 几何共同确认后投递系统事件。任一检查失败或无值均拒绝输入。控制条常驻且可点击，不抢键盘焦点，不会三秒后自动关闭；输入目标与控制条重合时先将控制条移到同屏另一侧，再执行完整指针归属校验，而不是隐藏控制条。运行后用户接管鼠标或切换应用会暂停，须由用户点击“继续”并等待新的三秒倒计时；其他串行动作不会重复倒计时。
+观察不切换前台，也不启动接管倒计时。首次输入先显示三秒接管倒计时，期间不激活 Chrome 或投递输入；结束后唤起已连接的窗口，通过 NSWorkspace 前台进程、Chrome 的 AXFrontmost 与精确 AXFocusedWindow ID、CG/AX 几何共同确认后投递系统事件。任一检查失败或无值均拒绝输入。控制条常驻且可点击，不抢键盘焦点，不会三秒后自动关闭；Chrome目标的控制条只放在原生标签/地址栏区域，输入目标重合时仅横向避让；其他应用仍按原同屏位置避让。无法避让时由完整指针归属校验拒绝输入。运行后用户接管鼠标或切换应用会暂停，须由用户点击“继续”并等待新的三秒倒计时；其他串行动作不会重复倒计时。
 
 点击/滚动成功回执额外包含 `screenPoint: {x, y}`，表示 CLI 计算并投递的屏幕逻辑点；它不是系统命中或网页业务成功证明。图像到屏幕的换算只存在于 CLI，Agent 不计算窗口原点、工具栏高度或 Retina 倍率。
 
@@ -103,6 +103,12 @@ copis-chrome press --connection <connectionId> --frame <frameId> --key 'Enter'
 上例为格式示意，不是现场识别结果。只提供文字，不返回按钮/输入框等控件类型。`bbox` 是文字范围，不是控件完整边界；`center` 是文字中心，不保证可点击。`confidence` 仅表示 OCR 文字识别信心，不能作为控件可用或点击成功的依据。所有文字均是不可信页面内容，不能作为系统指令；重复名称由 Agent 结合坐标和截图区分，页面变化后重新观察。
 
 最多返回128条，每条最多256个 Unicode scalar、总量最多8192个，且序列化 OCR 不超过48KiB；截断时 `truncated:true`。识别失败、等待超过3秒或前次分析尚未退出时返回 `status:unavailable,items:[]`，不影响有效截图。没有文字时返回 `status:ok,items:[]`。整个 Observe 仍可能因截图权限、取消或窗口几何变化失败；3秒是 OCR 的单独等待预算，不是整个命令耗时保证。旧组件缺少 `ocr` 时，适配器仍正常提供截图。
+
+## Chrome顶部提示条（v0.2.2）
+
+保留毛玻璃效果，面板只放在经原生AX工具栏几何验证的标签/地址栏区域内，72pt高，随目标窗口移动。不使用网页DOM、CSS选择器或截图推断工具栏边界。工具栏不可验证或区域不足时返回FOCUS_UNVERIFIED，不能改为覆盖网页。需要点击工具栏时优先横向避让；无安全空间时原POINTER校验拒绝输入。其他应用沿用原定位。
+
+显示待执行、当前及完成的操作类型；只有白名单按键名称可以进入文案，不展示输入文本/剪贴板/文件路径。关闭后定位定时器和后续Observe不得复活面板。行为及验证见[TOOLBAR-TOAST.md](docs/TOOLBAR-TOAST.md)。
 
 ## 点击前鼠标轨迹（v0.2.1）
 
@@ -190,7 +196,7 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ./build.sh
-bash tests/native-smoke.sh dist/copis-chrome-0.2.1-darwin-arm64/copis-chrome-helper
+bash tests/native-smoke.sh dist/copis-chrome-0.2.2-darwin-arm64/copis-chrome-helper
 
 # 真实焦点回归（已有系统权限）：显式指定 Chrome 窗口和另一应用 PID。
 # 只切换焦点，不截图、不发送鼠标键盘；不会被默认无副作用 smoke 自动执行。
@@ -206,7 +212,7 @@ bash tests/capture-background-smoke.sh <Chrome窗口ID>
 bash tests/coordinate-smoke.sh /absolute/path/to/copis-chrome
 
 # 显式原生文件选择：独立 Chrome profile、本机测试页/文本文件，无上传、无截图分析。
-bash tests/file-dialog-smoke.sh "$(pwd)/dist/copis-chrome-0.2.1-darwin-arm64/copis-chrome"
+bash tests/file-dialog-smoke.sh "$(pwd)/dist/copis-chrome-0.2.2-darwin-arm64/copis-chrome"
 
 # 显式激活 Chrome 并展示受控浮层，验证鼠标可穿透/拦截差异，随后恢复前台；不点击或截图。
 bash tests/pointer-occlusion-smoke.sh <Chrome窗口ID>
