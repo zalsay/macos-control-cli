@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import ApplicationServices
 import Darwin
 
 private func requirePointerTarget(_ actual: TargetWindow, expected: TargetWindow) throws {
@@ -11,6 +12,15 @@ private func requirePointerTarget(_ actual: TargetWindow, expected: TargetWindow
 
 func pointerUnverified() -> HelperFailure {
     HelperFailure(code: "POINTER_UNVERIFIED", message: "无法确认鼠标目标点的实际输入接收窗口，已阻止后续输入")
+}
+
+// 部分原生授权面板没有实现 AX 点查询；只对此明确状态接受独立的原生窗口证明。
+// 真实命中别窗、权限关闭、查询超时等情况绝不回退；两侧的 WindowServer 命中校验仍须通过。
+func resolveAccessibilityPointerTarget(status: AXError, windowServerHitAvailable: Bool, hitTarget: () throws -> TargetWindow,
+                                       nativeDialogTarget: () throws -> TargetWindow?) throws -> TargetWindow {
+    if status == .success { return try hitTarget() }
+    if status == .notImplemented, windowServerHitAvailable, let target = try nativeDialogTarget() { return target }
+    throw pointerUnverified()
 }
 
 func verifyPointerOwnership(target: TargetWindow, eventTarget: () throws -> TargetWindow,

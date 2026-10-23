@@ -19,6 +19,7 @@ struct ChromeWindow {
     let target: TargetWindow
     let title: String
     let bounds: WindowBounds
+    let layer: Int
     var appName = "Chrome"
 
     var json: [String: Any] {
@@ -97,13 +98,17 @@ final class ChromeDesktop {
         guard let windowID = info[kCGWindowNumber as String] as? UInt32, windowID > 0,
               let pid = info[kCGWindowOwnerPID as String] as? Int32,
               let app = applications.first(where: { $0.pid == pid }),
-              let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+              let layer = info[kCGWindowLayer as String] as? Int,
               let raw = info[kCGWindowBounds as String] as? [String: Any],
               let bounds = try? WindowBounds(json: ["x": raw["X"] ?? NSNull(), "y": raw["Y"] ?? NSNull(),
                                                    "width": raw["Width"] ?? NSNull(), "height": raw["Height"] ?? NSNull()]),
               bounds.width >= 50, bounds.height >= 50 else { return nil }
-        return ChromeWindow(target: TargetWindow(windowId: windowID, pid: pid, bundleId: app.bundleId),
-                            title: info[kCGWindowName as String] as? String ?? "", bounds: bounds, appName: app.name)
+        let target = TargetWindow(windowId: windowID, pid: pid, bundleId: app.bundleId)
+        guard allowsWindowLayer(layer, scope: scope, verifyNativeDialog: {
+            self.verifiedNativeDialog(target, bounds: bounds)
+        }) else { return nil }
+        return ChromeWindow(target: target, title: info[kCGWindowName as String] as? String ?? "",
+                            bounds: bounds, layer: layer, appName: app.name)
     }
 
     func windows() -> [ChromeWindow] {
@@ -169,16 +174,38 @@ final class ChromeDesktop {
         return window
     }
 
-    private func axValue(_ element: AXUIElement, _ name: String, deadline: TimeInterval? = nil) -> CFTypeRef? {
+    private func axValue(_ element: AXUIElement, _ name: String, deadline: TimeInterval? = nil,
+                         timeout: TimeInterval = 0.1) -> CFTypeRef? {
         if let deadline {
             let remaining = deadline - ProcessInfo.processInfo.systemUptime
             guard remaining > 0 else { return nil }
-            AXUIElementSetMessagingTimeout(element, Float(min(0.1, remaining)))
+            AXUIElementSetMessagingTimeout(element, Float(min(timeout, remaining)))
         }
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
         if let deadline, ProcessInfo.processInfo.systemUptime >= deadline { return nil }
         return status == .success ? value : nil
+    }
+
+    private func verifiedNativeDialog(_ target: TargetWindow, bounds: WindowBounds) -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.35
+        let app = axApplication(target.pid)
+        guard let windows = axValue(app, kAXWindowsAttribute, deadline: deadline) as? [AXUIElement] else { return false }
+        for window in windows.prefix(64) {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { return false }
+            AXUIElementSetMessagingTimeout(window, Float(remaining))
+            var id: CGWindowID = 0, pid: pid_t = 0
+            guard axWindowID(window, &id) == .success, id == target.windowId,
+                  AXUIElementGetPid(window, &pid) == .success, pid == target.pid else { continue }
+            guard let role = axValue(window, kAXRoleAttribute, deadline: deadline) as? String,
+                  let subrole = axValue(window, kAXSubroleAttribute, deadline: deadline) as? String,
+                  let actualBounds = try? axBounds(window, deadline: deadline) else { return false }
+            return NativeDialogIdentity(target: TargetWindow(windowId: id, pid: pid), bounds: actualBounds,
+                                        role: role, subrole: subrole).matches(target: target, bounds: bounds)
+        }
+        return false
     }
 
     private func axBounds(_ window: AXUIElement, deadline: TimeInterval? = nil) throws -> WindowBounds {
@@ -204,7 +231,7 @@ final class ChromeDesktop {
         }
     }
 
-    private func chromeToolbarBounds(_ target: TargetWindow, window: WindowBounds) throws -> WindowBounds {
+    private func chromeToolbarAnchor(_ target: TargetWindow, window: WindowBounds) throws -> ChromePreparedToastAnchor {
         let deadline = ProcessInfo.processInfo.systemUptime + 0.6
         let app = axApplication(target.pid)
         func isTargetWindow(_ element: AXUIElement) -> Bool {
@@ -253,14 +280,15 @@ final class ChromeDesktop {
         guard ProcessInfo.processInfo.systemUptime < deadline, let bottom else {
             throw HelperFailure(code: "FOCUS_UNVERIFIED", message: "无法确认Chrome标签栏和地址栏区域，请显示浏览器工具栏后重试")
         }
-        return WindowBounds(x: window.x, y: window.y, width: window.width, height: bottom - window.y)
+        let toolbar = WindowBounds(x: window.x, y: window.y, width: window.width, height: bottom - window.y)
+        return ChromePreparedToastAnchor(target: target, anchor: ChromeToastAnchor(window: window, toolbar: toolbar), windowElement: root)
     }
 
     func prepareToolbarAnchor(_ current: ChromeWindow) {
         guard current.target.bundleId == "com.google.Chrome" else { return }
-        let bar = AXIsProcessTrusted() ? try? chromeToolbarBounds(current.target, window: current.bounds) : nil
+        let prepared = AXIsProcessTrusted() ? try? chromeToolbarAnchor(current.target, window: current.bounds) : nil
         toolbarStateLock.lock(); defer { toolbarStateLock.unlock() }
-        preparedToolbar = bar.map { ChromePreparedToastAnchor(target: current.target, anchor: ChromeToastAnchor(window: current.bounds, toolbar: $0)) }
+        preparedToolbar = prepared
     }
 
     func setSelectingFile(_ target: TargetWindow, active: Bool) {
@@ -269,21 +297,57 @@ final class ChromeDesktop {
         else if selectingFileTarget.map({ sameToastTarget($0, target) }) == true { selectingFileTarget = nil }
     }
 
+    // AppKit 模态框出现后 AXWindows 可能暂时无法枚举；只沿先前验证的精确主窗确认原生子 sheet。
+    // 这里只验证控制条的位置缓存，不授予文件选择或通用输入权限。
+    private func focusedOpenPanel(_ target: TargetWindow, root: AXUIElement) -> FileDialogIdentity? {
+        let deadline = ProcessInfo.processInfo.systemUptime + 1.2
+        guard AXIsProcessTrusted(), identifier(root) == target.windowId else { return nil }
+        var rootPID: pid_t = 0
+        guard AXUIElementGetPid(root, &rootPID) == .success, rootPID == target.pid else { return nil }
+        let app = axApplication(target.pid)
+        // 模态切换使用现有文件选择输入相同的 AX 超时，并由总预算限制；普通工具栏查询仍用 0.1 秒。
+        guard let raw = axValue(app, kAXFocusedWindowAttribute, deadline: deadline, timeout: 0.35),
+              CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+        let focused = raw as! AXUIElement
+        guard let role = axValue(focused, kAXRoleAttribute, deadline: deadline, timeout: 0.35) as? String, role == kAXSheetRole,
+              let name = axValue(focused, kAXIdentifierAttribute, deadline: deadline, timeout: 0.35) as? String, name == "open-panel",
+              let children = axValue(root, kAXChildrenAttribute, deadline: deadline, timeout: 0.35) as? [AXUIElement],
+              children.contains(where: { CFEqual($0, focused) }) else { return nil }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(focused, &pid) == .success, let id = identifier(focused),
+              ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+        return FileDialogIdentity(windowId: id, pid: pid, role: role, identifier: name)
+    }
+
+    private func fileSelectionToastAnchor(_ current: ChromeWindow) -> ChromeToastAnchor? {
+        toolbarStateLock.lock()
+        let cached = preparedToolbar
+        let selecting = selectingFileTarget
+        toolbarStateLock.unlock()
+        guard let cached, cached.matches(target: current.target, window: current.bounds) else { return nil }
+        if let anchor = cached.forFileSelection(target: current.target, window: current.bounds, selecting: selecting) { return anchor }
+        guard let root = cached.windowElement, let panel = focusedOpenPanel(current.target, root: root) else { return nil }
+        return cached.forFileSelection(target: current.target, window: current.bounds, selecting: nil, focusedPanel: panel)
+    }
+
     private func toastAnchor(_ target: TargetWindow) throws -> ChromeToastAnchor {
         let current = try window(target)
         guard current.target.bundleId == "com.google.Chrome" else {
             return ChromeToastAnchor(window: current.bounds, toolbar: nil)
         }
-        toolbarStateLock.lock()
-        let cached = preparedToolbar
-        let selecting = selectingFileTarget
-        toolbarStateLock.unlock()
-        // 文件选择的模态循环可能不响应AXWindows。仅在专用选择动作期间复用已验证且几何未变的区域。
-        // 这只稳定提示位置；文件选择仍必须通过原有原生sheet身份与焦点校验。
-        if let anchor = cached?.forFileSelection(target: current.target, window: current.bounds, selecting: selecting) { return anchor }
-        let anchor = ChromeToastAnchor(window: current.bounds, toolbar: try chromeToolbarBounds(target, window: current.bounds))
-        toolbarStateLock.lock(); preparedToolbar = ChromePreparedToastAnchor(target: current.target, anchor: anchor); toolbarStateLock.unlock()
-        return anchor
+        // 既覆盖 select-file 执行期间，也覆盖点击上传后、下一次工具调用前的模态等待期。
+        // 仅同一窗口、相同几何、精确原生子 sheet 可复用；输入仍经过独立的焦点和文件框校验。
+        if let anchor = fileSelectionToastAnchor(current) { return anchor }
+        do {
+            let prepared = try chromeToolbarAnchor(target, window: current.bounds)
+            toolbarStateLock.lock(); preparedToolbar = prepared; toolbarStateLock.unlock()
+            return prepared.anchor
+        } catch {
+            // 首次查询可能恰逢 sheet 尚未发布；工具栏查询失败后只再读一次，并重新核实身份/几何。
+            // 同时重读 selecting 状态，防止在途的旧定位查询把刚开始的 select-file 误暂停。
+            if let anchor = fileSelectionToastAnchor(try window(target)) { return anchor }
+            throw error
+        }
     }
 
     func frontmostAXWindow(_ target: TargetWindow, app: AXUIElement) throws -> AXUIElement {
@@ -317,15 +381,22 @@ final class ChromeDesktop {
         return focused
     }
 
-    func verifyFocus(_ target: TargetWindow, expected: WindowBounds) throws {
+    func verifyFocus(_ target: TargetWindow, expected: WindowBounds, allowNonKeyDialog: Bool = false) throws {
         try requireInputPermission()
-        try verifyGeometry(target, expected: expected)
+        let current = try window(target)
+        guard current.bounds.matches(expected) else {
+            throw HelperFailure(code: "IMAGE_GEOMETRY_CHANGED", message: "目标窗口位置或尺寸已变化，请重新观察")
+        }
+        let pointerDialog = allowNonKeyDialog && current.layer != 0
         let app = axApplication(target.pid)
         try verifyStableWindowFocus(requireTargetFocus: {
-            try self.focusedWindow(target, app: app)
+            // 非激活原生面板不持有键盘焦点；仅指针动作可用已验证的原生窗口身份替代 key-window 要求。
+            // 前台进程及 AXFrontmost 仍须属于目标应用，实际输入窗口仍由 SLS/AX/SLS 复核。
+            if pointerDialog { return try self.frontmostAXWindow(target, app: app) }
+            return try self.focusedWindow(target, app: app)
         }, verifyGeometry: { focused in
-            try self.verifyAXGeometry(focused, expected: expected)
-            // AX 查询可能耗时，查询后再读 CG 几何，防止期间发生拖动/缩放。
+            if !pointerDialog { try self.verifyAXGeometry(focused, expected: expected) }
+            // AX 查询可能耗时，查询后再读 CG 几何及原生角色，防止期间发生拖动/替换。
             try self.verifyGeometry(target, expected: expected)
         })
     }
@@ -342,7 +413,7 @@ final class ChromeDesktop {
     }
 
     func activate(_ target: TargetWindow, expected: WindowBounds, cancellation: InputCancellation, generation: UInt64,
-                  permit supplied: ChromeInputPermit? = nil) throws {
+                  permit supplied: ChromeInputPermit? = nil, allowNonKeyDialog: Bool = false) throws {
         let permit = try supplied ?? prepareInput(target, cancellation: cancellation, generation: generation)
         try cancellation.checkInput(permit)
         try requireInputPermission()
@@ -352,12 +423,17 @@ final class ChromeDesktop {
         let app = axApplication(target.pid)
         let window = try targetAXWindow(target, app: app)
         try cancellation.checkInput(permit)
-        // 每个 AX 副作用独立提交，沿用每次 AX 调用 0.35 秒超时，不把整条链捆成一个临界区。
-        _ = try cancellation.inputEffect(permit: permit) {
-            AXUIElementSetAttributeValue(app, kAXFocusedWindowAttribute as CFString, window)
+        // 不强制把非激活原生面板变成主窗口；键盘输入仍必须取得精确 key-window 焦点。
+        let nativeDialog = try self.window(target).layer != 0
+        if !nativeDialog || !allowNonKeyDialog {
+            _ = try cancellation.inputEffect(permit: permit) {
+                AXUIElementSetAttributeValue(app, kAXFocusedWindowAttribute as CFString, window)
+            }
         }
-        _ = try cancellation.inputEffect(permit: permit) {
-            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        if !nativeDialog {
+            _ = try cancellation.inputEffect(permit: permit) {
+                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            }
         }
         _ = try cancellation.inputEffect(permit: permit) {
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
@@ -368,7 +444,7 @@ final class ChromeDesktop {
         repeat {
             try cancellation.checkInput(permit)
             do {
-                try verifyFocus(target, expected: expected)
+                try verifyFocus(target, expected: expected, allowNonKeyDialog: allowNonKeyDialog)
                 try showOperationToast(target, bounds: expected, cancellation: cancellation, generation: generation)
                 return
             }
@@ -431,7 +507,7 @@ final class ChromeDesktop {
         }
     }
 
-    func verifyPointer(_ point: CGPoint, target: TargetWindow, expected: WindowBounds, checkInput: () throws -> Void = {}) throws {
+    func verifyPointer(_ point: CGPoint, target: TargetWindow, expected: WindowBounds, allowNonKeyDialog: Bool = false, checkInput: () throws -> Void = {}) throws {
         guard expected.contains(point) else { throw HelperFailure.invalidArgument }
         let moved = onMain { operationToast.avoidPointer(point) }
         let verify = {
@@ -440,27 +516,37 @@ final class ChromeDesktop {
                 // 较旧系统缺少只读命中 SPI 时仍使用原保守检查，不能忽略未知绘制窗口。
                 return try conservativePointerTarget(at: point, windows: self.windowList())
             }, accessibilityTarget: {
-                try self.accessibilityPointerTarget(at: point)
+                try self.accessibilityPointerTarget(at: point, nativeDialogTarget: {
+                    guard allowNonKeyDialog, self.scope == .desktop else { return nil }
+                    let current = try self.window(target)
+                    guard current.layer != 0 else { return nil }
+                    guard current.bounds.matches(expected) else {
+                        throw HelperFailure(code: "IMAGE_GEOMETRY_CHANGED", message: "原生弹窗几何已变化，请重新观察")
+                    }
+                    return current.target
+                })
             })
         }
         if moved {
             try waitForPointerAfterToastMove(check: {
                 try checkInput()
-                try self.verifyFocus(target, expected: expected)
+                try self.verifyFocus(target, expected: expected, allowNonKeyDialog: allowNonKeyDialog)
             }, verify: verify)
         } else { try verify() }
     }
 
-    private func accessibilityPointerTarget(at point: CGPoint) throws -> TargetWindow {
+    private func accessibilityPointerTarget(at point: CGPoint, nativeDialogTarget: () throws -> TargetWindow?) throws -> TargetWindow {
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, 0.35)
         var hit: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success,
-              let hit else { throw HelperFailure(code: "POINTER_UNVERIFIED", message: "无法确认鼠标目标点所属窗口") }
-        var pid: pid_t = 0
-        let hitWindow = elementAttribute(hit, kAXWindowAttribute) ?? hit
-        guard AXUIElementGetPid(hit, &pid) == .success, pid > 0,
-              let id = identifier(hitWindow) else { throw pointerUnverified() }
-        return TargetWindow(windowId: id, pid: pid)
+        let status = AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit)
+        return try resolveAccessibilityPointerTarget(status: status, windowServerHitAvailable: eventHitReader.isAvailable, hitTarget: {
+            guard let hit else { throw pointerUnverified() }
+            var pid: pid_t = 0
+            let hitWindow = self.elementAttribute(hit, kAXWindowAttribute) ?? hit
+            guard AXUIElementGetPid(hit, &pid) == .success, pid > 0,
+                  let id = self.identifier(hitWindow) else { throw pointerUnverified() }
+            return TargetWindow(windowId: id, pid: pid)
+        }, nativeDialogTarget: nativeDialogTarget)
     }
 }

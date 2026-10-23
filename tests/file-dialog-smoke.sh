@@ -45,7 +45,8 @@ test_dir = scratch / '中文 test folder'
 test_dir.mkdir()
 test_file = test_dir / 'copis-test.txt'
 test_file.write_text('仅用于本机文件选择回归；无上传。', encoding='utf-8')
-env = dict(os.environ, COPIS_CHROME_RUNTIME_DIR=str(scratch / 'runtime'))
+env = dict(os.environ, COPIS_CHROME_RUNTIME_DIR=str(scratch / 'runtime'),
+    COPIS_DESKTOP_RUNTIME_DIR=str(scratch / 'runtime'))
 def call(*args, error=None, runtime_env=None):
     completed = subprocess.run([cli, *args], env=runtime_env or env, capture_output=True, text=True, timeout=30)
     result = json.loads(completed.stdout)
@@ -59,7 +60,8 @@ assert int(previous_pid) > 0
 owned = None
 owned_daemon = None
 window = None
-cold_env = dict(env, COPIS_CHROME_RUNTIME_DIR=str(scratch / 'cold-runtime'))
+cold_env = dict(env, COPIS_CHROME_RUNTIME_DIR=str(scratch / 'cold-runtime'),
+    COPIS_DESKTOP_RUNTIME_DIR=str(scratch / 'cold-runtime'))
 try:
     owned = subprocess.Popen([chrome, '--user-data-dir=' + str(scratch / 'profile'),
         '--no-first-run', '--no-default-browser-check', '--disable-sync', '--disable-background-networking',
@@ -164,11 +166,22 @@ try:
         # 前置拒绝测试已启动输入控制；隔离正常选择场景，避免 fixture 激活被识别为用户切窗。
         call('disconnect', '--connection', connection)
         connection = call('connect', '--window', str(window['windowId']))['connectionId']
-        subprocess.run([str(scratch / 'fixture-ax'), str(owned.pid), str(window['windowId']), 'open'], check=True, timeout=8)
-        selected = call('select-file', '--connection', connection, '--path', str(test_file))
-        assert selected['connectionId'] == connection and selected['selected'] and selected['dialogClosed'], selected
-        subprocess.run([str(scratch / 'fixture-ax'), str(owned.pid), str(window['windowId']), 'selected'], check=True, timeout=8)
-        assert call('status')['connected'], '选完文件应保留原连接'
+        def open_picker(current_connection, private_env=env):
+            # Given 真正通过 CLI 点击上传，When 原生框打开后模型耗时数秒并再次观察，Then 不应误暂停。
+            observed = call('observe', '--connection', current_connection, runtime_env=private_env)
+            point = json.loads(subprocess.check_output([str(scratch / 'fixture-ax'), str(owned.pid), str(window['windowId']), 'picker-bounds'], text=True, timeout=8))
+            bounds = observed['bounds']
+            call('click', '--connection', current_connection, '--frame', observed['frameId'],
+                '--x', str(round((point['x'] - bounds['x']) * observed['width'] / bounds['width'])),
+                '--y', str(round((point['y'] - bounds['y']) * observed['height'] / bounds['height'])), runtime_env=private_env)
+            time.sleep(3)
+            call('observe', '--connection', current_connection, runtime_env=private_env)
+        for _ in range(2):
+            open_picker(connection)
+            selected = call('select-file', '--connection', connection, '--path', str(test_file))
+            assert selected['connectionId'] == connection and selected['selected'] and selected['dialogClosed'], selected
+            subprocess.run([str(scratch / 'fixture-ax'), str(owned.pid), str(window['windowId']), 'selected'], check=True, timeout=8)
+            assert call('status')['connected'], '选完文件应保留原连接'
         call('disconnect', '--connection', connection)
         # Given Chrome 在后台且新的 Helper 尚未查询 AX，Then 专用输入能激活原应用后精确定位面板。
         cold_connection = call('connect', '--window', str(window['windowId']), runtime_env=cold_env)['connectionId']
@@ -179,7 +192,16 @@ try:
         cold_selected = call('select-file', '--connection', cold_connection, '--path', str(test_file), runtime_env=cold_env)
         assert cold_selected['selected'] and cold_selected['dialogClosed']
         subprocess.run([str(scratch / 'fixture-ax'), str(owned.pid), str(window['windowId']), 'selected'], check=True, timeout=8)
+        # Given 原生框打开且控制仍在运行，When 用户切到其他应用，Then 必须继续暂停，不得自动抢回焦点。
+        open_picker(cold_connection, cold_env)
+        subprocess.run([str(scratch / 'fixture-ax'), str(owned.pid), str(window['windowId']), 'background:' + previous_pid], check=True, capture_output=True, text=True, timeout=5)
+        time.sleep(0.2)
+        paused = call('select-file', '--connection', cold_connection, '--path', str(test_file), runtime_env=cold_env, error='FOCUS_LOST')
+        assert paused['error'].get('reason') == 'USER_PAUSED', paused
+        assert subprocess.check_output([str(scratch / 'fixture-ax'), '--front-pid'], text=True).strip() == previous_pid, '模态期间暂停输入不得抢回前台'
+        call('observe', '--connection', cold_connection, runtime_env=cold_env)
         call('disconnect', '--connection', cold_connection, runtime_env=cold_env)
+        print('PASS: CLI点击上传→等待3秒→Observe→选择文件连续两次通过；原生框打开后切换应用仍暂停且不抢焦点')
         print('PASS: Chrome 明确在后台、独立冷 Helper 首次 AX 查询的真实文件选择回归')
         print('PASS: CLI 真实文件选择 BDD；无 frame、中文空格路径、错误连接/文件/未打开面板拒绝且可恢复；隔离 fixture 无上传')
 finally:
@@ -187,7 +209,8 @@ finally:
     try:
         for private_env in [env, cold_env]:
             try:
-                call('daemon', 'stop', runtime_env=private_env)
+                assert call('daemon', 'stop', runtime_env=private_env)['running'] is False
+                assert call('daemon', 'status', runtime_env=private_env)['running'] is False, '测试 daemon 未确认停止'
             except (AssertionError, OSError, subprocess.TimeoutExpired, ValueError):
                 stop_failed = True
     finally:

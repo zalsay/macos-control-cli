@@ -97,7 +97,7 @@ final class ChromeCapture {
         let content = try contentResult.wait(cancellation: cancellation, generation: generation, stage: "window-list")
         guard let window = content.windows.first(where: {
             $0.windowID == target.windowId && $0.owningApplication?.processID == target.pid &&
-            $0.owningApplication?.bundleIdentifier == before.target.bundleId && $0.windowLayer == 0 && $0.isOnScreen
+            $0.owningApplication?.bundleIdentifier == before.target.bundleId && $0.windowLayer == before.layer && $0.isOnScreen
         }) else { throw HelperFailure(code: "WINDOW_UNAVAILABLE", message: "指定应用窗口不在可截图列表中") }
         let frame = window.frame
         let snapshot = WindowBounds(x: frame.origin.x, y: frame.origin.y, width: frame.width, height: frame.height)

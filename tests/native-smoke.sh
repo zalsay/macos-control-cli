@@ -46,9 +46,12 @@ swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
 swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
   "$root/tests/application-scope/main.swift" -o "$scratch/application-scope-tests"
 swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
+  "$root/tests/native-dialog/main.swift" -o "$scratch/native-dialog-tests"
+swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
   "$root/tests/cursor-motion/main.swift" -o "$scratch/cursor-motion-tests"
 "$scratch/cursor-motion-tests"
 "$scratch/application-scope-tests"
+"$scratch/native-dialog-tests"
 "$scratch/text-recognition-tests"
 "$scratch/execution-control-tests"
 "$scratch/file-dialog-tests"

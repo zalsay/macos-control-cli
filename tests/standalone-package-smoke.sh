@@ -18,7 +18,7 @@ arch = {'arm64': 'arm64', 'x86_64': 'x64'}[platform.machine()]
 name = f'copis-chrome-{version}-darwin-{arch}'
 package = root / 'dist' / name
 archive = root / 'dist' / f'{name}.tar.gz'
-required = ['copis-chrome', 'desktop-control', 'copis-chrome-helper', 'module.json', 'LICENSE', 'USAGE.md',
+required = ['mcc', 'install.sh', 'source/install.sh', 'source/src/bin/mcc.rs', 'copis-chrome', 'desktop-control', 'copis-chrome-helper', 'module.json', 'LICENSE', 'USAGE.md',
             'README.md', 'README.zh-CN.md', 'assets/copis-logo.png', 'docs/AGENT-INTEGRATION.md',
             'source/Cargo.toml', 'source/Cargo.lock', 'source/build.sh', 'source/README.md',
             'source/README.zh-CN.md', 'source/src/main.rs', 'source/swift/main.swift']
@@ -51,5 +51,10 @@ assert desktop['ok'] and desktop['version'] == version
 help_text = subprocess.check_output([str(package / 'desktop-control'), '--help'], text=True)
 assert 'apps' in help_text and '--app' in help_text
 
-print('PASS: 通用/Chrome双入口与原生helper、双语 README、源码完整性、文档链接、SHA256 与无运行数据；未启动桌面自动化')
+mcc = json.loads(subprocess.check_output([str(package / 'mcc'), '--version'], text=True))
+assert mcc['ok'] and mcc['version'] == version and mcc['scope'] == 'desktop'
+help_text = subprocess.check_output([str(package / 'mcc'), '--help'], text=True)
+assert help_text.startswith('mcc —') and 'mcc permissions' in help_text and 'mcc daemon stop' in help_text
+assert (root / 'install.sh').read_bytes() == (package / 'install.sh').read_bytes() == (package / 'source/install.sh').read_bytes()
+print('PASS: mcc默认入口、兼容入口、安装脚本与原生helper、双语 README、源码完整性、文档链接、SHA256 与无运行数据；未启动桌面自动化')
 PY

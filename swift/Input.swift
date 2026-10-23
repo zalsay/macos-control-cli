@@ -269,18 +269,20 @@ final class ChromeInput {
         let permit = try desktop.prepareInput(target, cancellation: cancellation, generation: generation, expectedEpoch: request.inputEpoch, operation: operation)
         var completed = false
         defer { desktop.updateOperation(target, finished: true, succeeded: completed, cancellation: cancellation, generation: generation) }
-        try desktop.activate(target, expected: bounds, cancellation: cancellation, generation: generation, permit: permit)
+        let pointerOnly = request.action == "click" || request.action == "scroll"
+        try desktop.activate(target, expected: bounds, cancellation: cancellation, generation: generation, permit: permit,
+                             allowNonKeyDialog: pointerOnly)
         guard let source = CGEventSource(stateID: .privateState) else { throw eventFailure() }
         func verify(pointer: CGPoint? = nil) throws {
             try cancellation.checkInput(permit)
             if let point = pointer {
-                try desktop.verifyPointer(point, target: target, expected: bounds, checkInput: {
+                try desktop.verifyPointer(point, target: target, expected: bounds, allowNonKeyDialog: pointerOnly, checkInput: {
                     try self.cancellation.checkInput(permit)
                 })
                 try desktop.verifyGeometry(target, expected: bounds)
             }
             // 可能耗时的遮挡/几何查询完成后，最后复核精确窗口焦点再提交输入。
-            try desktop.verifyFocus(target, expected: bounds)
+            try desktop.verifyFocus(target, expected: bounds, allowNonKeyDialog: pointerOnly)
             try cancellation.checkInput(permit)
         }
         func pair(_ down: CGEvent?, _ up: CGEvent?, pointer: CGPoint? = nil) throws {

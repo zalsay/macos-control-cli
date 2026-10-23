@@ -11,7 +11,7 @@ impl Mode {
     pub fn from_executable(path: &Path) -> Self {
         if path
             .file_name()
-            .is_some_and(|name| name == "desktop-control")
+            .is_some_and(|name| name == "desktop-control" || name == "mcc")
         {
             Self::Desktop
         } else {
@@ -47,5 +47,7 @@ mod tests {
             Mode::from_executable(Path::new("/bin/copis-chrome")),
             Mode::Chrome
         );
+        assert_eq!(Mode::from_executable(Path::new("/bin/mcc")), Mode::Desktop);
+        assert_eq!(Mode::from_executable(Path::new("/bin/other")), Mode::Chrome);
     }
 }

@@ -4,7 +4,7 @@
 
 A standalone **Rust + Swift** CLI for observing and controlling local macOS application windows. Designed for agents that can execute commands and read local images. **No Electron, Node.js, Bun, browser extension, or Chrome remote-debugging port is required.**
 
-Version **0.2.0** adds **`desktop-control`** for ordinary application windows. **`copis-chrome` remains Chrome-only** for compatibility with existing clients. Both use JSON protocol **1** and the same native capture/input implementation.
+Version **0.2.3** adds the default **`mcc`** command, a user-level `sh` installer and [verified native authorization dialogs](docs/NATIVE-DIALOGS.md). `mcc` and `desktop-control` share desktop mode; **`copis-chrome` remains Chrome-only**. Existing entry points and JSON protocol **1** stay compatible.
 
 ## Features
 
@@ -18,6 +18,33 @@ Version **0.2.0** adds **`desktop-control`** for ordinary application windows. *
 - Pause input when the user takes over the mouse or switches applications. Existing queued input is not replayed.
 
 This is **desktop GUI automation**, not DOM automation or an isolated browser. Input may activate the selected application and use the real desktop mouse and keyboard. Observation does not require bringing it to the foreground.
+
+## Install and the default command
+
+From the source checkout or an extracted complete distribution:
+
+```bash
+sh ./install.sh
+# If PATH is not active, run the export PATH=... command printed by the installer.
+mcc --help
+mcc --version
+mcc permissions
+mcc apps
+```
+
+The installer keeps the complete package under `~/.local/lib/macos-control-cli/0.2.3/` and links `~/.local/bin/mcc`. No sudo is needed. It does not edit shell configuration; add the printed PATH setting yourself for future terminals. **A child installer cannot change the current parent shell's PATH.**
+
+A source checkout uses an existing build, or invokes `build.sh` if the complete package is missing (Rust and Xcode Command Line Tools required). An extracted distribution needs no Rust, Swift, Python, Node.js or network download. Platform, architecture and code signatures are checked. GitHub Release downloading is not part of this local installer.
+
+```bash
+sh ./install.sh --help
+sh ./install.sh --prefix "$HOME/tools/mcc"
+sh ./install.sh --package /absolute/path/copis-chrome-0.2.3-darwin-arm64
+```
+
+Identical reinstalls preserve the installed version. Unrelated commands and different contents with the same version are not overwritten. Before upgrading, stop only your old task-owned daemon, then establish a new connection using the new entry point; never stop another task's daemon. A new installation path may require renewed macOS permissions.
+
+`mcc --help` includes commands, permissions, a minimal workflow, original-pixel coordinates, pause semantics and cleanup. Existing `desktop-control` examples also work with `mcc`; both share `COPIS_DESKTOP_RUNTIME_DIR`, separate from the Chrome-only runtime.
 
 ## Requirements
 
@@ -43,9 +70,11 @@ On Apple Silicon, version 0.2.2 produces:
 
 ```text
 dist/
-  copis-chrome-0.2.2-darwin-arm64/
+  copis-chrome-0.2.3-darwin-arm64/
     copis-chrome
     desktop-control
+    mcc
+    install.sh
     copis-chrome-helper
     module.json
     README.md
@@ -55,14 +84,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.2.2-darwin-arm64.tar.gz
-  copis-chrome-0.2.2-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.2.3-darwin-arm64.tar.gz
+  copis-chrome-0.2.3-darwin-arm64.tar.gz.sha256
 ```
 
 Intel uses `darwin-x64`. `bash ./build.sh debug` builds a debug package. Keep the CLI entry points, native helper, and `assets/` together at a stable installation path. You can use the build output directly or copy the entire versioned directory to a location you control; do not copy only the CLI executable.
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.2-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.3-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -73,7 +102,7 @@ Use the actual version/architecture directory produced by your build. The defaul
 Keep `desktop-control`, `copis-chrome-helper`, and `assets/` together. Example after a native ARM build:
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.2-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.3-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit

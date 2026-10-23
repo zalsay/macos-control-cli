@@ -133,6 +133,7 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
 pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面自动化工具（Rust + Swift）
 
 用法（默认单行 JSON，--json 可选）：
+  desktop-control permissions [--request]
   desktop-control apps
   desktop-control windows [--app <bundleId>]
   desktop-control connect --window <windowId>
@@ -147,8 +148,42 @@ pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面�
   desktop-control daemon start|stop|status|run
   desktop-control --help | --version
 
-窗口连接固定应用 bundleId；原生文件选择暂仅支持 Google Chrome。
+最小流程：
+  desktop-control windows --app com.google.Chrome
+  desktop-control connect --window <windowId>
+  desktop-control observe --connection <connectionId>
+  desktop-control click --connection <connectionId> --frame <frameId> --x <x> --y <y>
+  desktop-control disconnect --connection <connectionId>
+  desktop-control daemon stop
+
+观察返回 connectionId、frameId、imagePath 和 OCR；点击坐标使用该窗口截图的原像素，不缩放或猜偏移。
+帧可重复使用且无时间硬过期；页面或窗口几何变化后重新 observe。输入串行，不重放失败动作。
+只读观察不切前台；首次输入等待 3 秒接管倒计时，会占用真实鼠标键盘。
+人工接管或失焦后停止输入；USER_PAUSED 须等用户通过控制条继续，不重建 runtime 绕过暂停。
+原生授权弹窗须单独枚举、连接和观察；不能复用 Chrome 的连接或坐标，不能自动点击未获授权的“允许”。
+原生文件选择 select-file 暂仅支持 Google Chrome；非 key 授权面板的键盘输入仍要求精确焦点。
+
+权限：屏幕录制用于观察，辅助功能用于输入；仅 permissions --request 主动申请权限。
+默认运行目录：~/.copis/desktop-control-cli，可用 COPIS_DESKTOP_RUNTIME_DIR 指定本任务的私有目录。
+任务结束必须 disconnect 并 daemon stop，再 daemon status 确认 running:false；不要停止别人的 daemon。
+升级前结束自己旧版本的 daemon，避免新 CLI 复用旧 Helper。--help / --version 不启动 daemon。
+完整说明见随包 USAGE.md、docs/AGENT-INTEGRATION.md；安装选项运行 sh install.sh --help。
 "#;
+
+pub fn help_text(scope: Scope, program: &str) -> String {
+    if scope == Scope::Desktop {
+        if program == "mcc" {
+            // 只替换命令名，保留真实的 desktop-control-cli 运行目录。
+            DESKTOP_HELP
+                .replacen("desktop-control —", "mcc —", 1)
+                .replace("\n  desktop-control ", "\n  mcc ")
+        } else {
+            DESKTOP_HELP.to_owned()
+        }
+    } else {
+        HELP.to_owned()
+    }
+}
 
 pub const HELP: &str = r#"copis-chrome — 独立的 macOS Chrome 桌面自动化工具（Rust + Swift）
 

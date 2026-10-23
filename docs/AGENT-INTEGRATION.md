@@ -1,8 +1,10 @@
 # Agent 接入 Chrome Control CLI
 
-本文面向能够执行本机命令的 Agent，以及为 Agent 编写工具适配器的开发者。命令与响应按 `copis-chrome v0.2.2`、JSON 协议 `1` 核对。快速交给 Agent 使用时，提供 CLI 绝对路径并复制第 9 节的调用约定；程序化集成可参考第 7 节。
+本文面向能够执行本机命令的 Agent，以及为 Agent 编写工具适配器的开发者。命令与响应按 `copis-chrome v0.2.3`、JSON 协议 `1` 核对。快速交给 Agent 使用时，提供 CLI 绝对路径并复制第 9 节的调用约定；程序化集成可参考第 7 节。
 
 接入方式是 **执行 CLI → 解析 JSON → 读取本地截图 → 决策 → 执行动作 → 观察确认**。CLI 提供原生窗口截图、鼠标和键盘输入；页面理解、操作决策和任务结果判断由调用方完成。它没有 DOM、CSS selector、按网页文字定位按钮或执行页面 JavaScript 的接口。
+
+默认用户级安装运行 `sh install.sh`，安装后优先用 `mcc --help` 检查入口。`mcc` 等价于通用模式 `desktop-control`，可处理符合边界的原生应用授权窗；下文 `copis-chrome` 示例仍是 Chrome-only，不能不加区分地混用连接与 runtime。帮助/版本不启动 daemon。
 
 ## 1. 运行条件与工具定位
 
@@ -16,7 +18,7 @@
 将对应架构的归档解压到稳定位置。ARM Mac 使用 `darwin-arm64`，Intel Mac 使用 `darwin-x64`。保持可执行文件与资源目录在同一个版本目录：
 
 ```text
-copis-chrome-0.2.2-darwin-arm64/
+copis-chrome-0.2.3-darwin-arm64/
 ├── copis-chrome
 ├── copis-chrome-helper
 ├── module.json
@@ -26,7 +28,7 @@ copis-chrome-0.2.2-darwin-arm64/
 配置调用方使用的绝对路径，然后检查版本：
 
 ```bash
-export COPIS_CHROME_CLI='/绝对路径/copis-chrome-0.2.2-darwin-arm64/copis-chrome'
+export COPIS_CHROME_CLI='/绝对路径/copis-chrome-0.2.3-darwin-arm64/copis-chrome'
 "$COPIS_CHROME_CLI" --version
 "$COPIS_CHROME_CLI" --help
 ```
@@ -436,3 +438,8 @@ Click的参数、frameId与原像素坐标不变。CLI内部在接管/激活后�
 Chrome目标的毛玻璃提示条限制在原生标签/地址栏区域内并跟随窗口；输入遮挡时只横向避让，不进入网页。过窄或无法验证原生工具栏时失败，不绕过指针/焦点校验。CLI参数和截图/OCR/坐标协议不变。
 
 提示条显示操作类型及完成状态，不显示模型输入正文或本地路径。Observe只更新已存在且可见的控制条，不因只读观察新建提示或解除暂停。关闭后不会被定位timer或迟到回执重新显示。实际视觉需用户在窗口验收。
+
+
+## v0.2.3 原生应用授权弹窗
+
+`desktop-control` 支持经过 AX/CG 精确身份与几何验证的原生非零层级弹窗，Chrome-only 连接不自动扩权。新弹窗须单独枚举、连接与 Observe，使用其自己的 frame/OCR 坐标；不把任意“允许”按钮视为已获授权。非 key 面板只放宽指针所需的 key-window 条件，应用前台、实际输入归属、遮挡、暂停和取消仍验证；键盘不能投给主窗口。详见 [原生弹窗边界和中英文流程](NATIVE-DIALOGS.md)。

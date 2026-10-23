@@ -41,6 +41,20 @@ let replaced = TargetWindow(windowId: 10, pid: 20, bundleId: "com.example.other"
 require(prepared.forFileSelection(target: replaced, window: window, selecting: replaced) == nil, "不能复用替换应用的顶部区域")
 let legacy = TargetWindow(windowId: 10, pid: 20)
 require(prepared.forFileSelection(target: legacy, window: window, selecting: legacy) != nil, "原Chrome入口的省略bundle身份继续兼容")
+// Given 点击上传后尚未调用 select-file，Then 只有已确认属于精确主窗的原生 Open sheet 可以沿用顶部区域。
+let panel = FileDialogIdentity(windowId: 12, pid: 20, role: "AXSheet", identifier: "open-panel")
+require(prepared.forFileSelection(target: target, window: window, selecting: nil, focusedPanel: panel) != nil, "模型等待期间原生Open框不应触发假失焦")
+for invalid in [
+    FileDialogIdentity(windowId: 10, pid: 20, role: "AXSheet", identifier: "open-panel"),
+    FileDialogIdentity(windowId: 0, pid: 20, role: "AXSheet", identifier: "open-panel"),
+    FileDialogIdentity(windowId: 12, pid: 21, role: "AXSheet", identifier: "open-panel"),
+    FileDialogIdentity(windowId: 12, pid: 20, role: "AXGroup", identifier: "open-panel"),
+    FileDialogIdentity(windowId: 12, pid: 20, role: "AXSheet", identifier: "save-panel")
+] {
+    require(prepared.forFileSelection(target: target, window: window, selecting: nil, focusedPanel: invalid) == nil, "不能用无效/其他进程/非Open框的身份放行")
+}
+require(prepared.forFileSelection(target: other, window: window, selecting: nil, focusedPanel: panel) == nil, "模态框不能复用另一主窗缓存")
+require(prepared.forFileSelection(target: target, window: movedWindow, selecting: nil, focusedPanel: panel) == nil, "模态期间窗口移动仍须重新验证布局")
 var prime: [String: Any] = ["id": "prime", "action": "window", "windowId": 10, "pid": 20, "prepareToast": true]
 let request = try NativeRequest.decode(prime)
 require(request.prepareToast, "原生只读窗口查询可预读提示区域")

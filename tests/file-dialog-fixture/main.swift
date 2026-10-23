@@ -146,7 +146,7 @@ switch CommandLine.arguments[3] {
 case "activate":
     activateFixture()
     exit(0)
-case "open":
+case "open", "picker-bounds":
     activateFixture()
     var queue = [root], index = 0
     while index < queue.count && index < 1000 {
@@ -155,6 +155,14 @@ case "open":
         let description = attribute(node, kAXDescriptionAttribute) as? String ?? ""
         if attribute(node, kAXRoleAttribute) as? String == kAXButtonRole,
            title == "Copis open test picker" || description == "Copis open test picker" {
+            if CommandLine.arguments[3] == "picker-bounds" {
+                guard let p = attribute(node, kAXPositionAttribute), let s = attribute(node, kAXSizeAttribute),
+                      CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { exit(2) }
+                var point = CGPoint.zero, size = CGSize.zero
+                require(AXValueGetValue(p as! AXValue, .cgPoint, &point) && AXValueGetValue(s as! AXValue, .cgSize, &size), "无法读取隔离上传按钮位置")
+                print("{\"x\":\(point.x + size.width / 2),\"y\":\(point.y + size.height / 2)}")
+                exit(0)
+            }
             require(AXUIElementPerformAction(node, kAXPressAction as CFString) == .success, "打开测试文件选择框失败")
             print("PASS: 已打开隔离测试页的文件选择框")
             exit(0)

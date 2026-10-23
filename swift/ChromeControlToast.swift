@@ -36,10 +36,23 @@ func sameToastTarget(_ a: TargetWindow, _ b: TargetWindow) -> Bool {
 struct ChromePreparedToastAnchor {
     let target: TargetWindow
     let anchor: ChromeToastAnchor
+    let windowElement: AXUIElement?
 
-    func forFileSelection(target current: TargetWindow, window: WindowBounds, selecting: TargetWindow?) -> ChromeToastAnchor? {
-        guard let selecting, sameToastTarget(selecting, current), sameToastTarget(target, current),
-              anchor.window.matches(window), anchor.toolbar != nil else { return nil }
+    init(target: TargetWindow, anchor: ChromeToastAnchor, windowElement: AXUIElement? = nil) {
+        self.target = target; self.anchor = anchor; self.windowElement = windowElement
+    }
+
+    func matches(target current: TargetWindow, window: WindowBounds) -> Bool {
+        sameToastTarget(target, current) && anchor.window.matches(window) && anchor.toolbar != nil
+    }
+
+    func forFileSelection(target current: TargetWindow, window: WindowBounds, selecting: TargetWindow?,
+                          focusedPanel: FileDialogIdentity? = nil) -> ChromeToastAnchor? {
+        guard matches(target: current, window: window) else { return nil }
+        let verifiedPanel = focusedPanel.map {
+            (try? verifyOwnedFileDialogFocus(target: current, panel: $0, goTo: nil, focused: $0)) != nil
+        } ?? false
+        guard selecting.map({ sameToastTarget($0, current) }) == true || verifiedPanel else { return nil }
         return anchor
     }
 }

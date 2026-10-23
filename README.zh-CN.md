@@ -4,7 +4,7 @@
 
 使用 **Rust + Swift** 实现的独立 macOS 应用窗口自动化 CLI。面向能执行命令、读取本地图片的 Agent，**不依赖 Electron、Node.js、Bun、浏览器扩展或 Chrome 远程调试端口**。
 
-**0.2.0** 新增 **`desktop-control`** 通用应用入口；**`copis-chrome` 保持仅支持 Chrome**，兼容已有调用方。两者复用同一套原生截图与输入链路，JSON 协议仍为 **1**。
+**0.2.3** 新增默认命令 **`mcc`**、用户级 `sh` 安装脚本和[受控原生授权弹窗](docs/NATIVE-DIALOGS.md)支持。`mcc` 与 `desktop-control` 共用通用模式；**`copis-chrome` 保持仅支持 Chrome**，旧入口与 JSON 协议 **1** 均兼容。
 
 ## 功能
 
@@ -18,6 +18,33 @@
 - 用户接管鼠标或切换应用时暂停输入，不重放旧的排队动作。
 
 这是**本机 GUI 自动化**，不是 DOM 自动化或隔离浏览器。输入可能唤起所选应用并占用真实桌面的鼠标键盘；只读观察不需要目标应用切到前台。
+
+## 安装与默认命令
+
+在源码目录或解压后的完整功能包中运行：
+
+```bash
+sh ./install.sh
+# 如果安装输出提示 PATH 未激活，执行它打印的 export PATH=... 命令。
+mcc --help
+mcc --version
+mcc permissions
+mcc apps
+```
+
+默认将完整功能包安装到 `~/.local/lib/macos-control-cli/0.2.3/`，创建 `~/.local/bin/mcc` 命令链接。不需要 sudo，不改写 `.zshrc`、`.zprofile` 等用户配置；可自行将打印的 PATH 设置加入配置，后续终端自动可用。**安装脚本是子进程，不能直接修改当前终端的 PATH。**
+
+源码目录优先使用已构建产物；没有完整产物时调用 `build.sh`，需要 Rust 与 Xcode Command Line Tools。解压包无需 Rust、Swift、Python、Node.js 或联网下载；架构和代码签名会在安装前校验。本脚本暂不从 GitHub Release 下载。
+
+```bash
+sh ./install.sh --help
+sh ./install.sh --prefix "$HOME/tools/mcc"
+sh ./install.sh --package /绝对路径/copis-chrome-0.2.3-darwin-arm64
+```
+
+重复安装相同内容不会改写已有版本；无关同名命令和内容不同的同版本安装会被拒绝。升级前先结束**自己运行目录**内旧 daemon，再用新入口建立新连接；不要停止其他任务的 daemon。更换安装路径可能需要重新授予系统权限。
+
+`mcc --help` 包括全部命令、权限、最小调用流程、原像素坐标、暂停规则及退出清理。本说明中的 `desktop-control` 命令也可直接替换为 `mcc`；两者使用同一个 `COPIS_DESKTOP_RUNTIME_DIR`，不要将其与 Chrome-only runtime 混用。
 
 ## 环境要求
 
@@ -43,9 +70,11 @@ Apple Silicon 上的 0.2.2 产物：
 
 ```text
 dist/
-  copis-chrome-0.2.2-darwin-arm64/
+  copis-chrome-0.2.3-darwin-arm64/
     copis-chrome
     desktop-control
+    mcc
+    install.sh
     copis-chrome-helper
     module.json
     README.md
@@ -55,14 +84,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.2.2-darwin-arm64.tar.gz
-  copis-chrome-0.2.2-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.2.3-darwin-arm64.tar.gz
+  copis-chrome-0.2.3-darwin-arm64.tar.gz.sha256
 ```
 
 Intel 后缀为 `darwin-x64`。`bash ./build.sh debug` 可生成调试包。可以直接使用构建目录，也可将整个版本目录复制到稳定安装位置；CLI 入口、原生 helper 和 `assets/` 必须保持相邻，不要只复制 CLI。
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.2-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.3-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -73,7 +102,7 @@ export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.2-darwin-arm64/copis-chrome"
 `desktop-control` 与 `copis-chrome-helper`、`assets/` 保持在同一目录。ARM 本机构建示例：
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.2-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.3-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit

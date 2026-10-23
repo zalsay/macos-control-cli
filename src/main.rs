@@ -15,14 +15,12 @@ fn main() {
         .and_then(|args| args::parse_for_scope(args, scope));
     let result = match parsed {
         Ok(Command::Help) => {
-            print!(
-                "{}",
-                if scope == Scope::Desktop {
-                    args::DESKTOP_HELP
-                } else {
-                    args::HELP
-                }
-            );
+            let executable = std::env::args_os().next().unwrap_or_default();
+            let program = std::path::Path::new(&executable)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            print!("{}", args::help_text(scope, program));
             return;
         }
         Ok(Command::Version) => Ok(json!({"version":env!("CARGO_PKG_VERSION")})),

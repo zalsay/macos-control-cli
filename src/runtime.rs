@@ -224,8 +224,10 @@ pub fn helper_path(scope: Scope) -> Result<PathBuf> {
     let path = if let Some(path) = std::env::var_os(variable) {
         PathBuf::from(path)
     } else {
-        let executable =
-            std::env::current_exe().map_err(|e| Error::io("无法定位当前可执行文件", e))?;
+        // 安装后的 mcc 是 bin/ 下的链接，资源必须相对真实版本目录查找。
+        let executable = std::env::current_exe()
+            .and_then(fs::canonicalize)
+            .map_err(|e| Error::io("无法定位当前可执行文件的真实路径", e))?;
         executable
             .parent()
             .ok_or_else(|| Error::new("HELPER_NOT_FOUND", "无法定位功能包目录"))?

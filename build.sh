@@ -19,7 +19,7 @@ case "$RUST_HOST" in
   *) echo "[copis-chrome] 不支持当前构建架构" >&2; exit 1 ;;
 esac
 
-# 同一包始终使用宿主平台编译两个二进制，不复用其他平台产物。
+# 同一包始终使用宿主平台编译三个 CLI 二进制，不复用其他平台产物。
 PACKAGE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$PACKAGE_DIR/Cargo.toml" | head -n 1)"
 PACKAGE_NAME="copis-chrome-${PACKAGE_VERSION}-darwin-${PACKAGE_ARCH}"
 PACKAGE_OUTPUT="$PACKAGE_DIR/dist/$PACKAGE_NAME"
@@ -32,14 +32,17 @@ MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --manifest-path "$PACKAGE_DIR
 swiftc -O -target "$SWIFT_TARGET" "$PACKAGE_DIR"/swift/*.swift -o "$PACKAGE_BUILD/copis-chrome-helper"
 cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/copis-chrome" "$PACKAGE_BUILD/copis-chrome"
 cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/desktop-control" "$PACKAGE_BUILD/desktop-control"
-chmod 755 "$PACKAGE_BUILD/copis-chrome" "$PACKAGE_BUILD/desktop-control" "$PACKAGE_BUILD/copis-chrome-helper"
+cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/mcc" "$PACKAGE_BUILD/mcc"
+chmod 755 "$PACKAGE_BUILD/mcc" "$PACKAGE_BUILD/copis-chrome" "$PACKAGE_BUILD/desktop-control" "$PACKAGE_BUILD/copis-chrome-helper"
 
-# 为两项二进制设置明确 identifier；系统权限是否沿用仍由 macOS TCC 决定。
+# 为 CLI 和 helper 设置明确 identifier；系统权限是否沿用仍由 macOS TCC 决定。
 # 分发时可通过 COPIS_CHROME_SIGN_IDENTITY 指定 Developer ID；默认仅本机 ad-hoc 签名。
 PACKAGE_SIGN_IDENTITY="${COPIS_CHROME_SIGN_IDENTITY:--}"
 codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.chrome-desktop.helper "$PACKAGE_BUILD/copis-chrome-helper"
 codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.chrome-desktop.cli "$PACKAGE_BUILD/copis-chrome"
 codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.desktop-control.cli "$PACKAGE_BUILD/desktop-control"
+codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.macos-control.cli "$PACKAGE_BUILD/mcc"
+cp "$PACKAGE_DIR/install.sh" "$PACKAGE_BUILD/install.sh"
 cp "$PACKAGE_DIR/USAGE.md" "$PACKAGE_BUILD/USAGE.md"
 cp "$PACKAGE_DIR/LICENSE" "$PACKAGE_BUILD/LICENSE"
 cp "$PACKAGE_DIR/README.md" "$PACKAGE_DIR/README.zh-CN.md" "$PACKAGE_BUILD/"
@@ -48,7 +51,7 @@ mkdir -p "$PACKAGE_BUILD/assets" "$PACKAGE_BUILD/source/assets" "$PACKAGE_BUILD/
 cp "$PACKAGE_DIR/assets/copis-logo.png" "$PACKAGE_BUILD/assets/copis-logo.png"
 cp "$PACKAGE_DIR/assets/copis-logo.png" "$PACKAGE_BUILD/source/assets/copis-logo.png"
 cp -R "$PACKAGE_DIR/src" "$PACKAGE_DIR/swift" "$PACKAGE_DIR/tests" "$PACKAGE_DIR/docs" "$PACKAGE_BUILD/source/"
-cp "$PACKAGE_DIR/Cargo.toml" "$PACKAGE_DIR/Cargo.lock" "$PACKAGE_DIR/build.sh" "$PACKAGE_DIR/README.md" "$PACKAGE_DIR/README.zh-CN.md" "$PACKAGE_DIR/USAGE.md" "$PACKAGE_DIR/LICENSE" "$PACKAGE_DIR/.gitignore" "$PACKAGE_BUILD/source/"
+cp "$PACKAGE_DIR/Cargo.toml" "$PACKAGE_DIR/Cargo.lock" "$PACKAGE_DIR/build.sh" "$PACKAGE_DIR/install.sh" "$PACKAGE_DIR/README.md" "$PACKAGE_DIR/README.zh-CN.md" "$PACKAGE_DIR/USAGE.md" "$PACKAGE_DIR/LICENSE" "$PACKAGE_DIR/.gitignore" "$PACKAGE_BUILD/source/"
 cat > "$PACKAGE_BUILD/module.json" <<MANIFEST
 {
   "name": "chrome-desktop-cli",
