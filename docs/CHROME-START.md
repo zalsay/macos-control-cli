@@ -43,3 +43,7 @@ max_width_px = 1600
 - 截图保留原始像素，不缩放。宽上限1600px、高上限8192px、JPEG小于1MiB；任一超限返回 `IMAGE_TOO_LARGE`。高度边界放宽是为了全高Retina窗口，不改变同帧OCR/坐标转换或文件预算。
 
 不要对登录是否完成作推断：启动与布局只证明窗口就绪；`sent:true` 只证明事件投递。QR登录仍需要本人扫码和观察业务后置状态。任务结束只清理自己持有的连接/runtime，保留浏览器登录状态。
+
+## v0.3.2 可选profile
+
+`mcc chrome start --profile mcc` 按Chrome显示名称指定已有profile；不指定且未配置默认值时保持本页原有启动路径。可选默认值、登录态边界与窗口绑定见 [Chrome profile说明](CHROME-PROFILES.md)。

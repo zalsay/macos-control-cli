@@ -37,6 +37,8 @@ struct AppConfig {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ChromeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
     window: WindowConfig,
 }
 #[derive(Serialize, Deserialize)]
@@ -90,10 +92,16 @@ impl Store {
         }
         Ok(model)
     }
-    pub fn window_max_width(&self) -> Result<u32> {
+    pub fn chrome_start_settings(&self) -> Result<(u32, Option<String>)> {
         let config: AppConfig = self.read("config.toml")?;
         validate_window(&config.chrome.window)?;
-        Ok(config.chrome.window.max_width_px)
+        if let Some(profile) = &config.chrome.profile {
+            validate_chrome_profile(profile)?;
+        }
+        Ok((config.chrome.window.max_width_px, config.chrome.profile))
+    }
+    pub fn window_max_width(&self) -> Result<u32> {
+        self.chrome_start_settings().map(|(width, _)| width)
     }
     /// `input` is only read for --api-key-stdin; bounded and never echoed.
     pub fn execute(&self, args: &[String], input: impl Read) -> Result<Value> {
@@ -126,7 +134,24 @@ impl Store {
                 self.write("config.toml", &config)?;
                 Ok(json!({"saved":true,"chrome":config.chrome}))
             }
-            _ => Err(Error::invalid("配置命令：--config [show <name> | set <name> --url <url> --model <model> --api-key-stdin | default <name> | window --max-width <400..1600>]")),
+            ["chrome", "--profile", profile] => {
+                validate_chrome_profile(profile)?;
+                let _lock = self.lock()?;
+                let mut config: AppConfig = self.read("config.toml")?;
+                validate_window(&config.chrome.window)?;
+                config.chrome.profile = Some((*profile).to_owned());
+                self.write("config.toml", &config)?;
+                Ok(json!({"saved":true,"chrome":config.chrome}))
+            }
+            ["chrome", "--clear-profile"] => {
+                let _lock = self.lock()?;
+                let mut config: AppConfig = self.read("config.toml")?;
+                validate_window(&config.chrome.window)?;
+                config.chrome.profile = None;
+                self.write("config.toml", &config)?;
+                Ok(json!({"saved":true,"chrome":config.chrome}))
+            }
+            _ => Err(Error::invalid("配置命令：--config [show <name> | set <name> --url <url> --model <model> --api-key-stdin | default <name> | window --max-width <400..1600> | chrome --profile <name> | chrome --clear-profile]")),
         }
     }
     fn set_model(&self, name: &str, args: &[&str], input: impl Read) -> Result<Value> {
@@ -224,15 +249,23 @@ impl Store {
     }
     fn summary(&self) -> Result<Value> {
         let models = self.models()?;
+        let (max_width_px, profile) = self.chrome_start_settings()?;
         let mut views = BTreeMap::new();
         for (name, model) in &models.models {
             views.insert(name, masked(model));
         }
-        Ok(
-            json!({"models_path":self.directory.join("models.toml"),"config_path":self.directory.join("config.toml"),
-            "configured":models.default_model.is_some(),"default_model":models.default_model,"models":views,
-            "chrome":{"window":{"position":"left","height":"available","max_width_px":self.window_max_width()?}}}),
-        )
+        let mut summary = json!({
+            "models_path":self.directory.join("models.toml"),
+            "config_path":self.directory.join("config.toml"),
+            "configured":models.default_model.is_some(),
+            "default_model":models.default_model,
+            "models":views,
+            "chrome":{"window":{"position":"left","height":"available","max_width_px":max_width_px}}
+        });
+        if let Some(profile) = profile {
+            summary["chrome"]["profile"] = json!(profile);
+        }
+        Ok(summary)
     }
     fn read<T: for<'de> Deserialize<'de> + Default>(&self, filename: &str) -> Result<T> {
         if !self.check_directory()? {
@@ -389,6 +422,18 @@ fn validate_window(window: &WindowConfig) -> Result<()> {
         || !(400..=1600).contains(&window.max_width_px)
     {
         return Err(invalid());
+    }
+    Ok(())
+}
+pub fn validate_chrome_profile(profile: &str) -> Result<()> {
+    let scalar_count = profile.chars().count();
+    if !(1..=128).contains(&scalar_count)
+        || profile.chars().any(char::is_control)
+        || profile.trim() != profile
+    {
+        return Err(Error::invalid(
+            "Chrome profile显示名称须为1–128个Unicode字符，不含控制字符或首尾空白",
+        ));
     }
     Ok(())
 }

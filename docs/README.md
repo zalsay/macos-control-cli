@@ -40,3 +40,6 @@ Build from the repository root with `bash ./build.sh`; no Copis/Electron/Bun dep
 - [v0.3.0模型配置与Chrome启动验证及待授权边界](V030-VERIFICATION.md)
 
 - [v0.3.1显式授权与Chrome实机验收](V031-VERIFICATION.md)
+
+- [Chrome profile指定与默认配置](CHROME-PROFILES.md)
+- [v0.3.2 profile验证](V032-VERIFICATION.md)

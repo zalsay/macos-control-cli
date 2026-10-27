@@ -16,6 +16,8 @@
 
 **v0.3.1修复：** `permissions` 查询三项权限（含Chrome自动化），`permissions --request` 统一显式申请，由本人确认；普通启动只读检查。授权与新窗布局已完成本机实测，见 [v0.3.1验证](docs/V031-VERIFICATION.md)。
 
+**v0.3.2新增：** `chrome start --profile <Chrome显示名称>` 指定已有profile；`--config chrome --profile <名称>` / `--clear-profile` 设置或清除可选默认值。缺失/重名拒绝，不创建profile或静默换账号。见 [Chrome profile说明](docs/CHROME-PROFILES.md)。
+
 ## 功能
 
 - 列出普通应用及窗口，连接到精确的窗口 ID、PID 与 bundle ID。

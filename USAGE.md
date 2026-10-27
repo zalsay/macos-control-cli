@@ -16,6 +16,8 @@
 
 **v0.3.1修复：** `permissions` 查询三项权限（含Chrome自动化），`permissions --request` 统一显式申请，由本人确认；普通启动只读检查。授权与新窗布局已完成本机实测，见 [v0.3.1验证](docs/V031-VERIFICATION.md)。
 
+**v0.3.2新增：** `chrome start --profile <Chrome显示名称>` 指定已有profile；`--config chrome --profile <名称>` / `--clear-profile` 设置或清除可选默认值。缺失/重名拒绝，不创建profile或静默换账号。见 [Chrome profile说明](docs/CHROME-PROFILES.md)。
+
 ## 默认入口与安装（v0.2.3）
 
 运行 `sh ./install.sh` 安装完整功能包并注册 `mcc`；默认前缀 `~/.local`，可用 `--prefix` 和 `--package` 指定本地安装来源。安装不修改 shell 配置；按输出激活 PATH。`mcc --help` 提供命令、权限、原像素坐标、暂停与退出说明，`mcc` 与 `desktop-control` 等价，共用通用运行目录。

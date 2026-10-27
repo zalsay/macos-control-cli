@@ -139,6 +139,21 @@ final class ChromeDesktop {
         return window
     }
 
+    // Native window metadata only, not DOM or web-page AX traversal. Match the
+    // one-time profile-launch marker before any geometry or navigation effect.
+    func windowDocument(_ target: TargetWindow, deadline: TimeInterval) throws -> String? {
+        _ = try window(target)
+        let element = try targetAXWindow(target, app: axApplication(target.pid))
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid == target.pid,
+              identifier(element) == target.windowId else {
+            throw HelperFailure(code: "PROFILE_WINDOW_UNVERIFIED", message: "profile窗口AX身份无法与CGWindowID对应")
+        }
+        let raw = axValue(element, kAXDocumentAttribute, deadline: deadline)
+        if let text = raw as? String { return text }
+        return (raw as? URL)?.absoluteString
+    }
+
     func verifyGeometry(_ target: TargetWindow, expected: WindowBounds) throws {
         guard try window(target).bounds.matches(expected) else {
             throw HelperFailure(code: "IMAGE_GEOMETRY_CHANGED", message: "目标窗口位置或尺寸已变化，请重新观察")

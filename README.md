@@ -16,6 +16,8 @@ Version **0.2.3** adds the default **`mcc`** command, a user-level `sh` installe
 
 **v0.3.1:** `permissions` now reports Chrome automation alongside screen recording/accessibility; `permissions --request` explicitly requests all three. Normal startup only checks. See [authorization and live validation](docs/V031-VERIFICATION.md).
 
+**v0.3.2:** `chrome start --profile <Chrome display name>` selects an existing Chrome profile. Optional defaults use `--config chrome --profile <name>` / `--clear-profile`; unknown or duplicate names fail instead of falling back. See [Chrome profiles](docs/CHROME-PROFILES.md).
+
 ## Features
 
 - List ordinary applications/windows and bind a connection to an exact window/PID/bundle ID.

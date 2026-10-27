@@ -63,6 +63,8 @@ struct NativeRequest {
     var imagePath = ""
     var filePath = ""
     var url = "about:blank"
+    var profile: String?
+    var profileMarkerPath: String?
     var maxWidthPx = 1600
     var requestPermissions = false
     var prepareToast = false
@@ -78,7 +80,7 @@ struct NativeRequest {
             "permissions": ["request"], "windows": [], "cancel": [],
             "window": ["windowId", "pid", "prepareToast"],
             "observe": ["windowId", "pid", "imagePath", "maxEdge"],
-            "chrome-start": ["url", "maxWidthPx"],
+            "chrome-start": ["url", "maxWidthPx", "profile", "profileMarkerPath"],
             "click": ["windowId", "pid", "expectedBounds", "screenX", "screenY", "clickCount"],
             "scroll": ["windowId", "pid", "expectedBounds", "screenX", "screenY", "deltaY"],
             "type": ["windowId", "pid", "expectedBounds", "text"],
@@ -157,6 +159,15 @@ struct NativeRequest {
             if let edge = json["maxEdge"] { _ = try integer(edge, range: 1600...1600) }
             request.imagePath = path
         case "chrome-start":
+            if let raw = json["profile"] {
+                guard let name = raw as? String, validChromeProfileName(name) else { throw HelperFailure.invalidArgument }
+                request.profile = name
+            }
+            if let raw = json["profileMarkerPath"] {
+                guard request.profile != nil, let path = raw as? String, validChromeProfileMarkerPath(path) else { throw HelperFailure.invalidArgument }
+                request.profileMarkerPath = path
+            }
+            if request.profile != nil && request.profileMarkerPath == nil { throw HelperFailure.invalidArgument }
             if let value = json["url"] {
                 guard let url = value as? String, validChromeStartURL(url) else {
                     throw HelperFailure.invalidArgument

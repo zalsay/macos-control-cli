@@ -226,3 +226,63 @@ fn malformed_default_and_unknown_fields_fail_without_echoing_toml_source() {
         assert!(f.store().resolve_model(None).is_err());
     }
 }
+
+#[test]
+fn chrome_profile_config_preserves_window_settings_and_can_be_cleared() {
+    let f = Fixture::new();
+    set(
+        &f,
+        "https://router.example/api",
+        "vendor/model",
+        "profile-test-key",
+    );
+    let models_before = std::fs::read(f.0.join("models.toml")).unwrap();
+    assert_eq!(f.store().window_max_width().unwrap(), 1600);
+    assert_eq!(f.store().chrome_start_settings().unwrap(), (1600, None));
+
+    f.run(&["chrome", "--profile", "mcc"], "").unwrap();
+    assert_eq!(
+        f.store().chrome_start_settings().unwrap(),
+        (1600, Some("mcc".to_owned()))
+    );
+    let initial = std::fs::read_to_string(f.0.join("config.toml")).unwrap();
+    let parsed: toml::Value = toml::from_str(&initial).unwrap();
+    assert_eq!(parsed["chrome"]["profile"].as_str(), Some("mcc"));
+    assert_eq!(
+        parsed["chrome"]["window"]["max_width_px"].as_integer(),
+        Some(1600)
+    );
+
+    f.run(&["window", "--max-width", "1400"], "").unwrap();
+    let settings: toml::Value =
+        toml::from_str(&std::fs::read_to_string(f.0.join("config.toml")).unwrap()).unwrap();
+    assert_eq!(settings["chrome"]["profile"].as_str(), Some("mcc"));
+    assert_eq!(f.store().window_max_width().unwrap(), 1400);
+    assert_eq!(
+        f.store().chrome_start_settings().unwrap(),
+        (1400, Some("mcc".to_owned()))
+    );
+
+    f.run(&["chrome", "--clear-profile"], "").unwrap();
+    let cleared = std::fs::read_to_string(f.0.join("config.toml")).unwrap();
+    let parsed: toml::Value = toml::from_str(&cleared).unwrap();
+    assert!(parsed["chrome"].get("profile").is_none());
+    assert_eq!(f.store().window_max_width().unwrap(), 1400);
+    assert_eq!(f.store().chrome_start_settings().unwrap(), (1400, None));
+    assert_eq!(
+        std::fs::read(f.0.join("models.toml")).unwrap(),
+        models_before
+    );
+}
+
+#[test]
+fn invalid_chrome_profiles_do_not_modify_existing_config() {
+    let f = Fixture::new();
+    f.run(&["chrome", "--profile", "mcc"], "").unwrap();
+    let before = std::fs::read(f.0.join("config.toml")).unwrap();
+
+    for invalid in ["", &"x".repeat(129), " mcc", "mcc ", "mcc\n"] {
+        assert!(f.run(&["chrome", "--profile", invalid], "").is_err());
+        assert_eq!(std::fs::read(f.0.join("config.toml")).unwrap(), before);
+    }
+}

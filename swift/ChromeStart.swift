@@ -250,6 +250,7 @@ final class ChromeStarter {
         // without creating a lease/countdown or mutating the user's cancellation state.
         let permit = try cancellation.beginSetup(generation: generation, expectedEpoch: epoch)
         let budget = ChromeStartBudget()
+        let profile = try request.profile.map { try resolveChromeProfile(name: $0) }
         try requireChromeAutomationPermission()
         try budget.check(cancellation, permit: permit)
         let layout = try currentLayout(maxWidthPx: request.maxWidthPx, permit: permit, budget: budget)
@@ -259,26 +260,46 @@ final class ChromeStarter {
             ChromeWindowIdentity(pid: $0.target.pid, windowID: $0.target.windowId)
         })
         try budget.check(cancellation, permit: permit)
-        let receipt = try createChromeWindow(url: request.url, marker: probes.first,
-                                            permit: permit, budget: budget)
-        guard sameBounds(receipt.bounds, probes.first, tolerance: 0.75) else {
-            throw HelperFailure(code: "CHROME_RECEIPT_MISMATCH", message: "新 Chrome 窗口未处于第一阶段 receipt 几何")
-        }
-        let target = try waitForReceiptWindow(before: before, marker: receipt.bounds,
-                                              permit: permit, budget: budget)
-        let movedReceipt = try moveReceiptWindow(receipt, to: probes.second, permit: permit, budget: budget)
-        guard movedReceipt.appleScriptWindowID == receipt.appleScriptWindowID,
-              sameBounds(movedReceipt.bounds, probes.second, tolerance: 0.75) else {
-            throw HelperFailure(code: "CHROME_RECEIPT_MISMATCH", message: "AppleScript receipt ID 未绑定到同一 Chrome 窗口对象")
-        }
-        try waitForReceiptTransition(target, from: receipt.bounds, to: movedReceipt.bounds,
-                                     permit: permit, budget: budget)
-        let axWindow = try verifiedAXWindow(target, permit: permit, budget: budget)
-        try apply(layout, to: axWindow, target: target, permit: permit, budget: budget)
-        let measured = try waitForStableReadback(layout, target: target, axWindow: axWindow,
+        let target: TargetWindow
+        var explicitReceipt: ChromeCreationReceipt?
+        var profileMarker: String?
+        if let profile {
+            guard let markerPath = request.profileMarkerPath else { throw HelperFailure.invalidArgument }
+            let marker = try createChromeProfileMarker(path: markerPath).absoluteString
+            let created = try createProfileWindow(profile, marker: marker, probes: probes,
+                                                  layout: layout, before: before, permit: permit, budget: budget)
+            target = created.target
+            explicitReceipt = created.receipt
+            profileMarker = marker
+        } else {
+            let receipt = try createChromeWindow(url: request.url, marker: probes.first,
                                                 permit: permit, budget: budget)
+            guard sameBounds(receipt.bounds, probes.first, tolerance: 0.75) else {
+                throw HelperFailure(code: "CHROME_RECEIPT_MISMATCH", message: "新 Chrome 窗口未处于第一阶段 receipt 几何")
+            }
+            target = try waitForReceiptWindow(before: before, marker: receipt.bounds,
+                                                  permit: permit, budget: budget)
+            let movedReceipt = try moveReceiptWindow(receipt, to: probes.second, permit: permit, budget: budget)
+            guard movedReceipt.appleScriptWindowID == receipt.appleScriptWindowID,
+                  sameBounds(movedReceipt.bounds, probes.second, tolerance: 0.75) else {
+                throw HelperFailure(code: "CHROME_RECEIPT_MISMATCH", message: "AppleScript receipt ID 未绑定到同一 Chrome 窗口对象")
+            }
+            try waitForReceiptTransition(target, from: receipt.bounds, to: movedReceipt.bounds,
+                                         permit: permit, budget: budget)
+        }
+        let axWindow = try verifiedAXWindow(target, permit: permit, budget: budget)
+        try apply(layout.bounds, to: axWindow, target: target, permit: permit, budget: budget, marker: profileMarker)
+        if let profile, let receipt = explicitReceipt, let marker = profileMarker {
+            try profile.revalidate()
+            try navigateProfileWindow(receipt, marker: marker, url: request.url, permit: permit, budget: budget)
+            try profile.revalidate()
+        }
+        let measured = try waitForStableReadback(layout.bounds, scale: layout.scale, maxWidthPx: layout.maxWidthPx,
+                                                target: target, axWindow: axWindow, permit: permit, budget: budget)
         try budget.check(cancellation, permit: permit)
-        return ["window": measured.json, "layout": try layout.json(measuredBounds: measured.bounds)]
+        var result: [String: Any] = ["window": measured.json, "layout": try layout.json(measuredBounds: measured.bounds)]
+        if let profile { result["profile"] = profile.json }
+        return result
     }
 
     private func currentLayout(maxWidthPx: Int, permit: StartupPermit,
@@ -329,6 +350,138 @@ final class ChromeStarter {
             throw HelperFailure(code: "CHROME_RECEIPT_INVALID", message: "Chrome AppleScript receipt 不是有效 UTF-8")
         }
         return output
+    }
+
+    private func createProfileWindow(_ profile: ChromeProfileSelection, marker: String,
+                                     probes: (first: WindowBounds, second: WindowBounds),
+                                     layout: ChromeStartLayout, before: Set<ChromeWindowIdentity>,
+                                     permit: StartupPermit, budget: ChromeStartBudget) throws
+        -> (target: TargetWindow, receipt: ChromeCreationReceipt) {
+        try budget.check(cancellation, permit: permit)
+        try profile.revalidate()
+        guard let application = onMain({ NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") }) else {
+            throw HelperFailure(code: "CHROME_NOT_INSTALLED", message: "无法找到正式版Google Chrome应用")
+        }
+        let launcher = Process()
+        launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        launcher.arguments = try chromeProfileLaunchArguments(application: application, profile: profile, marker: marker)
+        // LaunchServices owns the browser lifetime. Cancelling only reaps our short-lived
+        // open launcher, never an existing (or newly running) user's browser process.
+        try withCancellableSetupProcess(launcher, cancellation: cancellation, permit: permit,
+                                        timeout: try budget.remaining(cancellation, permit: permit),
+                                        timeoutCode: "CHROME_START_TIMEOUT", failureCode: "PROFILE_LAUNCH_FAILED",
+                                        failureMessage: "无法启动指定Chrome profile", timeoutMessage: "Chrome profile启动超时",
+                                        readOutput: { () })
+        try profile.revalidate()
+        let target = try waitForProfileMarker(marker, before: before, permit: permit, budget: budget)
+        let ax = try verifiedAXWindow(target, permit: permit, budget: budget)
+        // Only mutate the new CG/AX window that itself exposes our unique document
+        // marker. AppleScript merely reads A->B, so it cannot resize another window.
+        try apply(probes.first, to: ax, target: target, permit: permit, budget: budget, marker: marker)
+        let first = try waitForStableReadback(probes.first, scale: layout.scale, maxWidthPx: layout.maxWidthPx,
+                                               target: target, axWindow: ax, permit: permit, budget: budget)
+        let receipt = try readProfileMarkerReceipt(marker, id: nil, expected: first.bounds, permit: permit, budget: budget)
+        try profile.revalidate()
+        try apply(probes.second, to: ax, target: target, permit: permit, budget: budget, marker: marker)
+        let second = try waitForStableReadback(probes.second, scale: layout.scale, maxWidthPx: layout.maxWidthPx,
+                                                target: target, axWindow: ax, permit: permit, budget: budget)
+        let moved = try readProfileMarkerReceipt(marker, id: receipt.appleScriptWindowID,
+                                                expected: second.bounds, permit: permit, budget: budget)
+        guard moved.appleScriptWindowID == receipt.appleScriptWindowID else {
+            throw HelperFailure(code: "PROFILE_WINDOW_UNVERIFIED", message: "profile窗口AppleScript身份在原生几何迁移时变化")
+        }
+        try waitForReceiptTransition(target, from: first.bounds, to: moved.bounds, permit: permit, budget: budget)
+        try profile.revalidate()
+        return (target, moved)
+    }
+
+    private func waitForProfileMarker(_ marker: String, before: Set<ChromeWindowIdentity>,
+                                       permit: StartupPermit, budget: ChromeStartBudget) throws -> TargetWindow {
+        let deadline = try budget.stageDeadline(cancellation, permit: permit, maximum: 8)
+        repeat {
+            try budget.check(cancellation, permit: permit)
+            var matches: [ChromeWindow] = []
+            for window in chromeWindows() where window.layer == 0 {
+                try budget.check(cancellation, permit: permit)
+                if (try? desktop.windowDocument(window.target, deadline: deadline)) == marker { matches.append(window) }
+            }
+            if let target = try selectProfileMarkerWindow(before: before, matches: matches) {
+                try requireProfileMarker(target, marker: marker, permit: permit, budget: budget)
+                return target
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        try budget.check(cancellation, permit: permit)
+        throw HelperFailure(code: "PROFILE_WINDOW_UNVERIFIED", message: "无法把profile启动标记绑定到新的原生Chrome窗口；不会回退或猜测")
+    }
+
+    private func requireProfileMarker(_ target: TargetWindow, marker: String,
+                                       permit: StartupPermit, budget: ChromeStartBudget) throws {
+        try budget.check(cancellation, permit: permit)
+        let deadline = try budget.stageDeadline(cancellation, permit: permit, maximum: 0.5)
+        guard try desktop.windowDocument(target, deadline: deadline) == marker else {
+            throw HelperFailure(code: "PROFILE_MARKER_LOST", message: "profile窗口启动标记已变化；停止后续布局或导航")
+        }
+        try budget.check(cancellation, permit: permit)
+    }
+
+    private func readProfileMarkerReceipt(_ marker: String, id: String?, expected: WindowBounds,
+                                           permit: StartupPermit, budget: ChromeStartBudget) throws -> ChromeCreationReceipt {
+        // Read-only: never use an unbound AppleScript object to change geometry.
+        let script = """
+        on run argv
+            \(chromeReceiptSeparatorScript)
+            set markerURL to item 1 of argv
+            set receiptID to item 2 of argv
+            tell application id "com.google.Chrome"
+                set matchedWindows to {}
+                if receiptID is "" then
+                    repeat with candidateWindow in windows
+                        try
+                            if (URL of active tab of candidateWindow as text) is markerURL then
+                                set end of matchedWindows to candidateWindow
+                            end if
+                        end try
+                    end repeat
+                else
+                    set matchedWindows to every window whose id is (receiptID as integer)
+                end if
+                if (count of matchedWindows) is not 1 then return "PROFILE_MARKER_UNVERIFIED"
+                set targetWindow to item 1 of matchedWindows
+                if (URL of active tab of targetWindow as text) is not markerURL then return "PROFILE_MARKER_UNVERIFIED"
+                set actualBounds to bounds of targetWindow
+                return (id of targetWindow as text) & mccReceiptSeparator & (item 1 of actualBounds as text) & mccReceiptSeparator & (item 2 of actualBounds as text) & mccReceiptSeparator & (item 3 of actualBounds as text) & mccReceiptSeparator & (item 4 of actualBounds as text)
+            end tell
+        end run
+        """
+        let output = try receiptScriptOutput(script, arguments: [marker, id ?? ""], permit: permit, budget: budget)
+        if output.trimmingCharacters(in: .whitespacesAndNewlines) == "PROFILE_MARKER_UNVERIFIED" {
+            throw HelperFailure(code: "PROFILE_WINDOW_UNVERIFIED", message: "无法唯一对应profile标记与AppleScript窗口身份")
+        }
+        return try parseChromeCreationReceipt(output, expectedBounds: expected)
+    }
+
+    private func navigateProfileWindow(_ receipt: ChromeCreationReceipt, marker: String, url: String,
+                                        permit: StartupPermit, budget: ChromeStartBudget) throws {
+        let script = """
+        on run argv
+            set receiptID to (item 1 of argv) as integer
+            set markerURL to item 2 of argv
+            set targetURL to item 3 of argv
+            tell application id "com.google.Chrome"
+                set matchedWindows to every window whose id is receiptID
+                if (count of matchedWindows) is not 1 then return "PROFILE_MARKER_UNVERIFIED"
+                set targetWindow to item 1 of matchedWindows
+                if (URL of active tab of targetWindow as text) is not markerURL then return "PROFILE_MARKER_UNVERIFIED"
+                set URL of active tab of targetWindow to targetURL
+                return id of targetWindow as text
+            end tell
+        end run
+        """
+        let output = try receiptScriptOutput(script, arguments: [receipt.appleScriptWindowID, marker, url], permit: permit, budget: budget)
+        guard output.trimmingCharacters(in: .whitespacesAndNewlines) == receipt.appleScriptWindowID else {
+            throw HelperFailure(code: "PROFILE_WINDOW_UNVERIFIED", message: "profile窗口导航前身份或标记不匹配；未继续连接")
+        }
     }
 
     private func createChromeWindow(url: String, marker: WindowBounds,
@@ -460,23 +613,25 @@ final class ChromeStarter {
                             message: "receipt 对应的 CGWindowID 无法精确映射到 AX：\(lastFailure?.code ?? "未取得 AX 窗口")")
     }
 
-    private func apply(_ layout: ChromeStartLayout, to window: AXUIElement,
-                       target: TargetWindow, permit: StartupPermit, budget: ChromeStartBudget) throws {
+    private func apply(_ bounds: WindowBounds, to window: AXUIElement,
+                       target: TargetWindow, permit: StartupPermit, budget: ChromeStartBudget, marker: String? = nil) throws {
         try budget.check(cancellation, permit: permit)
         _ = try desktop.window(target)
         AXUIElementSetMessagingTimeout(window, 0.35)
-        var size = CGSize(width: layout.bounds.width, height: layout.bounds.height)
-        var position = CGPoint(x: layout.bounds.x, y: layout.bounds.y)
+        var size = CGSize(width: bounds.width, height: bounds.height)
+        var position = CGPoint(x: bounds.x, y: bounds.y)
         guard let sizeValue = AXValueCreate(.cgSize, &size),
               let positionValue = AXValueCreate(.cgPoint, &position) else {
             throw HelperFailure(code: "CHROME_LAYOUT_FAILED", message: "无法构造 Chrome AX 窗口几何值")
         }
         try applyChromeStartGeometry(position: {
+            if let marker { try requireProfileMarker(target, marker: marker, permit: permit, budget: budget) }
             try budget.check(cancellation, permit: permit)
             return try cancellation.setupEffect(permit: permit) {
                 AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
             }
         }, size: {
+            if let marker { try requireProfileMarker(target, marker: marker, permit: permit, budget: budget) }
             try budget.check(cancellation, permit: permit)
             return try cancellation.setupEffect(permit: permit) {
                 AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
@@ -485,13 +640,14 @@ final class ChromeStarter {
         try budget.check(cancellation, permit: permit)
     }
 
-    private func waitForStableReadback(_ layout: ChromeStartLayout, target: TargetWindow,
+    private func waitForStableReadback(_ expected: WindowBounds, scale: Double, maxWidthPx: Int,
+                                       target: TargetWindow,
                                        axWindow: AXUIElement, permit: StartupPermit,
                                        budget: ChromeStartBudget) throws -> ChromeWindow {
         let deadline = try budget.stageDeadline(cancellation, permit: permit, maximum: 2)
         var previous: WindowBounds?
         var lastMeasured: ChromeWindow?
-        let tolerance = max(0.5, 1.0 / layout.scale)
+        let tolerance = max(0.5, 1.0 / scale)
         repeat {
             try budget.check(cancellation, permit: permit)
             let ax: WindowBounds
@@ -500,14 +656,14 @@ final class ChromeStarter {
             guard [ax.x, ax.y, ax.width, ax.height].allSatisfy(\.isFinite), ax.width > 0, ax.height > 0 else {
                 throw HelperFailure(code: "CHROME_LAYOUT_READBACK_FAILED", message: "新 Chrome 窗口返回无效 AX 几何")
             }
-            if ax.width * layout.scale > Double(layout.maxWidthPx) + 0.5 {
+            if ax.width * scale > Double(maxWidthPx) + 0.5 {
                 throw HelperFailure(code: "CHROME_WIDTH_CAP_UNMET",
                                     message: "Chrome 新窗口被最小宽度限制，实际原始像素宽度超过 maxWidthPx")
             }
             let window = try desktop.window(target)
             lastMeasured = window
-            if sameBounds(ax, layout.bounds, tolerance: tolerance),
-               sameBounds(window.bounds, layout.bounds, tolerance: tolerance),
+            if sameBounds(ax, expected, tolerance: tolerance),
+               sameBounds(window.bounds, expected, tolerance: tolerance),
                abs(ax.width - window.bounds.width) <= tolerance,
                abs(ax.height - window.bounds.height) <= tolerance {
                 if let previous, sameBounds(window.bounds, previous, tolerance: 0.25) { return window }
@@ -518,7 +674,7 @@ final class ChromeStarter {
             Thread.sleep(forTimeInterval: 0.05)
         } while ProcessInfo.processInfo.systemUptime < deadline
         try budget.check(cancellation, permit: permit)
-        if let lastMeasured, lastMeasured.bounds.width * layout.scale > Double(layout.maxWidthPx) + 0.5 {
+        if let lastMeasured, lastMeasured.bounds.width * scale > Double(maxWidthPx) + 0.5 {
             throw HelperFailure(code: "CHROME_WIDTH_CAP_UNMET",
                                 message: "Chrome 新窗口最终宽度超过 maxWidthPx，未调整任何其他窗口")
         }

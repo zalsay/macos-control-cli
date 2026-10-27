@@ -67,6 +67,9 @@ swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
 "$scratch/capture-fallback-tests"
 swiftc -O -warnings-as-errors -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
   "$root/tests/chrome-start/main.swift" -o "$scratch/chrome-start-tests"
+swiftc -O -warnings-as-errors -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
+  "$root/tests/chrome-profile/main.swift" -o "$scratch/chrome-profile-tests"
+"$scratch/chrome-profile-tests"
 "$scratch/chrome-start-tests"
 swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
   "$root/tests/pointer-target/main.swift" -o "$scratch/pointer-target-tests"
@@ -148,6 +151,12 @@ for url in [None, "", "about:blank", "javascript:alert(1)", "file:///tmp/a", "ft
             "https://user:secret@example.com", "https://" + "a" * 4100]:
     invalid("chrome-start URL", dict(action="chrome-start", url=url))
 invalid("chrome-start未知字段", {"action": "chrome-start", "extra": True})
+invalid("profile缺少内部标记路径", {"action": "chrome-start", "profile": "mcc"})
+invalid("标记路径不得单独提供", {"action": "chrome-start", "profileMarkerPath": "/tmp/mcc-profile-1234567890123456.html"})
+for path in ["relative", "/tmp/../mcc-profile-1234567890123456.html", "/tmp/other.html", True]:
+    invalid("profile内部标记路径无效", {"action": "chrome-start", "profile": "mcc", "profileMarkerPath": path})
+for profile in ["", " mcc", "mcc ", "bad\n", "x" * 129, True, 42, None]:
+    invalid("Chrome profile显示名称无效", {"action": "chrome-start", "profile": profile})
 invalid("缺少动作", {}, "INVALID_REQUEST")
 invalid("错误动作类型", {"action": 1}, "INVALID_REQUEST")
 

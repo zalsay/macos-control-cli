@@ -88,7 +88,7 @@ impl<N: Native> Service<N> {
     pub fn execute(&mut self, request: Value) -> Result<Value> {
         let action = string(&request, "action")?;
         let allowed: &[&str] = match action {
-            "chrome-start" => &["action", "url", "maxWidthPx"],
+            "chrome-start" => &["action", "url", "maxWidthPx", "profile"],
             "status" | "apps" => &["action"],
             "windows" => &["action", "bundleId"],
             "permissions" => &["action", "request"],
@@ -271,6 +271,16 @@ impl<N: Native> Service<N> {
                 ));
             }
         }
+        let requested_profile = request
+            .get("profile")
+            .map(|raw| {
+                let name = raw
+                    .as_str()
+                    .ok_or_else(|| Error::invalid("profile必须为Chrome显示名称字符串"))?;
+                crate::config::validate_chrome_profile(name)?;
+                Ok(name)
+            })
+            .transpose()?;
         let permissions = self
             .native
             .request(json!({"action":"permissions","request":false}))?;
@@ -286,7 +296,58 @@ impl<N: Native> Service<N> {
                 "Chrome 窗口布局需要辅助功能权限；尚未创建窗口",
             ));
         }
-        let launched = self.native.request(request.clone())?;
+        let mut native_request = request.clone();
+        let marker_path = if requested_profile.is_some() {
+            let path = self
+                .frames_dir
+                .join(format!("mcc-profile-{}.html", random_id()?));
+            native_request["profileMarkerPath"] = json!(path);
+            Some(path)
+        } else {
+            None
+        };
+        let launched = self.native.request(native_request);
+        // Own the resource in the existing daemon/frames lifecycle, including helper
+        // failures and cancellation. The browser never receives account data here.
+        if let Some(path) = marker_path {
+            let _ = std::fs::remove_file(path);
+        }
+        let launched = launched?;
+        let selected_profile = if let Some(name) = requested_profile {
+            let raw = &launched["profile"];
+            let valid = raw.as_object().is_some_and(|p| p.len() == 3)
+                && raw["name"].as_str() == Some(name)
+                && raw["directory"].as_str().is_some_and(|directory| {
+                    !directory.is_empty()
+                        && directory.len() <= 255
+                        && ![".", "..", "Guest Profile", "System Profile"].contains(&directory)
+                        && !directory.contains(['/', '\\'])
+                        && !directory.chars().any(char::is_control)
+                        && raw["path"].as_str().is_some_and(|path| {
+                            let p = Path::new(path);
+                            path.len() <= 4096
+                                && !path.chars().any(char::is_control)
+                                && p.is_absolute()
+                                && p.file_name().and_then(|v| v.to_str()) == Some(directory)
+                                && !p.components().any(|c| {
+                                    matches!(
+                                        c,
+                                        std::path::Component::ParentDir
+                                            | std::path::Component::CurDir
+                                    )
+                                })
+                        })
+                });
+            if !valid {
+                return Err(Error::new(
+                    "PROFILE_UNVERIFIED",
+                    "原生返回的profile身份无法与指定名称及目录对应；未建立连接",
+                ));
+            }
+            Some(raw.clone())
+        } else {
+            None
+        };
         let window: Window = decode(launched["window"].clone())?;
         if window.window_id == 0
             || window.pid <= 0
@@ -308,6 +369,9 @@ impl<N: Native> Service<N> {
                 "WINDOW_CHANGED",
                 "启动与连接之间窗口身份或几何变化；未执行输入",
             ));
+        }
+        if let Some(profile) = selected_profile {
+            connected["profile"] = profile;
         }
         connected["layout"] = launched["layout"].clone();
         connected["created"] = json!(true);

@@ -70,8 +70,10 @@ fn execute(command: Command, scope: Scope) -> Result<Value> {
                 request["jevProtocol"] = json!(copis_chrome::jev::DECISION_PROTOCOL);
             }
             if request["action"] == "chrome-start" {
-                request["maxWidthPx"] =
-                    json!(copis_chrome::config::Store::from_env()?.window_max_width()?);
+                apply_chrome_start_settings(
+                    &mut request,
+                    &copis_chrome::config::Store::from_env()?,
+                )?;
             }
             if request["action"] == "status" {
                 return daemon::status(&runtime);
@@ -103,10 +105,89 @@ fn execute(command: Command, scope: Scope) -> Result<Value> {
         Command::Help | Command::Version | Command::Config(_) => unreachable!(),
     }
 }
+fn apply_chrome_start_settings(
+    request: &mut Value,
+    store: &copis_chrome::config::Store,
+) -> Result<()> {
+    let (max_width_px, default_profile) = store.chrome_start_settings()?;
+    request["maxWidthPx"] = json!(max_width_px);
+    if request.get("profile").is_none() {
+        if let Some(profile) = default_profile {
+            request["profile"] = json!(profile);
+        }
+    }
+    Ok(())
+}
 #[cfg(not(unix))]
 fn execute(_: Command, _: Scope) -> Result<Value> {
     Err(Error::new(
         "UNSUPPORTED_PLATFORM",
         "桌面自动化仅支持 macOS 14 及以上版本",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use copis_chrome::config::Store;
+
+    struct ConfigFixture(std::path::PathBuf);
+    impl ConfigFixture {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!(
+                "mcc-main-profile-{}",
+                copis_chrome::protocol::random_id().unwrap()
+            )))
+        }
+
+        fn store(&self) -> Store {
+            Store::new(self.0.clone())
+        }
+    }
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn explicit_profile_wins_and_persisted_profile_is_used_only_when_absent() {
+        let fixture = ConfigFixture::new();
+        let store = fixture.store();
+        store
+            .execute(
+                &["chrome".into(), "--profile".into(), "Saved".into()],
+                std::io::empty(),
+            )
+            .unwrap();
+        store
+            .execute(
+                &["window".into(), "--max-width".into(), "1400".into()],
+                std::io::empty(),
+            )
+            .unwrap();
+
+        let mut explicit = json!({"action":"chrome-start","profile":"CLI"});
+        apply_chrome_start_settings(&mut explicit, &store).unwrap();
+        assert_eq!(explicit["profile"], "CLI");
+        assert_eq!(explicit["maxWidthPx"], 1400);
+
+        let mut defaulted = json!({"action":"chrome-start"});
+        apply_chrome_start_settings(&mut defaulted, &store).unwrap();
+        assert_eq!(defaulted["profile"], "Saved");
+        assert_eq!(defaulted["maxWidthPx"], 1400);
+
+        store
+            .execute(
+                &["chrome".into(), "--clear-profile".into()],
+                std::io::empty(),
+            )
+            .unwrap();
+        let mut no_default = json!({"action":"chrome-start"});
+        apply_chrome_start_settings(&mut no_default, &store).unwrap();
+        assert_eq!(
+            no_default,
+            json!({"action":"chrome-start","maxWidthPx":1400})
+        );
+    }
 }
