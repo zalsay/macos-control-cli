@@ -12,9 +12,14 @@ const MAX_BYTES: u64 = 64 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Model {
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
     pub url: String,
     pub api_key: String,
     pub model: String,
+}
+fn enabled_by_default() -> bool {
+    true
 }
 impl std::fmt::Debug for Model {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -87,6 +92,12 @@ impl Store {
         })?;
         let mut model = models.models.get(name).cloned().ok_or_else(invalid)?;
         validate_model(&model)?;
+        if !model.enabled {
+            return Err(Error::new(
+                "MODEL_DISABLED",
+                "默认模型已禁用；请用 mcc --config enable <name> 启用或显式选择其他已启用的默认模型；未调用模型或执行点击",
+            ));
+        }
         if let Some(key) = explicit_key {
             model.api_key = crate::jev::resolve_key(Some(key), None)?;
         }
@@ -124,6 +135,16 @@ impl Store {
                 self.write("models.toml", &models)?;
                 Ok(json!({"default_model":name,"saved":true}))
             }
+            [command @ ("enable" | "disable"), name] => {
+                valid_name(name)?;
+                let _lock = self.lock()?;
+                let mut models = self.models()?;
+                let model = models.models.get_mut(*name).ok_or_else(invalid)?;
+                model.enabled = *command == "enable";
+                let view = masked(model);
+                self.write("models.toml", &models)?;
+                Ok(json!({"saved":true,"name":name,"default_model":models.default_model,"profile":view}))
+            }
             ["set", name, rest @ ..] => self.set_model(name, rest, input),
             ["window", "--max-width", width] => {
                 let width: u32 = width.parse().map_err(|_| invalid())?;
@@ -151,7 +172,7 @@ impl Store {
                 self.write("config.toml", &config)?;
                 Ok(json!({"saved":true,"chrome":config.chrome}))
             }
-            _ => Err(Error::invalid("配置命令：--config [show <name> | set <name> --url <url> --model <model> --api-key-stdin | default <name> | window --max-width <400..1600> | chrome --profile <name> | chrome --clear-profile]")),
+            _ => Err(Error::invalid("配置命令：--config [show <name> | set <name> --url <url> --model <model> --api-key-stdin | default <name> | enable <name> | disable <name> | window --max-width <400..1600> | chrome --profile <name> | chrome --clear-profile]")),
         }
     }
     fn set_model(&self, name: &str, args: &[&str], input: impl Read) -> Result<Value> {
@@ -211,6 +232,7 @@ impl Store {
             ));
         }
         let model = Model {
+            enabled: previous.is_none_or(|p| p.enabled),
             url,
             api_key: key
                 .or_else(|| previous.map(|p| p.api_key.clone()))
@@ -403,7 +425,7 @@ fn check_private(metadata: &std::fs::Metadata, directory: bool) -> Result<()> {
     Ok(())
 }
 fn masked(model: &Model) -> Value {
-    json!({"url":model.url,"model":model.model,"api_key":"[REDACTED]"})
+    json!({"enabled":model.enabled,"url":model.url,"model":model.model,"api_key":"[REDACTED]"})
 }
 fn valid_name(name: &str) -> Result<()> {
     if name.is_empty()

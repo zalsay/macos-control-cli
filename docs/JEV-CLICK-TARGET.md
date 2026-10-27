@@ -137,3 +137,7 @@ mcc click-target --connection "$CONNECTION_ID" --target '右上角的保存按�
 连接清理沿用原流程：任务结束 disconnect → daemon stop → daemon status 核对 running:false，只操作自己持有的 runtime。语义点击只产生初始观察帧，沿用最近32帧保留及断开清理机制，没有额外复核截图。
 
 当前OpenRouter工程/在线验证和未验收边界见 [OpenRouter验证记录](JEV-OPENROUTER-VERIFICATION.md)；[0.2.5记录](JEV-VERIFICATION.md)仅为历史快照。
+
+## v0.3.3 模型开关
+
+模型profile的`enabled`及`mcc --config enable <name>` / `disable <name>`见 [模型配置](MODEL-CONFIG.md)。旧配置默认启用；默认模型禁用时，新CLI调用在观察/模型请求/点击前返回`MODEL_DISABLED`，不自动回退，`--jev-key`不能绕过。普通坐标点击及所有原有安全门禁保持不变。

@@ -373,3 +373,55 @@ fn given_old_or_wrong_provider_daemon_then_reject_before_sending_openrouter_key(
             .all(|request| !request.contains(secret) && !request.contains("click-target")));
     }
 }
+
+#[test]
+fn disabling_model_does_not_disable_original_observe_click_or_user_pause_gates() {
+    let env = Environment::new();
+    env.configure();
+    env.call(mcc(), &["--config", "disable", "jev"]);
+    let connection = env.call(mcc(), &["connect", "--window", "42"]);
+    let id = connection["connectionId"].as_str().unwrap();
+    let observation = env.call(mcc(), &["observe", "--connection", id]);
+    let frame = observation["frameId"].as_str().unwrap();
+    let blocked = env.raw(
+        mcc(),
+        &["click-target", "--connection", id, "--target", "保存"],
+    );
+    assert!(!blocked.status.success());
+    let blocked: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(blocked["error"]["code"], "MODEL_DISABLED");
+    assert_eq!(env.call(mcc(), &["status"])["connected"], true);
+    let click = env.call(
+        mcc(),
+        &[
+            "click",
+            "--connection",
+            id,
+            "--frame",
+            frame,
+            "--x",
+            "100",
+            "--y",
+            "100",
+        ],
+    );
+    assert_eq!(click["sent"], true);
+    let paused = env.raw(
+        mcc(),
+        &[
+            "type",
+            "--connection",
+            id,
+            "--frame",
+            frame,
+            "--text",
+            "paused",
+        ],
+    );
+    assert!(!paused.status.success());
+    let reply: Value = serde_json::from_slice(&paused.stdout).unwrap();
+    assert_eq!(reply["error"]["code"], "FOCUS_LOST");
+    assert_eq!(reply["error"]["reason"], "USER_PAUSED");
+    env.call(mcc(), &["disconnect", "--connection", id]);
+    env.call(mcc(), &["daemon", "stop"]);
+}

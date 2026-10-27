@@ -18,6 +18,8 @@ Version **0.2.3** adds the default **`mcc`** command, a user-level `sh` installe
 
 **v0.3.2:** `chrome start --profile <Chrome display name>` selects an existing Chrome profile. Optional defaults use `--config chrome --profile <name>` / `--clear-profile`; unknown or duplicate names fail instead of falling back. See [Chrome profiles](docs/CHROME-PROFILES.md).
 
+**v0.3.3:** Model profiles support `enabled` and local `--config enable <name>` / `disable <name>` commands. Legacy profiles default to enabled; a disabled default blocks `click-target` with `MODEL_DISABLED` before daemon/model activity without affecting ordinary OCR or coordinate clicks. See [model configuration](docs/MODEL-CONFIG.md).
+
 ## Features
 
 - List ordinary applications/windows and bind a connection to an exact window/PID/bundle ID.

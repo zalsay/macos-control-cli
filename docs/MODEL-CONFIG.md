@@ -1,4 +1,4 @@
-# 通用 Decisions 模型配置（v0.3.0）
+# 通用 Decisions 模型配置（v0.3.0 起；v0.3.3 增加启用/禁用）
 
 `mcc`、`desktop-control`、`copis-chrome` 共用配置，独立于各自 runtime。默认目录 `~/.config/mcc`；需要任务隔离时设置绝对路径 `MCC_CONFIG_DIR`。配置命令只操作本地文件，不启动 daemon、Chrome 或网络。
 
@@ -10,6 +10,7 @@
 default_model = "jev"
 
 [models.jev]
+enabled = true
 url = "https://openrouter.ai/api/alpha/decisions"
 api_key = "your-api-key"
 model = "typesafe/jev-1.13"
@@ -29,6 +30,23 @@ mcc --config show jev
 `secret-provider-command` 是宿主提供密钥的占位命令。stdin 允许末尾一个 LF/CRLF；key 为1–1024个ASCII非空白可见字符。不执行输入内容。也支持 `--api-key <key>`，但 argv、shell 历史或 Agent 工具记录可能暴露它。所有配置回执/API key 字段脱敏。多个命名 profile 使用相同格式，`default` 选择默认 profile；第一个 profile 自动成为默认。现有 profile 可只更新 `--model`；**改变 URL 必须显式重新提供 key**，不会跨端点沿用凭据。
 
 URL 是完整 Decisions API 地址，按原路径 POST，不补 `/chat/completions` 或 `/decisions`。支持 HTTPS 以及仅用于开发的 HTTP loopback（localhost/127.0.0.1/::1）；拒绝 URL 用户名、密码、query、fragment。对外 HTTP 明文端点不允许。使用系统 TLS 信任链，不跟随重定向，不使用代理环境变量或 curlrc。只有协议兼容的 Decisions 服务可用；配置任意模型名不意味着支持普通聊天或视觉 API。
+
+### 启用与禁用（v0.3.3）
+
+```sh
+mcc --config disable jev   # 禁用已存在的模型 profile
+mcc --config enable jev    # 重新启用，不必再次输入 key
+mcc --config show jev      # profile.enabled 显示状态，api_key 仍脱敏
+mcc --config              # models.<name>.enabled 显示各 profile 状态
+```
+
+- `enabled` 是每个 `[models.<name>]` 下的严格布尔值；省略时默认为 `true`，旧配置可直接使用。新建 profile 默认启用，更新已有 profile 的 URL/key/model **保留原启用状态**，不会因更新凭据意外重新启用。
+- 启用/禁用命令可重复执行，只修改该 profile 的开关；保留 URL、API key、model、默认模型选择和 Chrome 配置。未知名称拒绝，不创建空 profile。复用原有私有文件权限、写锁、原子写入及脱敏回执；三个 CLI 入口均支持，命令本身不启动 daemon、Chrome 或网络。
+- `default` 只选择默认 profile，不隐式启用。可以选择/保留一个已禁用的默认 profile；`configured:true` 只表示默认配置存在，不代表已启用，应查看对应的 `enabled`。
+- 默认 profile 禁用时，新的 CLI `click-target` 调用返回 `MODEL_DISABLED`、非零退出码，**在启动 daemon、观察/OCR、发送凭据或模型请求、执行点击之前拒绝**；已有 daemon/连接不受影响。`--jev-key` 只覆盖本次密钥，不能绕过禁用，不自动切换其他模型或回退坐标点击。须先启用，或显式将其他已启用 profile 设为默认。
+- 普通 `observe`/OCR、坐标 `click`、Chrome profile/布局，以及原有窗口、焦点、暂停、倒计时、取消门禁不变。
+- 每次调用读取本地配置，下一次调用即生效，无需重启 daemon。这是 **CLI 的本地模型配置开关**，不是供应商 API key 撤销或全局急停；不追溯取消已开始的请求。立即中止当前桌面操作仍使用原有暂停/取消机制。
+- 新版兼容未写 `enabled` 的旧文件；0.3.1/0.3.2 的严格解析器不认识新字段，回退旧 CLI 前需移除 `enabled` 字段，且旧 CLI 不提供此禁用保护。
 
 ### 从旧配置迁移
 

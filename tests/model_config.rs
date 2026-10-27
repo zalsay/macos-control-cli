@@ -286,3 +286,227 @@ fn invalid_chrome_profiles_do_not_modify_existing_config() {
         assert_eq!(std::fs::read(f.0.join("config.toml")).unwrap(), before);
     }
 }
+
+#[test]
+fn legacy_and_new_model_configs_are_enabled_by_default() {
+    let f = Fixture::new();
+    set(
+        &f,
+        "https://router.example/api",
+        "vendor/model",
+        "legacy-secret",
+    );
+    assert_eq!(
+        f.run(&["show", "jev"], "").unwrap()["profile"]["enabled"],
+        true
+    );
+    let path = f.0.join("models.toml");
+    let mut legacy: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    legacy["models"]["jev"]
+        .as_table_mut()
+        .unwrap()
+        .remove("enabled");
+    std::fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
+    assert_eq!(f.run(&[], "").unwrap()["models"]["jev"]["enabled"], true);
+    assert_eq!(f.store().resolve_model(None).unwrap().model, "vendor/model");
+}
+
+#[test]
+fn disable_and_enable_preserve_credentials_default_and_chrome_settings() {
+    let f = Fixture::new();
+    set(
+        &f,
+        "https://router.example/api",
+        "vendor/model",
+        "toggle-secret",
+    );
+    f.run(&["chrome", "--profile", "mcc"], "").unwrap();
+    f.run(&["window", "--max-width", "1400"], "").unwrap();
+    let chrome_before = std::fs::read(f.0.join("config.toml")).unwrap();
+    for _ in 0..2 {
+        let disabled = f.run(&["disable", "jev"], "").unwrap();
+        assert_eq!(disabled["saved"], true);
+        assert_eq!(disabled["profile"]["enabled"], false);
+        assert!(!disabled.to_string().contains("toggle-secret"));
+        assert_eq!(f.run(&[], "").unwrap()["default_model"], "jev");
+        assert_eq!(f.run(&[], "").unwrap()["configured"], true);
+        assert_eq!(
+            f.run(&["show", "jev"], "").unwrap()["profile"]["enabled"],
+            false
+        );
+        for key in [None, Some("override-secret")] {
+            assert_eq!(
+                f.store().resolve_model(key).unwrap_err().code,
+                "MODEL_DISABLED"
+            );
+        }
+    }
+    let persisted: toml::Value =
+        toml::from_str(&std::fs::read_to_string(f.0.join("models.toml")).unwrap()).unwrap();
+    assert_eq!(persisted["models"]["jev"]["enabled"].as_bool(), Some(false));
+    assert_eq!(
+        persisted["models"]["jev"]["api_key"].as_str(),
+        Some("toggle-secret")
+    );
+    for _ in 0..2 {
+        let enabled = f.run(&["enable", "jev"], "").unwrap();
+        assert_eq!(enabled["profile"]["enabled"], true);
+        assert_eq!(enabled["profile"]["api_key"], "[REDACTED]");
+        let resolved = f.store().resolve_model(None).unwrap();
+        assert_eq!(resolved.url, "https://router.example/api");
+        assert_eq!(resolved.model, "vendor/model");
+        assert_eq!(resolved.api_key, "toggle-secret");
+    }
+    assert_eq!(
+        std::fs::read(f.0.join("config.toml")).unwrap(),
+        chrome_before
+    );
+    assert_eq!(
+        f.store().chrome_start_settings().unwrap(),
+        (1400, Some("mcc".into()))
+    );
+    assert!(!f.0.join("config.lock").exists());
+}
+
+#[test]
+fn updating_a_disabled_model_does_not_reenable_it_or_reuse_cross_endpoint_keys() {
+    let f = Fixture::new();
+    set(&f, "https://one.example/api", "vendor/old", "old-key");
+    f.run(&["disable", "jev"], "").unwrap();
+    f.run(&["set", "jev", "--model", "vendor/new"], "").unwrap();
+    assert_eq!(
+        f.run(&["show", "jev"], "").unwrap()["profile"]["enabled"],
+        false
+    );
+    assert_eq!(
+        f.store().resolve_model(None).unwrap_err().code,
+        "MODEL_DISABLED"
+    );
+    let before = std::fs::read(f.0.join("models.toml")).unwrap();
+    assert_eq!(
+        f.run(&["set", "jev", "--url", "https://two.example/api"], "")
+            .unwrap_err()
+            .code,
+        "MODEL_KEY_REQUIRED"
+    );
+    assert_eq!(std::fs::read(f.0.join("models.toml")).unwrap(), before);
+    set(&f, "https://two.example/api", "vendor/updated", "new-key");
+    assert_eq!(
+        f.run(&["show", "jev"], "").unwrap()["profile"]["enabled"],
+        false
+    );
+    f.run(&["enable", "jev"], "").unwrap();
+    let resolved = f.store().resolve_model(None).unwrap();
+    assert_eq!(resolved.model, "vendor/updated");
+    assert_eq!(resolved.url, "https://two.example/api");
+    assert_eq!(resolved.api_key, "new-key");
+}
+
+#[test]
+fn toggling_one_profile_neither_selects_nor_falls_back_to_another_model() {
+    let f = Fixture::new();
+    set(&f, "https://one.example/api", "vendor/first", "first-key");
+    f.run(
+        &[
+            "set",
+            "second",
+            "--url",
+            "https://two.example/api",
+            "--model",
+            "vendor/second",
+            "--api-key-stdin",
+        ],
+        "second-key",
+    )
+    .unwrap();
+    f.run(&["disable", "second"], "").unwrap();
+    assert_eq!(f.store().resolve_model(None).unwrap().model, "vendor/first");
+    f.run(&["enable", "second"], "").unwrap();
+    f.run(&["disable", "jev"], "").unwrap();
+    assert_eq!(
+        f.store().resolve_model(None).unwrap_err().code,
+        "MODEL_DISABLED"
+    );
+    assert_eq!(f.run(&[], "").unwrap()["default_model"], "jev");
+    f.run(&["default", "second"], "").unwrap();
+    assert_eq!(
+        f.store().resolve_model(None).unwrap().model,
+        "vendor/second"
+    );
+    // Selecting a profile does not implicitly enable it.
+    f.run(&["default", "jev"], "").unwrap();
+    assert_eq!(
+        f.store().resolve_model(None).unwrap_err().code,
+        "MODEL_DISABLED"
+    );
+}
+
+#[test]
+fn toggle_rejects_unknown_names_bad_arguments_and_busy_config_without_mutating_files() {
+    let f = Fixture::new();
+    set(
+        &f,
+        "https://router.example/api",
+        "vendor/model",
+        "private-test-key",
+    );
+    let path = f.0.join("models.toml");
+    let before = std::fs::read(&path).unwrap();
+    for args in [
+        vec!["enable"],
+        vec!["disable"],
+        vec!["enable", "missing"],
+        vec!["disable", "missing"],
+        vec!["enable", "../jev"],
+        vec!["disable", "jev", "extra"],
+    ] {
+        assert!(f.run(&args, "").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!f.0.join("config.lock").exists());
+    }
+    std::fs::write(f.0.join("config.lock"), "busy").unwrap();
+    for command in ["enable", "disable"] {
+        assert_eq!(
+            f.run(&[command, "jev"], "").unwrap_err().code,
+            "CONFIG_BUSY"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn enabled_is_a_strict_boolean_and_errors_never_echo_config_credentials() {
+    let f = Fixture::new();
+    set(
+        &f,
+        "https://router.example/api",
+        "vendor/model",
+        "never-echo-toggle-secret",
+    );
+    let path = f.0.join("models.toml");
+    let mut value: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    value["models"]["jev"]
+        .as_table_mut()
+        .unwrap()
+        .insert("enabled".into(), toml::Value::Boolean(false));
+    std::fs::write(&path, toml::to_string(&value).unwrap()).unwrap();
+    assert_eq!(
+        f.store().resolve_model(None).unwrap_err().code,
+        "MODEL_DISABLED"
+    );
+    for invalid in [
+        toml::Value::String("false".into()),
+        toml::Value::Integer(0),
+        toml::Value::Array(vec![]),
+    ] {
+        value["models"]["jev"]["enabled"] = invalid;
+        std::fs::write(&path, toml::to_string(&value).unwrap()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for args in [vec![], vec!["enable", "jev"], vec!["disable", "jev"]] {
+            let error = f.run(&args, "").unwrap_err();
+            assert_eq!(error.code, "CONFIG_INVALID");
+            assert!(!error.to_string().contains("never-echo-toggle-secret"));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+    }
+}

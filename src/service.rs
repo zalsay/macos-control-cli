@@ -610,6 +610,8 @@ impl<N: Native> Service<N> {
         let target = string(request, "target")?;
         crate::target::validate_target(target)?;
         let model = crate::config::Model {
+            // Persisted enable/disable is resolved by the CLI before daemon startup.
+            enabled: true,
             url: string(request, "jevUrl")?.into(),
             model: string(request, "jevModel")?.into(),
             api_key: crate::jev::resolve_key(request.get("jevKey").and_then(Value::as_str), None)?,

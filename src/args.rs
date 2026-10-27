@@ -204,7 +204,7 @@ pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面�
   desktop-control disconnect --connection <id>
   desktop-control daemon start|stop|status|run
   desktop-control chrome start [--profile <Chrome display name>] [--url <http(s)://...>]
-  desktop-control --config [show <name> | set <name> --url <url> --model <model> --api-key-stdin | default <name>]
+  desktop-control --config [show <name> | set <name> --url <url> --model <model> --api-key-stdin | default <name> | enable <name> | disable <name>]
   desktop-control --config window --max-width <400..1600>
   desktop-control --config chrome --profile <Chrome display name> | --clear-profile
   desktop-control --help | --version
@@ -222,6 +222,7 @@ pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面�
 只读观察不切前台；首次输入等待 3 秒接管倒计时，会占用真实鼠标键盘。
 人工接管或失焦后停止输入；USER_PAUSED 须等用户通过控制条继续，不重建 runtime 绕过暂停。
 原生授权弹窗须单独枚举、连接和观察；不能复用 Chrome 的连接或坐标，不能自动点击未获授权的“允许”。
+禁用默认模型后 click-target 返回 MODEL_DISABLED；--jev-key 不绕过禁用，普通 OCR/坐标点击不受影响。
 click-target 通过 models.toml 中完整 Decisions URL 发送 target 与 ID/文字；--jev-key 只覆盖本次密钥，不隐式读取 .env 或环境 key。
 配置目录默认 ~/.config/mcc（可用 MCC_CONFIG_DIR 显式覆盖），文件0600；配置key推荐 --api-key-stdin，命令行key可能进入历史/进程参数。
 chrome start 需要宿主控制Google Chrome的macOS自动化权限；权限缺失明确拒绝，不代替本人授权。
@@ -269,7 +270,7 @@ pub const HELP: &str = r#"copis-chrome — 独立的 macOS Chrome 桌面自动�
   copis-chrome disconnect --connection <id>
   copis-chrome daemon start|stop|status|run
   copis-chrome chrome start [--profile <Chrome display name>] [--url <http(s)://...>]
-  copis-chrome --config [show <name> | set <name> --url <url> --model <model> --api-key-stdin | default <name>]
+  copis-chrome --config [show <name> | set <name> --url <url> --model <model> --api-key-stdin | default <name> | enable <name> | disable <name>]
   copis-chrome --config window --max-width <400..1600>
   copis-chrome --config chrome --profile <Chrome display name> | --clear-profile
   copis-chrome --help | --version
@@ -277,6 +278,7 @@ pub const HELP: &str = r#"copis-chrome — 独立的 macOS Chrome 桌面自动�
 同一连接可跨命令复用；帧可多次输入，无时间硬过期，最多保留 32 帧。
 输入会激活目标 Chrome 并占用系统鼠标键盘；读取截图不会切前台。
 屏幕控制条可执行/暂停；用户接管鼠标后输入暂停，点击“继续”并等待 3 秒倒计时后才恢复新输入；暂停不会自动恢复，也不会重放旧输入。Observe 仍可用。
+禁用默认模型后 click-target 返回 MODEL_DISABLED；--jev-key 不绕过禁用，普通 OCR/坐标点击不受影响。
 click-target 从 ~/.config/mcc/models.toml（或 MCC_CONFIG_DIR）读取 URL/key/model，发送 target 和 ID/文字；--jev-key 仅覆盖本次 key，不隐式读 .env。
 chrome start 需要宿主控制Google Chrome的macOS自动化权限；权限缺失明确拒绝。
 chrome start --profile 指定 Chrome 的显示名称（仅匹配已有配置，不是路径）；省略时使用 [chrome].profile。它与 models.toml 中的模型 profile 无关，且不会创建 Chrome 配置。
