@@ -64,6 +64,7 @@ pub struct Service<N: Native> {
     frames_dir: PathBuf,
     scope: Scope,
     connection: Option<Connection>,
+    decider: Box<dyn crate::jev::Decision>,
 }
 impl<N: Native> Service<N> {
     pub fn new(native: N, frames_dir: PathBuf) -> Self {
@@ -76,17 +77,33 @@ impl<N: Native> Service<N> {
             frames_dir,
             scope,
             connection: None,
+            decider: Box::new(crate::jev::JevClient::default()),
         }
     }
+    pub fn with_decider(mut self, decider: Box<dyn crate::jev::Decision>) -> Self {
+        self.decider = decider;
+        self
+    }
+
     pub fn execute(&mut self, request: Value) -> Result<Value> {
         let action = string(&request, "action")?;
         let allowed: &[&str] = match action {
+            "chrome-start" => &["action", "url", "maxWidthPx"],
             "status" | "apps" => &["action"],
             "windows" => &["action", "bundleId"],
             "permissions" => &["action", "request"],
             "connect" => &["action", "windowId"],
             "observe" | "disconnect" => &["action", "connectionId"],
             "click" => &["action", "connectionId", "frameId", "x", "y", "clickCount"],
+            "click-target" => &[
+                "action",
+                "connectionId",
+                "target",
+                "jevKey",
+                "jevUrl",
+                "jevModel",
+                "jevProtocol",
+            ],
             "scroll" => &["action", "connectionId", "frameId", "x", "y", "deltaY"],
             "type" => &["action", "connectionId", "frameId", "text"],
             "press" => &["action", "connectionId", "frameId", "key"],
@@ -96,7 +113,8 @@ impl<N: Native> Service<N> {
         fields(&request, allowed)?;
         let result = match action {
             "status" => Ok(
-                json!({"running":true,"connected":self.connection.is_some(),"window":self.connection.as_ref().map(|c| &c.window)}),
+                json!({"running":true,"connected":self.connection.is_some(),"window":self.connection.as_ref().map(|c| &c.window),
+                    "version":env!("CARGO_PKG_VERSION"),"jev":{"protocol":crate::jev::DECISION_PROTOCOL,"dynamicEndpoint":true}}),
             ),
             "apps" => {
                 self.require_scope(Scope::Desktop)?;
@@ -107,9 +125,21 @@ impl<N: Native> Service<N> {
                 if request.get("request").is_some_and(|v| !v.is_boolean()) {
                     return Err(Error::invalid("request 必须为布尔值"));
                 }
-                self.native.request(json!({"action":"permissions","request":request["request"].as_bool().unwrap_or(false)}))
+                let requested = request["request"].as_bool().unwrap_or(false);
+                self.native.request(json!({"action":"permissions","request":requested})).and_then(|result| {
+                    let automation = &result["chromeAutomation"];
+                    if automation["target"] != "com.google.Chrome"
+                        || automation["requested"] != requested
+                        || !automation["granted"].is_boolean()
+                        || !automation["status"].is_string()
+                        || automation["osStatus"].as_i64().is_none() {
+                        return Err(Error::new("HELPER_UPGRADE_REQUIRED", "原生helper未完整报告Chrome自动化授权；请升级本任务helper，不要把旧版结果当成已申请授权"));
+                    }
+                    Ok(result)
+                })
             }
             "connect" => self.connect(&request),
+            "chrome-start" => self.chrome_start(&request),
             _ => {
                 let connection_id = string(&request, "connectionId")?;
                 let connection = self.require_connection(connection_id)?;
@@ -123,6 +153,7 @@ impl<N: Native> Service<N> {
                     "disconnect" => self.disconnect(),
                     "observe" => self.observe(),
                     "select-file" => self.select_file(&request),
+                    "click-target" => self.click_target(&request),
                     _ => self.input(&request),
                 }
             }
@@ -211,6 +242,78 @@ impl<N: Native> Service<N> {
                 )
             })
     }
+    fn chrome_start(&mut self, request: &Value) -> Result<Value> {
+        if self.connection.is_some() {
+            return Err(Error::new(
+                "CONNECTION_BUSY",
+                "已有控制连接；启动不会替换原连接或绕过暂停，请先用原连接凭据 disconnect",
+            ));
+        }
+        let width = integer(request, "maxWidthPx")?;
+        if !(400..=1600).contains(&width) {
+            return Err(Error::invalid("maxWidthPx 必须为400..1600原始像素"));
+        }
+        if let Some(url) = request.get("url") {
+            let url = url
+                .as_str()
+                .ok_or_else(|| Error::invalid("URL必须为字符串"))?;
+            let parsed = url::Url::parse(url)
+                .map_err(|_| Error::invalid("Chrome URL 必须为绝对 HTTP(S) 地址"))?;
+            if url.len() > 4096
+                || url.chars().any(char::is_control)
+                || !["http", "https"].contains(&parsed.scheme())
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+            {
+                return Err(Error::invalid(
+                    "Chrome URL 必须为不含用户凭据的绝对 HTTP(S) 地址",
+                ));
+            }
+        }
+        let permissions = self
+            .native
+            .request(json!({"action":"permissions","request":false}))?;
+        if permissions["screenRecording"] != true {
+            return Err(Error::new(
+                "SCREEN_PERMISSION_REQUIRED",
+                "Chrome 启动连接需要屏幕录制权限；尚未创建窗口",
+            ));
+        }
+        if permissions["accessibility"] != true {
+            return Err(Error::new(
+                "ACCESSIBILITY_PERMISSION_REQUIRED",
+                "Chrome 窗口布局需要辅助功能权限；尚未创建窗口",
+            ));
+        }
+        let launched = self.native.request(request.clone())?;
+        let window: Window = decode(launched["window"].clone())?;
+        if window.window_id == 0
+            || window.pid <= 0
+            || window.bundle_id.as_deref() != Some("com.google.Chrome")
+            || !window.bounds.valid()
+        {
+            return Err(Error::new("HELPER_PROTOCOL", "新建 Chrome 窗口身份无效"));
+        }
+        let mut connected =
+            self.connect(&json!({"action":"connect","windowId":window.window_id}))?;
+        let verified: Window = decode(connected["window"].clone())?;
+        if verified.pid != window.pid
+            || verified.bundle_id != window.bundle_id
+            || verified.bounds != window.bounds
+        {
+            // Keep the newly connected identity only on a completely verified handoff.
+            let _ = self.disconnect();
+            return Err(Error::new(
+                "WINDOW_CHANGED",
+                "启动与连接之间窗口身份或几何变化；未执行输入",
+            ));
+        }
+        connected["layout"] = launched["layout"].clone();
+        connected["created"] = json!(true);
+        Ok(connected)
+    }
+
     fn connect(&mut self, request: &Value) -> Result<Value> {
         let id = u32::try_from(integer(request, "windowId")?)
             .ok()
@@ -431,6 +534,57 @@ impl<N: Native> Service<N> {
         }
         Ok(result)
     }
+    fn click_target(&mut self, request: &Value) -> Result<Value> {
+        use std::time::Instant;
+        let total = Instant::now();
+        if request["jevProtocol"] != crate::jev::DECISION_PROTOCOL {
+            return Err(Error::new(
+                "JEV_PROTOCOL_MISMATCH",
+                "动态 Decisions 契约不匹配；未发送网络请求",
+            ));
+        }
+        let target = string(request, "target")?;
+        crate::target::validate_target(target)?;
+        let model = crate::config::Model {
+            url: string(request, "jevUrl")?.into(),
+            model: string(request, "jevModel")?.into(),
+            api_key: crate::jev::resolve_key(request.get("jevKey").and_then(Value::as_str), None)?,
+        };
+        crate::config::validate_model(&model)?;
+        let observation = self.observe()?;
+        let observe_ms = total.elapsed().as_millis() as u64;
+        if observation["coordinateSpace"] != "frame-pixels"
+            || observation["imageTransform"] != "crop-only"
+        {
+            return Err(Error::new(
+                "HELPER_UPGRADE_REQUIRED",
+                "语义点击需要原像素截图坐标声明，请使用匹配的原生 helper",
+            ));
+        }
+        let candidates = crate::target::Candidates::from_observation(&observation)?;
+        let decision_start = Instant::now();
+        let response = self.decider.decide(
+            &model.url,
+            &model.api_key,
+            &candidates.request(target, &model.model),
+        )?;
+        let decision_ms = decision_start.elapsed().as_millis() as u64;
+        let selection = candidates.select(&response, &model.model)?;
+        let click = json!({"action":"click","connectionId":request["connectionId"],
+            "frameId":observation["frameId"],"x":selection.x,"y":selection.y,"clickCount":1});
+        let click_start = Instant::now();
+        let mut receipt = self.input(&click)?;
+        receipt["status"] = json!("click_sent");
+        receipt["effectVerified"] = json!(false);
+        receipt["untrusted"] = json!(true);
+        receipt["selection"] = json!({"candidateId":selection.id,"text":selection.text,
+            "center":{"x":selection.x,"y":selection.y},"model":selection.model,"requestedModel":model.model,
+            "confidence":selection.confidence,"probability":selection.probability});
+        receipt["timingMs"] = json!({"observe":observe_ms,"decision":decision_ms,
+            "click":click_start.elapsed().as_millis() as u64,"total":total.elapsed().as_millis() as u64});
+        Ok(receipt)
+    }
+
     fn input(&mut self, request: &Value) -> Result<Value> {
         let frame_id = string(request, "frameId")?;
         let frame = self
@@ -646,10 +800,10 @@ fn dimension(image: &Value, key: &str) -> Result<u32> {
         .as_u64()
         .filter(|value| *value > 0)
         .ok_or_else(|| Error::new("HELPER_PROTOCOL", "原生截图尺寸无效"))?;
-    if value > 1600 {
+    if value > if key == "height" { 8192 } else { 1600 } {
         return Err(Error::new(
             "IMAGE_TOO_LARGE",
-            "原生截图边长超过 1600 像素限制",
+            "原生截图超过宽1600/高8192原像素限制",
         ));
     }
     Ok(value as u32)
@@ -771,6 +925,23 @@ mod tests {
             service,
             connected["connectionId"].as_str().unwrap().to_owned(),
         )
+    }
+
+    #[test]
+    fn permission_query_native_eof_keeps_original_connection_invalidation() {
+        let (mut service, _) = connected_service(Ok(json!({"selected":true})));
+        service.native.replies = VecDeque::from([Err(Error::new("HELPER_EOF", "fixture"))]);
+        assert_eq!(
+            service
+                .execute(json!({"action":"permissions"}))
+                .unwrap_err()
+                .code,
+            "HELPER_EOF"
+        );
+        assert_eq!(
+            service.execute(json!({"action":"status"})).unwrap()["connected"],
+            false
+        );
     }
 
     fn select_request(connection_id: &str, path: &str) -> Value {

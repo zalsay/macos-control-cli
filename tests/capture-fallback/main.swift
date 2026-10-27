@@ -48,7 +48,7 @@ guard let context = CGContext(data: nil, width: 2400, height: 1800, bitsPerCompo
       let destination = CGImageDestinationCreateWithURL(scratch.appendingPathComponent("fake.png") as CFURL, UTType.png.identifier as CFString, 1, nil) else { exit(1) }
 CGImageDestinationAddImage(destination, image, nil)
 require(CGImageDestinationFinalize(destination), "无法生成纯色测试图片")
-// Given 原生截图超过已有1600上限，Then 必须拒绝，不能偷偷缩小后继续点击。
+// Given 原生截图宽度超过1600像素边界，Then 必须拒绝，不能偷偷缩小后继续点击。
 expect("IMAGE_TOO_LARGE") {
     _ = try normalizeWindowCapture(url: scratch.appendingPathComponent("fake.png"),
                                   bounds: WindowBounds(x: -100, y: 0, width: 1200, height: 900))
@@ -68,6 +68,11 @@ require(native.width == 1212 && native.height == 1310, "1x原生像素应保持"
 let retina = try originalWindowPixelSize(width: 800 * 2, height: 600 * 2)
 require(retina.width == 1600 && retina.height == 1200, "2x原生像素应保持，不转成1x")
 expect("IMAGE_TOO_LARGE") { _ = try originalWindowPixelSize(width: 1000 * 2, height: 800 * 2) }
+let maximumTall = try originalWindowPixelSize(width: 1600, height: 8192)
+require(maximumTall.width == 1600 && maximumTall.height == 8192,
+        "1600×8192原始像素边界必须接受且不缩放")
+expect("IMAGE_TOO_LARGE") { _ = try originalWindowPixelSize(width: 1600, height: 8193) }
+expect("IMAGE_TOO_LARGE") { _ = try originalWindowPixelSize(width: 1601, height: 8192) }
 expect("IMAGE_GEOMETRY_CHANGED") { _ = try originalWindowPixelSize(width: 801.5, height: 600) }
 expect("IMAGE_GEOMETRY_CHANGED") { _ = try originalWindowPixelSize(width: .infinity, height: 600) }
 expect("IMAGE_GEOMETRY_CHANGED") { _ = try originalWindowPixelSize(width: 0, height: 600) }
@@ -135,4 +140,4 @@ require(!runningProcess.isRunning, "取消 ACK 早于截图子进程退出")
 require(!FileManager.default.fileExists(atPath: privateCapture.path), "取消 ACK 后私有截图仍然存在")
 require(completed.wait(timeout: .now() + 2) == .success, "取消后截图动作未及时退出")
 
-print("PASS: 截图回退 BDD：原像素1x/2x、超限拒绝而不缩放、后端策略、权限/几何失败关闭、Retina、超时终止、取消 ACK 后子进程已退出且文件已清理；未截图或发送输入")
+print("PASS: 截图回退 BDD：原像素1x/2x、1600×8192边界、超限拒绝而不缩放、后端策略、权限/几何失败关闭、Retina、超时终止、取消 ACK 后子进程已退出且文件已清理；未截图或发送输入")

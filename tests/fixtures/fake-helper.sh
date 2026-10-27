@@ -13,11 +13,18 @@ else
   runtime_dir=$COPIS_CHROME_RUNTIME_DIR
   window='{"windowId":42,"pid":123,"title":"Fixture","bounds":{"x":0,"y":0,"width":800,"height":600}}'
 fi
+# A marker (never the secret itself) exposes unintended credential inheritance.
+if [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${JEV_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY+x}" ]; then
+  [ -z "$runtime_dir" ] || printf inherited > "$runtime_dir/key-inherited"
+fi
 [ -z "$runtime_dir" ] || printf '%s' "$mode" > "$runtime_dir/helper-mode"
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   case "$line" in
-    *'"action":"permissions"'*) data='{"screenRecording":true,"accessibility":true}' ;;
+    *'"action":"permissions"'*)
+      requested=false
+      case "$line" in *'"request":true'*) requested=true ;; esac
+      data="{\"screenRecording\":true,\"accessibility\":true,\"chromeAutomation\":{\"target\":\"com.google.Chrome\",\"requested\":$requested,\"granted\":true,\"status\":\"granted\",\"osStatus\":0}}" ;;
     *'"action":"apps"'*) data='{"apps":[{"pid":123,"bundleId":"com.google.Chrome","name":"Google Chrome"}]}' ;;
     *'"action":"windows"'*) data="{\"windows\":[$window]}" ;;
     *'"action":"window"'*) data="{\"window\":$window}" ;;

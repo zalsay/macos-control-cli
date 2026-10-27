@@ -65,6 +65,9 @@ swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
 swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
   "$root/tests/capture-fallback/main.swift" -o "$scratch/capture-fallback-tests"
 "$scratch/capture-fallback-tests"
+swiftc -O -warnings-as-errors -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
+  "$root/tests/chrome-start/main.swift" -o "$scratch/chrome-start-tests"
+"$scratch/chrome-start-tests"
 swiftc -O -target "${arch}-apple-macosx14.0" "${library_sources[@]}" \
   "$root/tests/pointer-target/main.swift" -o "$scratch/pointer-target-tests"
 "$scratch/pointer-target-tests"
@@ -111,6 +114,13 @@ for action, args in [
     for value in [None, {}, dict(bounds, width=0), dict(bounds, height=-1),
                   dict(bounds, x=True), dict(bounds, extra=1), dict(bounds, x=1e100)]:
         invalid(action + "错误几何", dict(base, action=action, expectedBounds=value, **args))
+# The removed semantic OCR guard must no longer be accepted by the native click protocol.
+removed_guard = {"width":800,"height":600,"inputEpoch":0,"observedAtUptime":0,
+                 "imagePath":"/tmp/removed-ocr-guard.jpg","selectedIndex":0,
+                 "ocr":{"status":"ok","truncated":False,"items":[
+                     {"text":"保存","bbox":{"x":10,"y":20,"width":100,"height":40},
+                      "center":{"x":60,"y":40},"confidence":0.99}]}}
+invalid("已移除的OCR复核字段", dict(input_base, action="click", screenX=10, screenY=20, clickCount=1, textGuard=removed_guard))
 for value in [0, 3, -1, True, 1.2, "1"]:
     invalid("点击次数", dict(input_base, action="click", screenX=10, screenY=20, clickCount=value))
 for field, value in [("screenX", True), ("screenY", "0"), ("screenX", 800),
@@ -131,6 +141,13 @@ for path in ["", "relative.txt", "file:///tmp/a", "/tmp/../a", "/tmp/./a", "/tmp
 invalid("文件不存在先于任何桌面副作用", dict(base, action="select-file", path="/copis-nonexistent-file-8e2566"), "FILE_NOT_READABLE")
 for edge in [0, 1601, True, "1600", 1599]:
     invalid("截图最长边", dict(base, action="observe", imagePath="/tmp/no-capture.jpg", maxEdge=edge))
+for width in [399, 1601, True, 800.5, "800"]:
+    invalid("chrome-start像素宽度", dict(action="chrome-start", maxWidthPx=width))
+for url in [None, "", "about:blank", "javascript:alert(1)", "file:///tmp/a", "ftp://example.com",
+            "/relative", "https:example.com", "https:///missing-host", " https://example.com",
+            "https://user:secret@example.com", "https://" + "a" * 4100]:
+    invalid("chrome-start URL", dict(action="chrome-start", url=url))
+invalid("chrome-start未知字段", {"action": "chrome-start", "extra": True})
 invalid("缺少动作", {}, "INVALID_REQUEST")
 invalid("错误动作类型", {"action": 1}, "INVALID_REQUEST")
 
@@ -194,8 +211,13 @@ try:
             assert set(reply["error"]) == {"code", "message"} and reply["error"]["message"], reply
         elif rid == "permissions":
             assert set(reply) == {"id", "ok", "data"} and reply["ok"] is True, reply
-            assert set(reply["data"]) == {"screenRecording", "accessibility"}, reply
-            assert all(type(v) is bool for v in reply["data"].values()), reply
+            assert set(reply["data"]) == {"screenRecording", "accessibility", "chromeAutomation"}, reply
+            automation = reply["data"]["chromeAutomation"]
+            assert automation["target"] == "com.google.Chrome" and automation["requested"] is False, reply
+            assert isinstance(automation["granted"], bool), reply
+            assert automation["status"] in {"granted", "denied", "requires_consent", "target_not_running", "unverified"}, reply
+            assert type(automation["osStatus"]) is int, reply
+            assert all(type(reply["data"][k]) is bool for k in ["screenRecording", "accessibility"]), reply
         elif rid == "cancel":
             assert reply == {"id": rid, "ok": True, "data": {"cancelled": True}}, reply
         else:

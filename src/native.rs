@@ -99,6 +99,10 @@ impl Helper {
                 .map_err(|e| Error::io("无法复制输出通道", e))?,
         ));
         let mut command = Command::new(path);
+        command
+            .env_remove("JEV_API_KEY")
+            .env_remove("OPENROUTER_API_KEY")
+            .env_remove("TYPESAFE_API_KEY");
         #[cfg(unix)]
         command
             .stdin(Stdio::from(OwnedFd::from(child_stdin)))

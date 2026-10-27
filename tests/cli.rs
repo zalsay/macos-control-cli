@@ -405,3 +405,18 @@ fn given_desktop_daemon_when_chrome_scope_requests_emergency_stop_then_daemon_re
     assert_eq!(status["scope"], "desktop");
     env.call(&["daemon", "stop"]);
 }
+
+#[test]
+fn permissions_query_and_explicit_request_report_chrome_automation() {
+    let env = Environment::new();
+    for (args, requested) in [
+        (&["permissions"][..], false),
+        (&["permissions", "--request"][..], true),
+    ] {
+        let result = env.call(args);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["chromeAutomation"]["target"], "com.google.Chrome");
+        assert_eq!(result["chromeAutomation"]["requested"], requested);
+        assert_eq!(result["chromeAutomation"]["granted"], true);
+    }
+}

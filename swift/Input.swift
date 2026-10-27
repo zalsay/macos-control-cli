@@ -18,6 +18,13 @@ struct ChromeInputPermit {
     let epoch: UInt64
 }
 
+// Browser startup is a setup capability, not an input capability. It is deliberately
+// impossible to pass this permit to mouse/keyboard posting APIs.
+struct StartupPermit {
+    let generation: UInt64
+    let epoch: UInt64
+}
+
 enum ChromeExecutionState: Equatable {
     case countdown(Int)
     case running
@@ -132,6 +139,39 @@ final class InputCancellation {
     func inputSnapshot() -> UInt64 {
         lock.lock(); defer { lock.unlock() }
         return inputEpoch
+    }
+
+    // Only an unleased helper may create/layout a startup window. This never creates
+    // a lease, starts a countdown, changes phase, or advances the input epoch.
+    func beginSetup(generation expected: UInt64, expectedEpoch: UInt64) throws -> StartupPermit {
+        lock.lock(); defer { lock.unlock() }
+        guard generation == expected else { throw HelperFailure.cancelled }
+        guard inputEpoch == expectedEpoch, stateLocked() != .paused else { throw HelperFailure.userPaused }
+        guard executionLease == nil else {
+            throw HelperFailure(code: "CONNECTION_BUSY", message: "已有桌面执行 lease；拒绝在活动连接中创建 Chrome 窗口")
+        }
+        return StartupPermit(generation: expected, epoch: expectedEpoch)
+    }
+
+    private func validateSetup(_ permit: StartupPermit) throws {
+        guard generation == permit.generation else { throw HelperFailure.cancelled }
+        guard inputEpoch == permit.epoch, stateLocked() != .paused else { throw HelperFailure.userPaused }
+        guard executionLease == nil else {
+            throw HelperFailure(code: "CONNECTION_BUSY", message: "桌面执行 lease 已启动；拒绝继续 Chrome 窗口 setup")
+        }
+    }
+
+    func checkSetup(_ permit: StartupPermit) throws {
+        lock.lock(); defer { lock.unlock() }
+        try validateSetup(permit)
+    }
+
+    // Synchronous, bounded setup effects only (osascript launch / AX geometry setters).
+    // Never use this permit to post or authorize any user input event.
+    func setupEffect<Value>(permit: StartupPermit, _ operation: () throws -> Value) throws -> Value {
+        lock.lock(); defer { lock.unlock() }
+        try validateSetup(permit)
+        return try operation()
     }
 
     private func readyInputLocked(generation expected: UInt64, expectedEpoch: UInt64?) throws -> ChromeInputPermit? {

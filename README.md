@@ -6,6 +6,16 @@ A standalone **Rust + Swift** CLI for observing and controlling local macOS appl
 
 Version **0.2.3** adds the default **`mcc`** command, a user-level `sh` installer and [verified native authorization dialogs](docs/NATIVE-DIALOGS.md). `mcc` and `desktop-control` share desktop mode; **`copis-chrome` remains Chrome-only**. Existing entry points and JSON protocol **1** stay compatible.
 
+## Model configuration and controlled Chrome launch (v0.3.0)
+
+`mcc --config` manages private `~/.config/mcc/models.toml` profiles with full Decisions API `url`, `api_key`, and `model`. Use `--config set <name> --url <url> --model <model> --api-key-stdin` then `--config default <name>`. No implicit `.env`/environment credential fallback; `--jev-key` overrides only the current configured call. Keys are masked in output.
+
+`mcc chrome start --url https://example.com/` creates a **new** verified Chrome window, lays it out at the main usable desktop's left edge and full usable height, then returns the original connection contract. Width defaults to at most1600 original pixels (`mcc --config window --max-width 1600`); it never moves another window. Original-pixel capture limits are width1600/height8192 and JPEG<1MiB; no resampling.
+
+`mcc click-target --connection <id> --target 'Save'` sends only target and OCR ID/label pairs to the configured Decisions endpoint. The returned ID resolves coordinates locally and follows the original click safety path, with no additional OCR recheck. `click_sent` / `effectVerified:false` is event delivery, **not business completion**. See [model configuration](docs/MODEL-CONFIG.md), [Chrome startup](docs/CHROME-START.md), and [semantic click/privacy](docs/JEV-CLICK-TARGET.md).
+
+**v0.3.1:** `permissions` now reports Chrome automation alongside screen recording/accessibility; `permissions --request` explicitly requests all three. Normal startup only checks. See [authorization and live validation](docs/V031-VERIFICATION.md).
+
 ## Features
 
 - List ordinary applications/windows and bind a connection to an exact window/PID/bundle ID.

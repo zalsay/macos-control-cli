@@ -7,6 +7,9 @@
 - [完整使用说明](../USAGE.md)
 - [Agent 接入、协议与 Python 调用闭环](AGENT-INTEGRATION.md)
 - [执行门禁与暂停/继续](EXECUTION-CONTROL.md)
+- [Jev 单次 OCR 语义点击](JEV-CLICK-TARGET.md)：`click-target`、`--jev-key`、云端文字发送、守卫与投递回执。
+- [OpenRouter Jev验证与当前边界](JEV-OPENROUTER-VERIFICATION.md)
+- [v0.2.5 Jev历史验证快照](JEV-VERIFICATION.md)
 - [v0.1.11 OCR 验证记录](OCR-VERIFICATION.md)
 - [v0.2.0 通用应用窗口验证](GENERAL-APPS-VERIFICATION.md)
 - [v0.2.1 点击前鼠标轨迹](CURSOR-MOTION.md)
@@ -30,3 +33,10 @@ Build from the repository root with `bash ./build.sh`; no Copis/Electron/Bun dep
 - [组件集成](COMPONENT-INTEGRATION.md)、[组件验证](COMPONENT-VERIFICATION.md)
 - [Electron 后端契约](ELECTRON-BACKEND-CONTRACT.md)、[主分支集成](MAIN-INTEGRATION.md)
 - [Copis 统一更新与部署](UNIFIED-UPDATES-DEPLOY.md)
+
+- [通用模型配置（URL/key/model）](MODEL-CONFIG.md)
+- [Chrome启动与固定布局](CHROME-START.md)
+
+- [v0.3.0模型配置与Chrome启动验证及待授权边界](V030-VERIFICATION.md)
+
+- [v0.3.1显式授权与Chrome实机验收](V031-VERIFICATION.md)

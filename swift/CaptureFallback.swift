@@ -21,12 +21,48 @@ final class WindowCaptureStrategy {
 func withWindowCaptureProcess<Value>(_ process: Process, cancellation: InputCancellation,
                                      generation: UInt64, timeout: TimeInterval = 6,
                                      cleanup: @escaping () -> Void = {}, readOutput: () throws -> Value) throws -> Value {
-    try cancellation.check(generation)
-    process.standardInput = FileHandle.nullDevice
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
+    try withProtectedNativeProcess(process, cancellation: cancellation, generation: generation,
+                                   timeout: timeout,
+                                   timeoutCode: "CAPTURE_FALLBACK_TIMEOUT",
+                                   failureCode: "CAPTURE_FALLBACK_FAILED",
+                                   failureMessage: "系统窗口截图后端未返回成功结果",
+                                   timeoutMessage: "系统窗口截图后端响应超时",
+                                   validate: { try cancellation.check(generation) },
+                                   start: { try cancellation.effect(generation: generation) { try process.run() } },
+                                   cleanup: cleanup, readOutput: readOutput)
+}
+
+// Chrome 启动与截图回退共用同一套有界子进程清理。StartupPermit 限定为 setup，
+// 且每次轮询/启动都复核 generation、epoch 与“无活动 lease”条件。
+func withCancellableSetupProcess<Value>(_ process: Process, cancellation: InputCancellation,
+                                        permit: StartupPermit, timeout: TimeInterval = 20,
+                                        timeoutCode: String, failureCode: String,
+                                        failureMessage: String, timeoutMessage: String,
+                                        cleanup: @escaping () -> Void = {},
+                                        readOutput: () throws -> Value) throws -> Value {
+    try withProtectedNativeProcess(process, cancellation: cancellation, generation: permit.generation,
+                                   timeout: timeout, timeoutCode: timeoutCode,
+                                   failureCode: failureCode, failureMessage: failureMessage,
+                                   timeoutMessage: timeoutMessage,
+                                   validate: { try cancellation.checkSetup(permit) },
+                                   start: { try cancellation.setupEffect(permit: permit) { try process.run() } },
+                                   cleanup: cleanup, readOutput: readOutput)
+}
+
+private func withProtectedNativeProcess<Value>(_ process: Process, cancellation: InputCancellation,
+                                               generation: UInt64, timeout: TimeInterval,
+                                               timeoutCode: String, failureCode: String,
+                                               failureMessage: String, timeoutMessage: String,
+                                               validate: () throws -> Void,
+                                               start: () throws -> Void,
+                                               cleanup: @escaping () -> Void,
+                                               readOutput: () throws -> Value) throws -> Value {
+    try validate()
+    if process.standardInput == nil { process.standardInput = FileHandle.nullDevice }
+    if process.standardOutput == nil { process.standardOutput = FileHandle.nullDevice }
+    if process.standardError == nil { process.standardError = FileHandle.nullDevice }
     let lease = try cancellation.protectCapture(generation: generation) {
-        // 先终止并回收子进程，再清理私有文件；ACK 后不能留下脱离 Helper 的截图任务。
+        // cancel ACK 前先终止/回收子进程，再清理私有资源。
         if process.isRunning {
             kill(process.processIdentifier, SIGKILL)
             process.waitUntilExit()
@@ -34,27 +70,27 @@ func withWindowCaptureProcess<Value>(_ process: Process, cancellation: InputCanc
         cleanup()
     }
     defer { cancellation.finishCapture(lease) }
-    do { try cancellation.effect(generation: generation) { try process.run() } }
+    do { try start() }
     catch let failure as HelperFailure { throw failure }
-    catch { throw HelperFailure(code: "CAPTURE_FALLBACK_FAILED", message: "无法启动系统窗口截图后端") }
+    catch { throw HelperFailure(code: failureCode, message: failureMessage) }
     let deadline = ProcessInfo.processInfo.systemUptime + timeout
     while process.isRunning {
-        try cancellation.check(generation)
+        try validate()
         guard ProcessInfo.processInfo.systemUptime < deadline else {
-            throw HelperFailure(code: "CAPTURE_FALLBACK_TIMEOUT", message: "系统窗口截图后端响应超时")
+            throw HelperFailure(code: timeoutCode, message: timeoutMessage)
         }
         Thread.sleep(forTimeInterval: 0.025)
     }
-    try cancellation.check(generation)
+    try validate()
     guard process.terminationReason == .exit, process.terminationStatus == 0 else {
-        throw HelperFailure(code: "CAPTURE_FALLBACK_FAILED", message: "系统窗口截图后端未返回成功结果")
+        throw HelperFailure(code: failureCode, message: failureMessage)
     }
     let value = try readOutput()
-    try cancellation.check(generation)
+    try validate()
     return value
 }
 
-// 保留原生像素网格；1600 是拒绝边界，不是重采样的目标尺寸。
+// 保留原生像素网格；1600×8192 是拒绝边界，不是重采样的目标尺寸。
 func originalWindowPixelSize(width: Double, height: Double) throws -> (width: Int, height: Int) {
     guard width.isFinite, height.isFinite, width > 0, height > 0 else {
         throw HelperFailure(code: "IMAGE_GEOMETRY_CHANGED", message: "目标窗口原生像素尺寸无效")
@@ -63,10 +99,15 @@ func originalWindowPixelSize(width: Double, height: Double) throws -> (width: In
     guard abs(width - roundedWidth) < 0.001, abs(height - roundedHeight) < 0.001 else {
         throw HelperFailure(code: "IMAGE_GEOMETRY_CHANGED", message: "原生像素边界不完整，不能通过缩放凑整")
     }
-    guard roundedWidth >= 1, roundedHeight >= 1, roundedWidth <= 1600, roundedHeight <= 1600 else {
-        throw HelperFailure(code: "IMAGE_TOO_LARGE", message: "目标窗口原生截图超过 1600 像素边长限制；不会缩放图片，请缩小目标窗口后重新观察")
+    guard roundedWidth >= 1, roundedHeight >= 1, roundedWidth <= 1600, roundedHeight <= 8192 else {
+        throw HelperFailure(code: "IMAGE_TOO_LARGE", message: "目标窗口原生截图超过 1600×8192 像素边界；不会缩放图片，请缩小目标窗口后重新观察")
     }
-    return (Int(roundedWidth), Int(roundedHeight))
+    let pixelWidth = Int(roundedWidth), pixelHeight = Int(roundedHeight)
+    let (area, overflow) = pixelWidth.multipliedReportingOverflow(by: pixelHeight)
+    guard !overflow, area <= 1600 * 8192 else {
+        throw HelperFailure(code: "IMAGE_TOO_LARGE", message: "目标窗口原生截图超过 1600×8192 像素面积边界；不会缩放图片")
+    }
+    return (pixelWidth, pixelHeight)
 }
 
 func normalizeWindowCapture(url: URL, bounds: WindowBounds) throws -> CGImage {

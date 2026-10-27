@@ -53,7 +53,10 @@ final class ChromeDesktop {
                 _ = CGRequestScreenCaptureAccess()
             }
         }
-        return ["screenRecording": CGPreflightScreenCaptureAccess(), "accessibility": AXIsProcessTrusted()]
+        // Keep Apple Events outside onMain: an explicit consent request can block
+        // while the user decides, without blocking AppKit or changing any input lease.
+        return ["screenRecording": CGPreflightScreenCaptureAccess(), "accessibility": AXIsProcessTrusted(),
+                "chromeAutomation": chromeAutomationPermission(request: request)]
     }
 
     func requireScreenPermission() throws {
@@ -208,7 +211,7 @@ final class ChromeDesktop {
         return false
     }
 
-    private func axBounds(_ window: AXUIElement, deadline: TimeInterval? = nil) throws -> WindowBounds {
+    func axBounds(_ window: AXUIElement, deadline: TimeInterval? = nil) throws -> WindowBounds {
         guard let positionValue = axValue(window, kAXPositionAttribute, deadline: deadline),
               let sizeValue = axValue(window, kAXSizeAttribute, deadline: deadline),
               CFGetTypeID(positionValue) == AXValueGetTypeID(), CFGetTypeID(sizeValue) == AXValueGetTypeID() else {

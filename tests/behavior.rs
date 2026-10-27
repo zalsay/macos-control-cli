@@ -245,6 +245,28 @@ fn given_type_or_press_when_succeeded_then_receipt_does_not_claim_a_screen_point
 }
 
 #[test]
+fn given_full_height_capture_then_keep_original_pixels_and_bound_height() {
+    let (mut service, desktop, path) = setup();
+    desktop.set_capture_size(1600, 3000);
+    let connection = connect(&mut service);
+    let frame = service
+        .execute(json!({"action":"observe","connectionId":connection}))
+        .unwrap();
+    assert_eq!(frame["height"], 3000);
+    assert_eq!(frame["width"], 1600);
+    desktop.set_capture_size(1600, 8193);
+    assert_eq!(
+        service
+            .execute(json!({"action":"observe","connectionId":connection}))
+            .unwrap_err()
+            .code,
+        "IMAGE_TOO_LARGE"
+    );
+    drop(service);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn given_capture_exceeds_1600_pixel_edge_when_observing_then_reject_with_image_too_large() {
     let (mut service, desktop, path) = setup();
     desktop.set_capture_size(1601, 1200);

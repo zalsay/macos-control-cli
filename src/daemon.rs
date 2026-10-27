@@ -129,6 +129,9 @@ pub fn start(runtime: &Runtime) -> Result<Value> {
     let executable = std::env::current_exe().map_err(|e| Error::io("无法定位 CLI", e))?;
     let mut child = Command::new(executable)
         .args(["daemon", "run"])
+        .env_remove("JEV_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("TYPESAFE_API_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr)
@@ -210,12 +213,12 @@ pub fn run(runtime: &Runtime) -> Result<Value> {
     }
     let helper = Helper::spawn_for_scope(&helper_path(runtime.scope)?, runtime.scope)?;
     let canceller = helper.canceller();
-    let service = Arc::new(Mutex::new(Service::with_scope(
-        helper,
-        runtime.frames.clone(),
-        runtime.scope,
-    )));
     let stopping = Arc::new(AtomicBool::new(false));
+    let service = Arc::new(Mutex::new(
+        Service::with_scope(helper, runtime.frames.clone(), runtime.scope).with_decider(Box::new(
+            crate::jev::JevClient::with_cancellation(stopping.clone()),
+        )),
+    ));
     let listener = runtime.bind_listener()?;
     let _socket = SocketGuard(runtime.socket.clone());
     let mut workers: Vec<thread::JoinHandle<()>> = Vec::new();

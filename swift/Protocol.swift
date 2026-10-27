@@ -62,6 +62,8 @@ struct NativeRequest {
     var key = ""
     var imagePath = ""
     var filePath = ""
+    var url = "about:blank"
+    var maxWidthPx = 1600
     var requestPermissions = false
     var prepareToast = false
     // 仅由 stdin 接收线程签发，协议请求不能自行指定或绕过暂停前的排队代次。
@@ -76,6 +78,7 @@ struct NativeRequest {
             "permissions": ["request"], "windows": [], "cancel": [],
             "window": ["windowId", "pid", "prepareToast"],
             "observe": ["windowId", "pid", "imagePath", "maxEdge"],
+            "chrome-start": ["url", "maxWidthPx"],
             "click": ["windowId", "pid", "expectedBounds", "screenX", "screenY", "clickCount"],
             "scroll": ["windowId", "pid", "expectedBounds", "screenX", "screenY", "deltaY"],
             "type": ["windowId", "pid", "expectedBounds", "text"],
@@ -153,10 +156,32 @@ struct NativeRequest {
             }
             if let edge = json["maxEdge"] { _ = try integer(edge, range: 1600...1600) }
             request.imagePath = path
+        case "chrome-start":
+            if let value = json["url"] {
+                guard let url = value as? String, validChromeStartURL(url) else {
+                    throw HelperFailure.invalidArgument
+                }
+                request.url = url
+            }
+            if let value = json["maxWidthPx"] {
+                request.maxWidthPx = Int(try integer(value, range: 400...1600))
+            }
         default: break
         }
         return request
     }
+}
+
+private func validChromeStartURL(_ raw: String) -> Bool {
+    guard (1...4096).contains(raw.utf8.count),
+          raw == raw.trimmingCharacters(in: .whitespacesAndNewlines),
+          !raw.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+          let components = URLComponents(string: raw),
+          let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
+          let host = components.host, !host.isEmpty,
+          components.user == nil, components.password == nil,
+          components.url != nil else { return false }
+    return true
 }
 
 func finiteNumber(_ value: Any?) throws -> Double {

@@ -6,6 +6,16 @@
 
 **0.2.3** 新增默认命令 **`mcc`**、用户级 `sh` 安装脚本和[受控原生授权弹窗](docs/NATIVE-DIALOGS.md)支持。`mcc` 与 `desktop-control` 共用通用模式；**`copis-chrome` 保持仅支持 Chrome**，旧入口与 JSON 协议 **1** 均兼容。
 
+## 通用模型配置与 Chrome 固定布局（v0.3.0）
+
+`mcc --config` 管理 `~/.config/mcc/models.toml` 的完整 Decisions `url`、`api_key`、`model`；支持 `set <name> --url <url> --model <model> --api-key-stdin`、`show <name>`、`default <name>`。文件0600，回执脱敏；不再隐式读 `.env`/环境 API key，`--jev-key` 仅覆盖已配置 profile 的本次调用。迁移与格式见 [通用模型配置](docs/MODEL-CONFIG.md)。
+
+`mcc chrome start --url https://creator.xiaohongshu.com/` **新建并验证**本次 Chrome 窗口，主屏可用区左对齐、占满可用高度，再返回原 connect 的 connectionId。宽度默认最多1600原像素，可用 `mcc --config window --max-width 1600` 配置，不移动其他旧窗、不持续钉回。截图保留原像素，宽1600/高8192与JPEG<1MiB的上限仍明确拒绝，不缩图兜底。详见 [Chrome启动与布局](docs/CHROME-START.md)。
+
+`mcc click-target --connection <id> --target '保存按钮'` 将 target 与 OCR ID/文字交给配置的 Decisions 端点，返回ID后本地查同帧坐标，直接复用原点击链路；没有新增OCR复核，原窗口/焦点/暂停等安全门禁不变。允许有效的截断OCR；`click_sent` / `effectVerified:false` 只表示投递，不证明登录等业务完成。完整隐私、阈值与限制见 [Jev点击契约](docs/JEV-CLICK-TARGET.md)。
+
+**v0.3.1修复：** `permissions` 查询三项权限（含Chrome自动化），`permissions --request` 统一显式申请，由本人确认；普通启动只读检查。授权与新窗布局已完成本机实测，见 [v0.3.1验证](docs/V031-VERIFICATION.md)。
+
 ## 功能
 
 - 列出普通应用及窗口，连接到精确的窗口 ID、PID 与 bundle ID。
@@ -178,6 +188,7 @@ FRAME_ID='your-frame-id'
 | `windows` | 列出可连接窗口 |
 | `connect --window <id>` | 连接指定窗口 |
 | `observe --connection <id> [--out <new.jpg>]` | 读取截图与 OCR，可导出图片 |
+| `click-target --connection <id> --target <描述> [--jev-key <key>]` | Jev OCR 单次语义点击（显式启用云端文字发送） |
 | `click` / `scroll` / `type` / `press` | 使用连接和帧执行输入 |
 | `select-file --connection <id> --path <absolute-file>` | 完成已打开的原生文件选择框 |
 | `disconnect --connection <id>` | 释放连接与临时帧 |
