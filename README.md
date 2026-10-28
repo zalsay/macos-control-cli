@@ -1,5 +1,7 @@
 # macOS Control CLI
 
+Current patch: Git tag **0.3.5.1**, Cargo/package/CLI version **0.3.5+1** (Cargo requires three-component SemVer). This patch refreshes `--help` and accepts numeric build metadata in status receipts; existing input and security behavior is unchanged. See [release notes](docs/RELEASE-0.3.5.1.md).
+
 [简体中文](README.zh-CN.md) · [Usage reference](USAGE.md) · [Agent integration](docs/AGENT-INTEGRATION.md)
 
 A standalone **Rust + Swift** CLI for observing and controlling local macOS application windows. Designed for agents that can execute commands and read local images. **No Electron, Node.js, Bun, browser extension, or Chrome remote-debugging port is required.**
@@ -55,7 +57,7 @@ A source checkout uses an existing build, or invokes `build.sh` if the complete 
 ```bash
 sh ./install.sh --help
 sh ./install.sh --prefix "$HOME/tools/mcc"
-sh ./install.sh --package /absolute/path/copis-chrome-0.3.5-darwin-arm64
+sh ./install.sh --package /absolute/path/copis-chrome-0.3.5+1-darwin-arm64
 ```
 
 See [stable installation and migration](docs/STABLE-INSTALL.md). Custom prefixes use `<prefix>/Applications/MCC`; an explicit `~/.local` prefix behaves like the default.
@@ -84,11 +86,11 @@ cd macos-control-cli
 bash ./build.sh
 ```
 
-On Apple Silicon, version 0.3.5 produces:
+On Apple Silicon, version 0.3.5+1 produces:
 
 ```text
 dist/
-  copis-chrome-0.3.5-darwin-arm64/
+  copis-chrome-0.3.5+1-darwin-arm64/
     copis-chrome
     desktop-control
     mcc
@@ -102,14 +104,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.3.5-darwin-arm64.tar.gz
-  copis-chrome-0.3.5-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.3.5+1-darwin-arm64.tar.gz
+  copis-chrome-0.3.5+1-darwin-arm64.tar.gz.sha256
 ```
 
 Intel uses `darwin-x64`. `bash ./build.sh debug` builds a debug package. Keep the CLI entry points, native helper, and `assets/` together at a stable installation path. You can use the build output directly or copy the entire versioned directory to a location you control; do not copy only the CLI executable.
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.3.5-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.3.5+1-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -120,7 +122,7 @@ Use the actual version/architecture directory produced by your build. The defaul
 Keep `desktop-control`, `macos-chrome-helper`, and `assets/` together. Example after a native ARM build:
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.3.5-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.3.5+1-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit

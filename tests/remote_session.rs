@@ -505,3 +505,75 @@ fn select_file_execution_requires_local_host_policy_and_caches_no_path() {
     assert_eq!(receipt["dialogClosed"], true);
     assert!(receipt.get("path").is_none());
 }
+
+#[test]
+fn status_receipts_preserve_numeric_build_metadata_through_ack_and_replay() {
+    for version in ["0.3.5", "0.3.5-1", "0.3.5+1", "0.3.5+1.2"] {
+        let mut manager = SessionManager::new("boot-a", false).unwrap();
+        manager.issue("session-a", Scope::Desktop, 0).unwrap();
+        let request = br#"{"action":"status"}"#;
+        assert_eq!(
+            manager
+                .begin("session-a", 1, "status-a", request, 0)
+                .unwrap(),
+            Begin::Execute
+        );
+        let response = serde_json::json!({
+            "ok": true, "protocolVersion": 1, "scope": "desktop",
+            "running": true, "connected": false, "version": version
+        });
+        manager
+            .complete(
+                "session-a",
+                1,
+                "status-a",
+                &serde_json::to_vec(&response).unwrap(),
+                1,
+            )
+            .unwrap_or_else(|error| panic!("status version {version} rejected: {error:?}"));
+        let permit = manager.ack("session-a", 1, "status-a", 2).unwrap();
+        manager
+            .normal_close("session-a", 1, "status-a", permit)
+            .unwrap();
+        let Begin::Cached(cached) = manager
+            .begin("session-a", 1, "status-a", request, 3)
+            .unwrap()
+        else {
+            panic!("status replay must use the retained receipt");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&cached).unwrap()["version"],
+            version
+        );
+    }
+}
+
+#[test]
+fn status_receipt_version_stays_bounded_and_rejects_whitespace_and_injection() {
+    let too_long = "1".repeat(33);
+    for version in [
+        "",
+        "0.3.5+1\n",
+        "0.3.5 1",
+        "0.3.5;id",
+        "$(id)",
+        too_long.as_str(),
+    ] {
+        let mut manager = SessionManager::new("boot-a", false).unwrap();
+        manager.issue("session-a", Scope::Desktop, 0).unwrap();
+        manager
+            .begin("session-a", 1, "status-a", br#"{"action":"status"}"#, 0)
+            .unwrap();
+        let response = serde_json::json!({"ok": true, "version": version});
+        let error = manager
+            .complete(
+                "session-a",
+                1,
+                "status-a",
+                &serde_json::to_vec(&response).unwrap(),
+                1,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "INVALID_ARGUMENT");
+    }
+}

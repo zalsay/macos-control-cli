@@ -410,14 +410,6 @@ pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面�
   desktop-control --config chrome --profile <Chrome display name> | --clear-profile
   desktop-control --help | --version
 
-最小流程：
-  desktop-control windows --app com.google.Chrome
-  desktop-control connect --window <windowId>
-  desktop-control observe --connection <connectionId>
-  desktop-control click --connection <connectionId> --frame <frameId> --x <x> --y <y>
-  desktop-control disconnect --connection <connectionId>
-  desktop-control daemon stop
-
 观察返回 connectionId、frameId、imagePath 和 OCR；点击坐标使用该窗口截图的原像素，不缩放或猜偏移。
 帧可重复使用且无时间硬过期；页面或窗口几何变化后重新 observe。输入串行，不重放失败动作。
 只读观察不切前台；首次输入等待 3 秒接管倒计时，会占用真实鼠标键盘。
@@ -434,12 +426,17 @@ chrome start 仅创建并布局新窗口：主屏可用区域最左侧、全高�
 
 权限：permissions 只读查询屏幕录制、辅助功能与 chromeAutomation；仅 permissions --request 显式申请这三项权限，由本人确认系统提示。
 默认运行目录：~/.copis/desktop-control-cli，可用 COPIS_DESKTOP_RUNTIME_DIR 指定本任务的私有目录。
-任务结束必须 disconnect 并 daemon stop，再 daemon status 确认 running:false；不要停止别人的 daemon。
+任务结束先 disconnect；只停止本任务自行启动的 daemon，不停止常驻 Host 或他人的 daemon。
 升级前结束自己旧版本的 daemon，避免新 CLI 复用旧 Helper。--help / --version 不启动 daemon。
 完整说明见随包 USAGE.md、docs/AGENT-INTEGRATION.md；安装选项运行 sh install.sh --help。
 "#;
 
 pub fn help_text(scope: Scope, program: &str) -> String {
+    let program = match (scope, program) {
+        (Scope::Desktop, "mcc") => "mcc",
+        (Scope::Desktop, _) => "desktop-control",
+        (Scope::Chrome, _) => "copis-chrome",
+    };
     let base = if scope == Scope::Desktop {
         if program == "mcc" {
             // 只替换命令名，保留真实的 desktop-control-cli 运行目录。
@@ -452,7 +449,76 @@ pub fn help_text(scope: Scope, program: &str) -> String {
     } else {
         HELP.to_owned()
     };
-    format!("{base}\n远程：--remote <wss URL> [--ca-cert <abs>] --token-file <abs> [--remote-state-dir <abs>] <命令>\nHost：\n  host tls init [--ip <IP>]... [--dns <DNS>]... --output-dir <abs>\n  host token init --output <abs>\n  host start [--listen <ip:port>] --tls-cert <abs> --tls-key <abs> --token-file <abs> [--state-dir <abs>] [--files-root <abs>]...\n  host recover [--state-dir <abs>]\n")
+    format!(
+        r#"{base}
+当前版本：{version}；mcc 与 desktop-control 为通用应用模式，copis-chrome 仅控制 Chrome。
+
+本机快速开始（从每步 JSON 回执获取 connectionId/frameId，不把尖括号占位符原样执行）：
+  {program} permissions
+  {program} chrome start --url https://example.com/
+  {program} observe --connection <connectionId>
+  {program} click-target --connection <connectionId> --target 保存
+  {program} disconnect --connection <connectionId>
+已有窗口可先 windows，再 connect --window <windowId>；chrome start 返回本次新窗口的连接。
+本机任务完成先 disconnect；仅需结束本任务自建 daemon 时，执行 {program} daemon stop，再用 {program} daemon status 确认 running:false；勿停止常驻 Host 或他人的 daemon。
+
+模型配置（在执行桌面操作的 Mac 上设置，远端模式只在 Host 设置）：
+  {program} --config set jev --url https://openrouter.ai/api/alpha/decisions --model typesafe/jev-1.13 --api-key-stdin
+  {program} --config default jev
+  {program} --config show jev
+  {program} --config enable jev
+  {program} --config disable jev
+首行从 stdin 接收密钥，请由秘密管理器提供，不将 key 写入命令行/聊天；回执脱敏。
+URL 必须是完整、兼容的 Decisions 端点，不是任意 chat/completions API。
+--config chrome --profile <显示名称> 只选择已有 Chrome profile；不创建 profile 或复制账号登录态。
+
+固定安装与权限（0.3.5 起）：
+默认真实执行文件：~/Applications/MCC/mcc、~/Applications/MCC/macos-chrome-helper。
+~/.local/bin/mcc 是命令入口链接；旧版本归档保留在 ~/.local/lib/macos-control-cli/<version>。
+自定义 --prefix 的真实运行目录为 <prefix>/Applications/MCC；安装脚本见 sh install.sh --help。
+固定安装目录与私有 runtime/config/state 不同；固定路径不保证升级后免除 macOS 重新授权。
+仅 permissions --request 显式申请权限，由本人确认；应在实际运行 Host 的已登录图形会话核验。
+SSH 单独启动 helper 可能使权限归属 SSH，而非已授权的 mcc；以系统实际归属为准。
+
+远端 Host（在远端 Mac 执行；需要已登录图形桌面，非 headless，仍占用远端鼠标键盘）：
+将 /absolute 替换为自己的绝对路径；初始化凭据前，先创建权限 0700 的私有父目录。
+  {program} host tls init [--ip <IP>]... [--dns <DNS>]... --output-dir <absolute-new-dir>
+  {program} host token init --output <absolute-new-token-file>
+  {program} host start [--listen <ip:port>] --tls-cert <absolute-cert.pem> --tls-key <absolute-key.pem> --token-file <absolute-token-file> [--state-dir <absolute-dir>] [--files-root <absolute-dir>]...
+无公网证书时可生成私有 CA；--ip/--dns 必须覆盖客户端使用的 IP/域名，输出拒绝覆盖已有目标：
+  {program} host tls init --dns host.example --output-dir /absolute/host-tls
+  {program} host token init --output /absolute/access.token
+  {program} host start --listen 0.0.0.0:8765 --tls-cert /absolute/host-tls/host-cert.pem --tls-key /absolute/host-tls/host-key.pem --token-file /absolute/access.token --state-dir /absolute/host-state
+host start 是前台服务；公网监听需显式 --listen 0.0.0.0:8765 并放通端口，默认 127.0.0.1:8765。
+只向客户端可信分发公共 host-ca.pem 和独立 access.token；host-key.pem、host-ca-key.pem 私钥不外传。
+证书/私钥/token 使用受保护普通文件；CA 365 天、服务证书 90 天，到期前人工重新配对，无自动续期。
+默认拒绝远端 select-file；Host 显式 --files-root 放行的路径属于远端，不会上传客户端文件。
+
+本地 client（在 Agent 所在 Mac 执行，必须与 Host 精确匹配版本和入口模式）：
+  {program} --remote <wss-url> [--ca-cert <absolute-ca.pem>] --token-file <absolute-token-file> [--remote-state-dir <absolute-dir>] <command> [args...]
+  {program} --remote wss://host.example:8765/mcc/v1 --ca-cert /absolute/host-ca.pem --token-file /absolute/access.token --remote-state-dir /absolute/client-state status
+--remote 必须紧跟命令名；连接参数在桌面命令之前。仅支持 wss://，固定路径 /mcc/v1，不支持明文 ws://。
+公共 CA 可省略 --ca-cert 使用系统信任；私有 CA 须指定客户端本地 host-ca.pem，不跳过证书校验。
+把 status 换为 chrome start、observe、click-target、type、press、disconnect 等桌面命令即可。
+客户端不读取本地模型配置、不在客户端启动 helper/Chrome/桌面 daemon；失败不回退本机、不自动重放输入。
+远端不支持 --config、--jev-key、daemon、host、permissions --request；这些管理操作只在 Host 本地执行。
+--remote-state-dir 保存客户端会话与截图缓存，不是 Host 的 --state-dir；CA/token 路径也属于客户端。
+observe --out 指定客户端新图片路径，不覆盖已有文件；click-target 的截图/OCR/Jev 与坐标查询均在 Host。
+
+暂停、断线与恢复：
+USER_PAUSED/失焦/人工接管后停止输入，只能由远端本人通过控制条继续并等待原 3 秒倒计时。
+活动控制会话空闲 300 秒会暂停；已断开的非控制会话也会过期，新会话不解除原暂停或恢复锁。
+已断开会话过期可能返回 REMOTE_CLIENT_FAILED；确认无控制连接后，可保留旧缓存并显式选择新的私有 --remote-state-dir。
+Host 重启后旧客户端可能返回 RECOVERY_REQUIRED；不能靠清缓存/换 session/换 runtime 恢复输入。
+无可用控制条或 Host 留下恢复记录时，先停止 Host，再在远端核对原 daemon/helper 安全停止并执行：
+  {program} host recover --state-dir /absolute/host-state
+--state-dir 必须与原 Host 一致；仅在恢复成功后重启 Host，保留旧客户端缓存并显式使用新的私有 --remote-state-dir。
+断线/超时可能表示投递结果未知；sent:true/click_sent、effectVerified:false 不证明业务完成，须观察后置状态。
+
+详细说明：USAGE.md、docs/AGENT-INTEGRATION.md、docs/MODEL-CONFIG.md、docs/CHROME-PROFILES.md、docs/STABLE-INSTALL.md、docs/REMOTE-HOST.md。
+"#,
+        version = env!("CARGO_PKG_VERSION")
+    )
 }
 
 pub const HELP: &str = r#"copis-chrome — 独立的 macOS Chrome 桌面自动化工具（Rust + Swift）

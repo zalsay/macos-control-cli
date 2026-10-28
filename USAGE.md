@@ -6,6 +6,10 @@
 
 其他 Agent 的安装定位、调用流程、图像接入、错误恢复和 Python 示例见 [Agent 接入指南](docs/AGENT-INTEGRATION.md)（源码目录入口；独立功能包中对应 `source/docs/AGENT-INTEGRATION.md`）。
 
+## 0.3.5.1 帮助补丁
+
+Git tag 为 `0.3.5.1`；Cargo、功能包目录及 `mcc --version` 使用标准 SemVer `0.3.5+1`。`--help` 已补齐本机/Host/client 示例、固定路径、模型配置、权限归属、暂停及会话过期/恢复说明；三个入口同步。状态回执支持版本元数据 `+`，执行与门禁逻辑不变。远端模式仍要求客户端与 Host 精确匹配版本，不能用本地新客户端直接替换旧 Host 的配套客户端。见[版本说明](docs/RELEASE-0.3.5.1.md)。
+
 ## 0.3.5 固定运行目录
 
 默认真实运行路径为 `~/Applications/MCC/mcc` 与 `~/Applications/MCC/macos-chrome-helper`，不再按版本改变，也不经过版本目录软链接。Finder可从个人文件夹的Applications/MCC直接定位。旧版本归档和命令入口继续保留，详见[稳定安装与回滚](docs/STABLE-INSTALL.md)。helper文件名已从copis-chrome-helper改为macos-chrome-helper；既有CLI入口、COPIS_*环境变量及签名identifier不顺带改名。固定路径不保证ad-hoc签名升级后永久免授权。

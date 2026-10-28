@@ -52,3 +52,5 @@ Build from the repository root with `bash ./build.sh`; no Copis/Electron/Bun dep
 - [0.3.5 固定可见运行目录、helper改名与回滚](STABLE-INSTALL.md)
 
 - [0.3.5 验证记录与签名/授权边界](V035-VERIFICATION.md)
+
+- [0.3.5.1 帮助补丁与版本号说明](RELEASE-0.3.5.1.md)

@@ -838,7 +838,7 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
             "version" => v.as_str().is_some_and(|s| {
                 !s.is_empty()
                     && s.len() <= 32
-                    && s.bytes().all(|b| b.is_ascii_digit() || b".-".contains(&b))
+                    && s.bytes().all(|b| b.is_ascii_digit() || b".-+".contains(&b))
             }),
             "text" => v.as_str().is_some_and(|s| s.len() <= 4096),
             _ => false,

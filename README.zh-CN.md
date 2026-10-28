@@ -1,5 +1,7 @@
 # macOS Control CLI
 
+当前补丁：Git tag 为 **0.3.5.1**，Cargo/功能包/CLI 版本为 **0.3.5+1**（Cargo 不接受四段版本号）。本补丁更新 `--help`，修复状态回执对版本元数据 `+` 的兼容，不改变输入与安全门禁。见[版本说明](docs/RELEASE-0.3.5.1.md)。
+
 [English](README.md) · [完整使用说明](USAGE.md) · [Agent 接入指南](docs/AGENT-INTEGRATION.md)
 
 使用 **Rust + Swift** 实现的独立 macOS 应用窗口自动化 CLI。面向能执行命令、读取本地图片的 Agent，**不依赖 Electron、Node.js、Bun、浏览器扩展或 Chrome 远程调试端口**。
@@ -55,7 +57,7 @@ mcc apps
 ```bash
 sh ./install.sh --help
 sh ./install.sh --prefix "$HOME/tools/mcc"
-sh ./install.sh --package /绝对路径/copis-chrome-0.3.5-darwin-arm64
+sh ./install.sh --package /绝对路径/copis-chrome-0.3.5+1-darwin-arm64
 ```
 
 固定目录、旧版迁移和安全回滚见[稳定安装说明](docs/STABLE-INSTALL.md)。自定义 `--prefix` 的运行目录为 `<prefix>/Applications/MCC`（显式 `~/.local` 与默认一致）。
@@ -84,11 +86,11 @@ cd macos-control-cli
 bash ./build.sh
 ```
 
-Apple Silicon 上的 0.2.2 产物：
+Apple Silicon 上的 0.3.5+1 产物：
 
 ```text
 dist/
-  copis-chrome-0.3.5-darwin-arm64/
+  copis-chrome-0.3.5+1-darwin-arm64/
     copis-chrome
     desktop-control
     mcc
@@ -102,14 +104,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.3.5-darwin-arm64.tar.gz
-  copis-chrome-0.3.5-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.3.5+1-darwin-arm64.tar.gz
+  copis-chrome-0.3.5+1-darwin-arm64.tar.gz.sha256
 ```
 
 Intel 后缀为 `darwin-x64`。`bash ./build.sh debug` 可生成调试包。可以直接使用构建目录，也可将整个版本目录复制到稳定安装位置；CLI 入口、原生 helper 和 `assets/` 必须保持相邻，不要只复制 CLI。
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.3.5-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.3.5+1-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -120,7 +122,7 @@ export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.3.5-darwin-arm64/copis-chrome"
 `desktop-control` 与 `macos-chrome-helper`、`assets/` 保持在同一目录。ARM 本机构建示例：
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.3.5-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.3.5+1-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit
