@@ -45,3 +45,6 @@ Build from the repository root with `bash ./build.sh`; no Copis/Electron/Bun dep
 - [v0.3.2 profile验证](V032-VERIFICATION.md)
 
 - [v0.3.3 模型启用/禁用验证](V033-VERIFICATION.md)
+
+- [公网WSS远端Host、证书/token及恢复](REMOTE-HOST.md)
+- [v0.3.4开发与分层验收记录](V034-VERIFICATION.md)

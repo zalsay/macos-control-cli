@@ -78,6 +78,8 @@ struct NativeRequest {
         }
         var fields: [String: Set<String>] = [
             "permissions": ["request"], "windows": [], "cancel": [],
+            "transport-state": [], "transport-pause": [], "transport-recover": [],
+            "transport-disconnect": ["expectedInputEpoch"],
             "window": ["windowId", "pid", "prepareToast"],
             "observe": ["windowId", "pid", "imagePath", "maxEdge"],
             "chrome-start": ["url", "maxWidthPx", "profile", "profileMarkerPath"],
@@ -87,6 +89,9 @@ struct NativeRequest {
             "press": ["windowId", "pid", "expectedBounds", "key"],
             "select-file": ["windowId", "pid", "path"],
         ]
+        for action in ["click", "scroll", "type", "press", "select-file", "chrome-start"] {
+            fields[action]?.insert("expectedInputEpoch")
+        }
         if scope == .desktop { fields["apps"] = [] }
         for key in Array(fields.keys) where fields[key]?.contains("windowId") == true {
             fields[key]?.insert("bundleId")
@@ -98,6 +103,12 @@ struct NativeRequest {
             throw HelperFailure.invalidArgument
         }
         var request = NativeRequest(id: id, action: action)
+        if let value = json["expectedInputEpoch"] {
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.int64Value >= 0, number.doubleValue == Double(number.int64Value) else { throw HelperFailure.invalidArgument }
+            request.inputEpoch = number.uint64Value
+        }
+        if action == "transport-disconnect" && request.inputEpoch == nil { throw HelperFailure.invalidArgument }
         if action == "permissions", let value = json["request"] {
             guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
                 throw HelperFailure.invalidArgument

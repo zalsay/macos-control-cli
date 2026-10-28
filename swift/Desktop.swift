@@ -2,6 +2,62 @@ import Foundation
 import AppKit
 import ApplicationServices
 
+// Shared AX-call outcome: strict readback may retry only the typed transient case.
+enum ChromeAXReadbackUnavailable: Error { case temporary }
+enum ChromeAXCallResult<Value> {
+    case value(Value)
+    case failure(AXError)
+    case expired
+}
+
+func performBoundedAXCall<Value>(deadline: TimeInterval?, timeout: TimeInterval, setDefaultTimeout: Bool,
+                                 now: () -> TimeInterval, setTimeout: (Float) -> Void,
+                                 call: () -> (AXError, Value?)) -> ChromeAXCallResult<Value> {
+    if let deadline {
+        let remaining = deadline - now()
+        guard remaining > 0 else { return .expired }
+        setTimeout(Float(min(timeout, remaining)))
+    } else if setDefaultTimeout {
+        setTimeout(Float(timeout))
+    }
+    if let deadline, now() >= deadline { return .expired }
+    let (status, value) = call()
+    if let deadline, now() >= deadline { return .expired }
+    guard status == .success else { return .failure(status) }
+    guard let value else { return .failure(.noValue) }
+    return .value(value)
+}
+
+func requireChromeAXValue<Value>(_ result: ChromeAXCallResult<Value>, strict: Bool,
+                                 message: String) throws -> Value {
+    switch result {
+    case .value(let value): return value
+    case .expired:
+        if strict { throw ChromeAXReadbackUnavailable.temporary }
+    case .failure(let error):
+        if strict && (error == .cannotComplete || error == .invalidUIElement || error == .noValue) {
+            throw ChromeAXReadbackUnavailable.temporary
+        }
+    }
+    throw HelperFailure(code: "FOCUS_UNVERIFIED", message: message)
+}
+
+func decodeChromeAXBounds(positionValue: CFTypeRef, sizeValue: CFTypeRef, strict: Bool) throws -> WindowBounds {
+    let code = strict ? "CHROME_LAYOUT_READBACK_FAILED" : "FOCUS_UNVERIFIED"
+    guard CFGetTypeID(positionValue) == AXValueGetTypeID(), CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+        throw HelperFailure(code: code, message: "无法确认辅助功能窗口的实际几何区域")
+    }
+    let position = positionValue as! AXValue
+    let size = sizeValue as! AXValue
+    var origin = CGPoint.zero
+    var dimensions = CGSize.zero
+    guard AXValueGetType(position) == .cgPoint, AXValueGetType(size) == .cgSize,
+          AXValueGetValue(position, .cgPoint, &origin), AXValueGetValue(size, .cgSize, &dimensions) else {
+        throw HelperFailure(code: code, message: "系统返回了无效的辅助功能窗口几何")
+    }
+    return WindowBounds(x: origin.x, y: origin.y, width: dimensions.width, height: dimensions.height)
+}
+
 func onMain<T>(_ operation: () throws -> T) rethrows -> T {
     if Thread.isMainThread { return try operation() }
     return try DispatchQueue.main.sync(execute: operation)
@@ -175,34 +231,78 @@ final class ChromeDesktop {
         return result
     }
 
-    func identifier(_ window: AXUIElement) -> CGWindowID? {
-        AXUIElementSetMessagingTimeout(window, 0.35)
-        var value: CGWindowID = 0
-        return axWindowID(window, &value) == .success && value > 0 ? value : nil
+    private func identifierResult(_ window: AXUIElement, deadline: TimeInterval?) -> ChromeAXCallResult<CGWindowID> {
+        performBoundedAXCall(deadline: deadline, timeout: 0.35, setDefaultTimeout: true,
+                             now: { ProcessInfo.processInfo.systemUptime },
+                             setTimeout: { AXUIElementSetMessagingTimeout(window, $0) }, call: {
+            var value: CGWindowID = 0
+            let status = axWindowID(window, &value)
+            return (status, value > 0 ? value : nil)
+        })
     }
 
-    func targetAXWindow(_ target: TargetWindow, app: AXUIElement) throws -> AXUIElement {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement],
-              let window = windows.first(where: { identifier($0) == target.windowId }) else {
-            throw HelperFailure(code: "FOCUS_UNVERIFIED", message: "无法精确定位目标应用的辅助功能窗口")
+    func identifier(_ window: AXUIElement, deadline: TimeInterval? = nil) -> CGWindowID? {
+        if case .value(let value) = identifierResult(window, deadline: deadline) { return value }
+        return nil
+    }
+
+    func readbackIdentifier(_ window: AXUIElement, deadline: TimeInterval) throws -> CGWindowID {
+        try requireChromeAXValue(identifierResult(window, deadline: deadline), strict: true,
+                                 message: "无法确认辅助功能窗口的身份")
+    }
+
+    func targetAXWindow(_ target: TargetWindow, app: AXUIElement, deadline: TimeInterval? = nil,
+                        strictReadback: Bool = false) throws -> AXUIElement {
+        let message = "无法精确定位目标应用的辅助功能窗口"
+        let raw = try requireChromeAXValue(axAttribute(app, kAXWindowsAttribute, deadline: deadline, timeout: 0.35),
+                                           strict: strictReadback, message: message)
+        guard let windows = raw as? [AXUIElement] else {
+            throw HelperFailure(code: strictReadback ? "CHROME_LAYOUT_READBACK_FAILED" : "FOCUS_UNVERIFIED", message: message)
         }
-        AXUIElementSetMessagingTimeout(window, 0.35)
+        var selected: AXUIElement?
+        for window in windows {
+            if let deadline, ProcessInfo.processInfo.systemUptime >= deadline { break }
+            let id: CGWindowID?
+            if strictReadback, let deadline {
+                do { id = try readbackIdentifier(window, deadline: deadline) }
+                catch is ChromeAXReadbackUnavailable { continue }
+            } else {
+                id = identifier(window, deadline: deadline)
+            }
+            if id == target.windowId { selected = window; break }
+        }
+        guard let window = selected else {
+            if strictReadback { throw ChromeAXReadbackUnavailable.temporary }
+            throw HelperFailure(code: "FOCUS_UNVERIFIED", message: message)
+        }
+        if let deadline {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else {
+                if strictReadback { throw ChromeAXReadbackUnavailable.temporary }
+                throw HelperFailure(code: "FOCUS_UNVERIFIED", message: message)
+            }
+            AXUIElementSetMessagingTimeout(window, Float(min(0.35, remaining)))
+        } else {
+            AXUIElementSetMessagingTimeout(window, 0.35)
+        }
         return window
+    }
+
+    private func axAttribute(_ element: AXUIElement, _ name: String, deadline: TimeInterval? = nil,
+                             timeout: TimeInterval = 0.1) -> ChromeAXCallResult<CFTypeRef> {
+        performBoundedAXCall(deadline: deadline, timeout: timeout, setDefaultTimeout: false,
+                             now: { ProcessInfo.processInfo.systemUptime },
+                             setTimeout: { AXUIElementSetMessagingTimeout(element, $0) }, call: {
+            var value: CFTypeRef?
+            let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+            return (status, value)
+        })
     }
 
     private func axValue(_ element: AXUIElement, _ name: String, deadline: TimeInterval? = nil,
                          timeout: TimeInterval = 0.1) -> CFTypeRef? {
-        if let deadline {
-            let remaining = deadline - ProcessInfo.processInfo.systemUptime
-            guard remaining > 0 else { return nil }
-            AXUIElementSetMessagingTimeout(element, Float(min(timeout, remaining)))
-        }
-        var value: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
-        if let deadline, ProcessInfo.processInfo.systemUptime >= deadline { return nil }
-        return status == .success ? value : nil
+        if case .value(let value) = axAttribute(element, name, deadline: deadline, timeout: timeout) { return value }
+        return nil
     }
 
     private func verifiedNativeDialog(_ target: TargetWindow, bounds: WindowBounds) -> Bool {
@@ -226,21 +326,14 @@ final class ChromeDesktop {
         return false
     }
 
-    func axBounds(_ window: AXUIElement, deadline: TimeInterval? = nil) throws -> WindowBounds {
-        guard let positionValue = axValue(window, kAXPositionAttribute, deadline: deadline),
-              let sizeValue = axValue(window, kAXSizeAttribute, deadline: deadline),
-              CFGetTypeID(positionValue) == AXValueGetTypeID(), CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
-            throw HelperFailure(code: "FOCUS_UNVERIFIED", message: "无法确认辅助功能窗口的实际几何区域")
-        }
-        let position = positionValue as! AXValue
-        let size = sizeValue as! AXValue
-        var origin = CGPoint.zero
-        var dimensions = CGSize.zero
-        guard AXValueGetType(position) == .cgPoint, AXValueGetType(size) == .cgSize,
-              AXValueGetValue(position, .cgPoint, &origin), AXValueGetValue(size, .cgSize, &dimensions) else {
-            throw HelperFailure(code: "FOCUS_UNVERIFIED", message: "系统返回了无效的辅助功能窗口几何")
-        }
-        return WindowBounds(x: origin.x, y: origin.y, width: dimensions.width, height: dimensions.height)
+    func axBounds(_ window: AXUIElement, deadline: TimeInterval? = nil,
+                  strictReadback: Bool = false) throws -> WindowBounds {
+        let message = "无法确认辅助功能窗口的实际几何区域"
+        let position = try requireChromeAXValue(axAttribute(window, kAXPositionAttribute, deadline: deadline),
+                                                strict: strictReadback, message: message)
+        let size = try requireChromeAXValue(axAttribute(window, kAXSizeAttribute, deadline: deadline),
+                                            strict: strictReadback, message: message)
+        return try decodeChromeAXBounds(positionValue: position, sizeValue: size, strict: strictReadback)
     }
 
     private func verifyAXGeometry(_ window: AXUIElement, expected: WindowBounds) throws {

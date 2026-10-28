@@ -233,6 +233,88 @@ private func sameBounds(_ lhs: WindowBounds, _ rhs: WindowBounds, tolerance: Dou
         abs(lhs.width - rhs.width) <= tolerance && abs(lhs.height - rhs.height) <= tolerance
 }
 
+// A single readback attempt either has exact-window AX/CG geometry or an
+// explicitly classified transient AX unavailability. Other errors propagate.
+enum ChromeStartReadback {
+    case unavailable
+    case unavailableWindow(ChromeWindow)
+    case deadline(ChromeWindow?)
+    case sample(ax: WindowBounds, window: ChromeWindow)
+}
+
+func validateChromeReadbackBounds(_ bounds: WindowBounds, scale: Double, maxWidthPx: Int) throws {
+    guard [bounds.x, bounds.y, bounds.width, bounds.height].allSatisfy(\.isFinite),
+          bounds.width > 0, bounds.height > 0 else {
+        throw HelperFailure(code: "CHROME_LAYOUT_READBACK_FAILED", message: "新 Chrome 窗口返回无效几何")
+    }
+    if bounds.width * scale > Double(maxWidthPx) + 0.5 {
+        throw HelperFailure(code: "CHROME_WIDTH_CAP_UNMET", message: "Chrome 新窗口实际原始像素宽度超过 maxWidthPx")
+    }
+}
+func validateChromeReadbackWindow(_ window: ChromeWindow, target: ChromeWindowIdentity,
+                              scale: Double, maxWidthPx: Int) throws {
+    guard window.target.pid == target.pid && window.target.windowId == target.windowID else {
+        throw HelperFailure(code: "CHROME_WINDOW_IDENTITY", message: "新 Chrome 窗口的 PID/window ID 不匹配")
+    }
+    try validateChromeReadbackBounds(window.bounds, scale: scale, maxWidthPx: maxWidthPx)
+}
+
+
+func waitForChromeStableReadback(expected: WindowBounds, target: ChromeWindowIdentity,
+                                scale: Double, maxWidthPx: Int, deadline: TimeInterval,
+                                now: () -> TimeInterval, check: () throws -> Void,
+                                read: () throws -> ChromeStartReadback,
+                                sleep: (TimeInterval) -> Void) throws -> ChromeWindow {
+    var previous: (ax: WindowBounds, cg: WindowBounds)?
+    var sawGeometry = false
+    let tolerance = max(0.5, 1.0 / scale)
+    func expired() -> HelperFailure {
+        if !sawGeometry {
+            return HelperFailure(code: "CHROME_LAYOUT_READBACK_FAILED", message: "无法回读新 Chrome 窗口 AX 几何")
+        }
+        return HelperFailure(code: "CHROME_LAYOUT_UNSTABLE",
+                             message: "Chrome 新窗口 AX/CG 几何未稳定在目标位置和尺寸；拒绝接受 snapback 或系统钳制")
+    }
+    while true {
+        try check()
+        guard now() < deadline else { throw expired() }
+        let sample = try read()
+        try check()
+        switch sample {
+        case .unavailable:
+            previous = nil
+        case .unavailableWindow(let window):
+            try validateChromeReadbackWindow(window, target: target, scale: scale, maxWidthPx: maxWidthPx)
+            previous = nil
+        case .deadline(let window):
+            if let window { try validateChromeReadbackWindow(window, target: target, scale: scale, maxWidthPx: maxWidthPx) }
+            throw expired()
+        case .sample(let ax, let window):
+            try validateChromeReadbackWindow(window, target: target, scale: scale, maxWidthPx: maxWidthPx)
+            try validateChromeReadbackBounds(ax, scale: scale, maxWidthPx: maxWidthPx)
+            let cg = window.bounds
+            sawGeometry = true
+            guard now() < deadline else { throw expired() }
+            if sameBounds(ax, expected, tolerance: tolerance),
+               sameBounds(cg, expected, tolerance: tolerance),
+               sameBounds(ax, cg, tolerance: tolerance) {
+                if let previous, sameBounds(ax, previous.ax, tolerance: 0.25),
+                   sameBounds(cg, previous.cg, tolerance: 0.25) {
+                    try check()
+                    guard now() < deadline else { throw expired() }
+                    return window
+                }
+                previous = (ax, cg)
+            } else {
+                previous = nil
+            }
+        }
+        let remaining = deadline - now()
+        guard remaining > 0 else { throw expired() }
+        sleep(min(0.05, remaining))
+    }
+}
+
 final class ChromeStarter {
     private let desktop: ChromeDesktop
     private let cancellation: InputCancellation
@@ -295,7 +377,7 @@ final class ChromeStarter {
             try profile.revalidate()
         }
         let measured = try waitForStableReadback(layout.bounds, scale: layout.scale, maxWidthPx: layout.maxWidthPx,
-                                                target: target, axWindow: axWindow, permit: permit, budget: budget)
+                                                target: target, permit: permit, budget: budget)
         try budget.check(cancellation, permit: permit)
         var result: [String: Any] = ["window": measured.json, "layout": try layout.json(measuredBounds: measured.bounds)]
         if let profile { result["profile"] = profile.json }
@@ -379,12 +461,12 @@ final class ChromeStarter {
         // marker. AppleScript merely reads A->B, so it cannot resize another window.
         try apply(probes.first, to: ax, target: target, permit: permit, budget: budget, marker: marker)
         let first = try waitForStableReadback(probes.first, scale: layout.scale, maxWidthPx: layout.maxWidthPx,
-                                               target: target, axWindow: ax, permit: permit, budget: budget)
+                                               target: target, permit: permit, budget: budget)
         let receipt = try readProfileMarkerReceipt(marker, id: nil, expected: first.bounds, permit: permit, budget: budget)
         try profile.revalidate()
         try apply(probes.second, to: ax, target: target, permit: permit, budget: budget, marker: marker)
         let second = try waitForStableReadback(probes.second, scale: layout.scale, maxWidthPx: layout.maxWidthPx,
-                                                target: target, axWindow: ax, permit: permit, budget: budget)
+                                                target: target, permit: permit, budget: budget)
         let moved = try readProfileMarkerReceipt(marker, id: receipt.appleScriptWindowID,
                                                 expected: second.bounds, permit: permit, budget: budget)
         guard moved.appleScriptWindowID == receipt.appleScriptWindowID else {
@@ -641,44 +723,64 @@ final class ChromeStarter {
     }
 
     private func waitForStableReadback(_ expected: WindowBounds, scale: Double, maxWidthPx: Int,
-                                       target: TargetWindow,
-                                       axWindow: AXUIElement, permit: StartupPermit,
+                                       target: TargetWindow, permit: StartupPermit,
                                        budget: ChromeStartBudget) throws -> ChromeWindow {
         let deadline = try budget.stageDeadline(cancellation, permit: permit, maximum: 2)
-        var previous: WindowBounds?
-        var lastMeasured: ChromeWindow?
-        let tolerance = max(0.5, 1.0 / scale)
-        repeat {
+        func withinStage() throws -> Bool {
             try budget.check(cancellation, permit: permit)
-            let ax: WindowBounds
-            do { ax = try desktop.axBounds(axWindow, deadline: deadline) }
-            catch { throw HelperFailure(code: "CHROME_LAYOUT_READBACK_FAILED", message: "无法回读新 Chrome 窗口 AX 几何") }
-            guard [ax.x, ax.y, ax.width, ax.height].allSatisfy(\.isFinite), ax.width > 0, ax.height > 0 else {
-                throw HelperFailure(code: "CHROME_LAYOUT_READBACK_FAILED", message: "新 Chrome 窗口返回无效 AX 几何")
-            }
-            if ax.width * scale > Double(maxWidthPx) + 0.5 {
-                throw HelperFailure(code: "CHROME_WIDTH_CAP_UNMET",
-                                    message: "Chrome 新窗口被最小宽度限制，实际原始像素宽度超过 maxWidthPx")
-            }
-            let window = try desktop.window(target)
-            lastMeasured = window
-            if sameBounds(ax, expected, tolerance: tolerance),
-               sameBounds(window.bounds, expected, tolerance: tolerance),
-               abs(ax.width - window.bounds.width) <= tolerance,
-               abs(ax.height - window.bounds.height) <= tolerance {
-                if let previous, sameBounds(window.bounds, previous, tolerance: 0.25) { return window }
-                previous = window.bounds
-            } else {
-                previous = nil
-            }
-            Thread.sleep(forTimeInterval: 0.05)
-        } while ProcessInfo.processInfo.systemUptime < deadline
-        try budget.check(cancellation, permit: permit)
-        if let lastMeasured, lastMeasured.bounds.width * scale > Double(maxWidthPx) + 0.5 {
-            throw HelperFailure(code: "CHROME_WIDTH_CAP_UNMET",
-                                message: "Chrome 新窗口最终宽度超过 maxWidthPx，未调整任何其他窗口")
+            return ProcessInfo.processInfo.systemUptime < deadline
         }
-        throw HelperFailure(code: "CHROME_LAYOUT_UNSTABLE",
-                            message: "Chrome 新窗口 AX/CG 几何未稳定在目标位置和尺寸；拒绝接受 snapback 或系统钳制")
+        return try waitForChromeStableReadback(
+            expected: expected, target: ChromeWindowIdentity(pid: target.pid, windowID: target.windowId),
+            scale: scale, maxWidthPx: maxWidthPx, deadline: deadline,
+            now: { ProcessInfo.processInfo.systemUptime },
+            check: { try budget.check(self.cancellation, permit: permit) },
+            read: {
+                guard try withinStage() else { return .deadline(nil) }
+                let before = try self.desktop.window(target)
+                let beforeInTime = try withinStage()
+                try validateChromeReadbackWindow(before, target: ChromeWindowIdentity(pid: target.pid, windowID: target.windowId),
+                                                 scale: scale, maxWidthPx: maxWidthPx)
+                guard beforeInTime else { return .deadline(before) }
+                do {
+                    // Reacquire the exact AX window on every attempt; never reuse the
+                    // element that was obtained before navigation or layout changes.
+                    let app = self.desktop.axApplication(target.pid)
+                    guard try withinStage() else { return .deadline(before) }
+                    let element = try self.desktop.targetAXWindow(target, app: app, deadline: deadline, strictReadback: true)
+                    guard try withinStage() else { return .deadline(before) }
+                    let pidResult = performBoundedAXCall(
+                        deadline: deadline, timeout: 0.35, setDefaultTimeout: true,
+                        now: { ProcessInfo.processInfo.systemUptime },
+                        setTimeout: { AXUIElementSetMessagingTimeout(element, $0) }, call: {
+                            var pid: pid_t = 0
+                            let status = AXUIElementGetPid(element, &pid)
+                            return (status, pid)
+                        })
+                    let pid = try requireChromeAXValue(pidResult, strict: true, message: "无法确认新 Chrome 窗口的 AX PID")
+                    let pidInTime = try withinStage()
+                    guard pid == target.pid else {
+                        throw HelperFailure(code: "CHROME_WINDOW_IDENTITY", message: "新 Chrome 窗口的 AX PID 不匹配")
+                    }
+                    guard pidInTime else { return .deadline(before) }
+                    let windowID = try self.desktop.readbackIdentifier(element, deadline: deadline)
+                    let idInTime = try withinStage()
+                    guard windowID == target.windowId else {
+                        throw HelperFailure(code: "CHROME_WINDOW_IDENTITY", message: "新 Chrome 窗口的 AX window ID 不匹配")
+                    }
+                    guard idInTime else { return .deadline(before) }
+                    let ax = try self.desktop.axBounds(element, deadline: deadline, strictReadback: true)
+                    guard try withinStage() else { return .sample(ax: ax, window: before) }
+                    let after = try self.desktop.window(target)
+                    return .sample(ax: ax, window: after)
+                } catch is ChromeAXReadbackUnavailable {
+                    // Only typed transient AX failures retry. CG identity and the
+                    // startup permit remain authoritative even on a failed read.
+                    guard try withinStage() else { return .deadline(before) }
+                    return .unavailableWindow(try self.desktop.window(target))
+                }
+            },
+            sleep: { Thread.sleep(forTimeInterval: $0) })
     }
+
 }

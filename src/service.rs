@@ -5,9 +5,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 pub trait Native: Send {
     fn request(&mut self, request: Value) -> Result<Value>;
+    fn set_input_epoch(&mut self, _epoch: Option<u64>) {}
+    fn set_owner_guard(&mut self, _guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>) {}
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -65,6 +71,9 @@ pub struct Service<N: Native> {
     scope: Scope,
     connection: Option<Connection>,
     decider: Box<dyn crate::jev::Decision>,
+    operation_cancel: Option<Arc<AtomicBool>>,
+    operation_owner: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    preserve_pause: bool,
 }
 impl<N: Native> Service<N> {
     pub fn new(native: N, frames_dir: PathBuf) -> Self {
@@ -78,6 +87,9 @@ impl<N: Native> Service<N> {
             scope,
             connection: None,
             decider: Box::new(crate::jev::JevClient::default()),
+            operation_cancel: None,
+            operation_owner: None,
+            preserve_pause: false,
         }
     }
     pub fn with_decider(mut self, decider: Box<dyn crate::jev::Decision>) -> Self {
@@ -85,6 +97,60 @@ impl<N: Native> Service<N> {
         self
     }
 
+    pub(crate) fn execute_remote_read(
+        &mut self,
+        request: Value,
+        preserve_pause: bool,
+    ) -> Result<Value> {
+        self.preserve_pause = preserve_pause;
+        let result = self.execute(request);
+        self.preserve_pause = false;
+        result
+    }
+    pub(crate) fn connected(&self) -> bool {
+        self.connection.is_some()
+    }
+    pub(crate) fn clear_remote_connection(&mut self) {
+        self.clear();
+    }
+    pub(crate) fn execute_remote(
+        &mut self,
+        request: Value,
+        epoch: u64,
+        cancelled: Arc<AtomicBool>,
+        stopping: Arc<AtomicBool>,
+        owner_alive: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<Value> {
+        self.native.set_owner_guard(Some(owner_alive.clone()));
+        self.operation_owner = Some(owner_alive);
+        self.native.set_input_epoch(Some(epoch));
+        self.decider.set_cancellation(Some(cancelled.clone()));
+        self.operation_cancel = Some(cancelled);
+        let result = self
+            .check_operation_cancelled()
+            .and_then(|()| self.execute(request))
+            .and_then(|value| {
+                self.check_operation_cancelled()?;
+                Ok(value)
+            });
+        self.operation_cancel = None;
+        self.operation_owner = None;
+        self.native.set_owner_guard(None);
+        self.decider.set_cancellation(Some(stopping));
+        self.native.set_input_epoch(None);
+        result
+    }
+    fn check_operation_cancelled(&self) -> Result<()> {
+        if self
+            .operation_cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+            || self.operation_owner.as_ref().is_some_and(|alive| !alive())
+        {
+            return Err(Error::new("USER_PAUSED", USER_PAUSED_PUBLIC_MESSAGE));
+        }
+        Ok(())
+    }
     pub fn execute(&mut self, request: Value) -> Result<Value> {
         let action = string(&request, "action")?;
         let allowed: &[&str] = match action {
@@ -169,10 +235,12 @@ impl<N: Native> Service<N> {
                 "WINDOW_UNAVAILABLE" | "CHROME_WINDOW_UNAVAILABLE" => {
                     // 窗口失效时 helper 通常仍存活；尽力撤销 toast/执行门禁，
                     // 但保留最初窗口错误作为公开结果。
-                    if action != "disconnect" {
-                        let _ = self.cancel_native();
+                    if !self.preserve_pause && self.operation_cancel.is_none() {
+                        if action != "disconnect" {
+                            let _ = self.cancel_native();
+                        }
+                        self.clear();
                     }
-                    self.clear();
                 }
                 "HELPER_EOF" | "HELPER_TIMEOUT" | "HELPER_PROTOCOL" => self.clear(),
                 _ => {}
@@ -634,6 +702,7 @@ impl<N: Native> Service<N> {
             &model.api_key,
             &candidates.request(target, &model.model),
         )?;
+        self.check_operation_cancelled()?;
         let decision_ms = decision_start.elapsed().as_millis() as u64;
         let selection = candidates.select(&response, &model.model)?;
         let click = json!({"action":"click","connectionId":request["connectionId"],
@@ -1689,5 +1758,62 @@ mod tests {
             service.execute(json!({"action":"status"})).unwrap()["connected"],
             false
         );
+    }
+    #[test]
+    fn late_success_after_remote_pause_is_not_reported_as_success() {
+        struct CancelOnReply(Arc<AtomicBool>);
+        impl Native for CancelOnReply {
+            fn request(&mut self, _: Value) -> Result<Value> {
+                self.0.store(true, Ordering::Release);
+                Ok(
+                    json!({"screenRecording":true,"accessibility":true,"chromeAutomation":{"target":"com.google.Chrome","requested":false,"granted":true,"status":"granted","osStatus":0}}),
+                )
+            }
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let mut service = Service::new(CancelOnReply(cancelled.clone()), std::env::temp_dir());
+        let result = service.execute_remote(
+            json!({"action":"permissions","request":false}),
+            0,
+            cancelled,
+            stopping,
+            Arc::new(|| true),
+        );
+        assert_eq!(result.unwrap_err().code, "USER_PAUSED");
+    }
+    #[test]
+    fn paused_remote_observe_window_failure_never_calls_cancel_or_clears_lease() {
+        let (mut service, connection) =
+            service_with_connection([Err(Error::new("WINDOW_UNAVAILABLE", "fixture"))]);
+        let error = service
+            .execute_remote_read(json!({"action":"observe","connectionId":connection}), true)
+            .unwrap_err();
+        assert_eq!(error.code, "WINDOW_UNAVAILABLE");
+        assert_eq!(service.native.requests.len(), 1);
+        assert_eq!(service.native.requests[0]["action"], "window");
+        assert!(service.connected());
+    }
+    #[test]
+    fn remote_window_failure_does_not_cancel_or_clear_original_connection() {
+        let (mut service, connection) = service_with_connection([
+            Err(Error::new("WINDOW_UNAVAILABLE", "fixture")),
+            Ok(json!({"cancelled":true})),
+        ]);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let error = service
+            .execute_remote(
+                json!({"action":"observe","connectionId":connection}),
+                0,
+                cancelled,
+                stopping,
+                Arc::new(|| true),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "WINDOW_UNAVAILABLE");
+        assert_eq!(service.native.requests.len(), 1);
+        assert_eq!(service.native.requests[0]["action"], "window");
+        assert!(service.connected());
     }
 }

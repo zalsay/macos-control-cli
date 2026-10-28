@@ -160,4 +160,63 @@ require(cancelled.pauseExecution(lease: cancelledLease), "倒计时取消按钮�
 clock.advance(30)
 fails("USER_PAUSED") { _ = try cancelled.waitForInput(generation: cancelledGeneration) }
 require(cancelled.executionState(lease: cancelledLease) == .paused, "取消后旧截止时间不能恢复接管")
-print("PASS: 首次自动三秒接管、延迟事件过滤、取消与暂停保持、恢复三秒门禁、执行/暂停门禁、旧输入不可重放、只读观察、取消与迟到回调 BDD；未投递系统输入")
+
+// Transport loss must close the existing gate even before any lease exists.
+let transportClock = TestClock()
+let transport = InputCancellation(clock: transportClock.now)
+let beforeTransport = transport.snapshot()
+let pendingSetup = try transport.beginSetup(generation: beforeTransport, expectedEpoch: transport.inputSnapshot())
+let noLeasePause = transport.transportPause()
+require(noLeasePause["paused"] as? Bool == true, "无lease断线必须保持暂停")
+require(noLeasePause["lease"] is NSNull, "无lease时不得伪造lease")
+fails("USER_PAUSED") { _ = try transport.beginExecution(generation: beforeTransport) }
+fails("USER_PAUSED") { _ = try transport.beginSetup(generation: beforeTransport, expectedEpoch: transport.inputSnapshot()) }
+fails("USER_PAUSED") { try transport.checkSetup(pendingSetup) }
+require(transport.transportState()["recoveryRequired"] as? Bool == true, "无lease时恢复锁必须保留")
+
+// An existing lease remains the same across pause and explicit UI continue.
+let withLease = InputCancellation(clock: transportClock.now)
+let transportGeneration = withLease.snapshot()
+let transportLease = try withLease.beginExecution(generation: transportGeneration)
+_ = withLease.startCountdown(lease: transportLease)
+transportClock.advance(3)
+let oldTransportPermit = try withLease.beginInput(generation: transportGeneration)
+let priorEpoch = withLease.inputSnapshot()
+let pausedTransport = withLease.transportPause()
+require(pausedTransport["lease"] as? UInt64 == transportLease, "断线必须保持原lease")
+require(withLease.inputSnapshot() > priorEpoch, "暂停必须更新inputEpoch")
+fails("USER_PAUSED") { try withLease.checkInput(oldTransportPermit) }
+require(try withLease.beginExecution(generation: transportGeneration) == transportLease, "旧lease重入不得解除暂停")
+require(withLease.transportState()["paused"] as? Bool == true, "旧lease重入仍应暂停")
+require(withLease.resumeExecution(lease: transportLease), "仅原lease的本地继续可恢复")
+require(withLease.executionState(lease: transportLease) == .countdown(3), "本地继续后必须重新倒计时三秒")
+transportClock.advance(2)
+fails("TAKEOVER_PENDING") { _ = try withLease.beginInput(generation: transportGeneration) }
+transportClock.advance(1)
+fails("USER_PAUSED") { _ = try withLease.beginInput(generation: transportGeneration, expectedEpoch: priorEpoch) }
+_ = try withLease.beginInput(generation: transportGeneration)
+transport.cancel()
+fails("USER_PAUSED") { _ = try transport.beginExecution(generation: transport.snapshot()) }
+require(transport.transportState()["recoveryRequired"] as? Bool == true, "普通cancel不得消除断线恢复锁")
+let encodedEpoch = try NativeRequest.decode(["id":"test", "action":"chrome-start", "expectedInputEpoch": 7])
+require(encodedEpoch.inputEpoch == 7, "daemon签发的原始inputEpoch必须跨队列保留")
+// A delayed remote disconnect must not turn an acknowledged pause into cancel.
+let guardedClock = TestClock()
+let guarded = InputCancellation(clock: guardedClock.now)
+let guardedGeneration = guarded.snapshot()
+let guardedLease = try guarded.beginExecution(generation: guardedGeneration)
+_ = guarded.startCountdown(lease: guardedLease)
+guardedClock.advance(3)
+let guardedEpoch = guarded.inputSnapshot()
+_ = guarded.transportPause()
+fails("USER_PAUSED") { try guarded.cancelIfNotPaused(expectedEpoch: guardedEpoch) }
+require(guarded.transportState()["lease"] as? UInt64 == guardedLease, "迟到disconnect不得清除原lease")
+require(guarded.transportState()["paused"] as? Bool == true, "迟到disconnect不得解除暂停")
+require(guarded.resumeExecution(lease: guardedLease), "本地本人可继续原lease")
+guardedClock.advance(3)
+fails("USER_PAUSED") { try guarded.cancelIfNotPaused(expectedEpoch: guardedEpoch) }
+require(guarded.transportState()["lease"] as? UInt64 == guardedLease, "恢复后的旧epoch仍不能断开新状态")
+try guarded.cancelIfNotPaused(expectedEpoch: guarded.inputSnapshot())
+require(guarded.transportState()["lease"] is NSNull, "当前epoch的正常远端disconnect可释放lease")
+
+print("PASS: 原执行/暂停/取消、transport 暂停、恢复倒计时与迟到 epoch BDD；未投递系统输入")

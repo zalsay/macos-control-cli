@@ -1,4 +1,5 @@
 use crate::protocol::{Error, Result, Scope};
+use crate::remote::options::{ClientOptions, HostCommand, HostOptions};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -8,6 +9,11 @@ pub enum Command {
     Version,
     Config(Vec<String>),
     Daemon(String),
+    Host(HostCommand),
+    Remote {
+        options: ClientOptions,
+        command: Box<Command>,
+    },
     Request {
         request: Value,
         output: Option<PathBuf>,
@@ -20,6 +26,12 @@ impl std::fmt::Debug for Command {
             Self::Help => f.write_str("Help"),
             Self::Version => f.write_str("Version"),
             Self::Config(_) => f.write_str("Config { payload: [REDACTED] }"),
+            Self::Host(command) => f.debug_tuple("Host").field(command).finish(),
+            Self::Remote { options, command } => f
+                .debug_struct("Remote")
+                .field("options", options)
+                .field("command", command)
+                .finish(),
             Self::Daemon(action) => f.debug_tuple("Daemon").field(action).finish(),
             Self::Request { .. } => f.write_str("Request { payload: [REDACTED] }"),
         }
@@ -40,6 +52,12 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
     }
     if matches!(command.as_str(), "--version" | "-V") {
         return Ok(Command::Version);
+    }
+    if command == "host" {
+        return parse_host(args.collect());
+    }
+    if command == "--remote" {
+        return parse_remote(args.collect(), scope);
     }
     if command == "--config" {
         let mut config = Vec::new();
@@ -186,6 +204,189 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
     })
 }
 
+fn absolute(value: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(value);
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(Error::invalid("路径必须为绝对路径"));
+    }
+    Ok(path)
+}
+fn parse_remote(args: Vec<String>, scope: Scope) -> Result<Command> {
+    let raw = args
+        .first()
+        .ok_or_else(|| Error::invalid("--remote 缺少 URL"))?;
+    let authority = raw
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
+    if authority.is_some_and(|value| value.contains('@')) {
+        return Err(Error::invalid("远程 URL 禁止用户信息"));
+    }
+    if let Some((_, rest)) = raw.split_once("://") {
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let suffix = &rest[authority_end..];
+        if !matches!(suffix, "" | "/" | "/mcc/v1") {
+            return Err(Error::invalid("远程 URL 路径无效"));
+        }
+    }
+    let mut url = url::Url::parse(raw).map_err(|_| Error::invalid("远程 URL 无效"))?;
+    if url.scheme() != "wss"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "/" | "/mcc/v1")
+    {
+        return Err(Error::invalid("远程 URL 必须是无凭据的 wss /mcc/v1"));
+    }
+    url.set_path("/mcc/v1");
+    let mut token = None;
+    let mut ca = None;
+    let mut state = None;
+    let mut i = 1;
+    while i < args.len() {
+        let target = match args[i].as_str() {
+            "--token-file" => &mut token,
+            "--ca-cert" => &mut ca,
+            "--remote-state-dir" => &mut state,
+            _ => break,
+        };
+        if target.is_some() {
+            return Err(Error::invalid("选项不能重复"));
+        }
+        i += 1;
+        *target = Some(absolute(
+            args.get(i).ok_or_else(|| Error::invalid("选项缺少值"))?,
+        )?);
+        i += 1;
+    }
+    // A nested prefix with no inner command otherwise collapses to Help.
+    if args.get(i).is_some_and(|arg| arg == "--remote") {
+        return Err(Error::invalid("不允许嵌套远程命令"));
+    }
+    let command = parse_for_scope(args[i..].iter().cloned(), scope)?;
+    if matches!(command, Command::Help | Command::Version) {
+        return Ok(command);
+    }
+    match &command {
+        Command::Request { request, .. } if request.get("jevKey").is_none() => {}
+        Command::Request { .. } => return Err(Error::invalid("远程请求不允许 jevKey")),
+        _ => return Err(Error::invalid("远程只允许请求命令")),
+    }
+    Ok(Command::Remote {
+        options: ClientOptions {
+            url: url.to_string(),
+            ca_cert: ca,
+            token_file: token.ok_or_else(|| Error::invalid("缺少 --token-file"))?,
+            state_dir: state,
+        },
+        command: Box::new(command),
+    })
+}
+fn parse_host(args: Vec<String>) -> Result<Command> {
+    let (kind, start) = match args.first().map(String::as_str) {
+        Some("tls") if args.get(1).map(String::as_str) == Some("init") => ("tls", 2),
+        Some("token") if args.get(1).map(String::as_str) == Some("init") => ("token", 2),
+        Some("start") => ("start", 1),
+        Some("recover") => ("recover", 1),
+        _ => return Err(Error::invalid("无效 host 命令")),
+    };
+    let mut single = BTreeMap::new();
+    let mut sans = Vec::new();
+    let mut roots = Vec::new();
+    let mut i = start;
+    while i < args.len() {
+        let key = args[i].as_str();
+        if key == "--json" {
+            i += 1;
+            continue;
+        }
+        if matches!(key, "--help" | "-h") {
+            return Ok(Command::Help);
+        }
+        let allowed = match kind {
+            "tls" => &["--ip", "--dns", "--output-dir"][..],
+            "token" => &["--output"][..],
+            "start" => &[
+                "--listen",
+                "--tls-cert",
+                "--tls-key",
+                "--token-file",
+                "--state-dir",
+                "--files-root",
+            ][..],
+            _ => &["--state-dir"][..],
+        };
+        if !allowed.contains(&key) {
+            return Err(Error::invalid("未知 host 选项"));
+        }
+        i += 1;
+        let value = args.get(i).ok_or_else(|| Error::invalid("选项缺少值"))?;
+        match key {
+            "--ip" => {
+                value
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|_| Error::invalid("IP 无效"))?;
+                sans.push(value.clone());
+            }
+            "--dns" => {
+                if value.parse::<std::net::IpAddr>().is_ok()
+                    || value.contains('*')
+                    || rustls::pki_types::ServerName::try_from(value.as_str()).is_err()
+                {
+                    return Err(Error::invalid("DNS 无效"));
+                }
+                sans.push(value.clone());
+            }
+            "--files-root" => roots.push(absolute(value)?),
+            _ => {
+                if single.insert(key, value.as_str()).is_some() {
+                    return Err(Error::invalid("选项不能重复"));
+                }
+            }
+        }
+        i += 1;
+    }
+    let required = |key| {
+        single
+            .get(key)
+            .copied()
+            .ok_or_else(|| Error::invalid("缺少必需选项"))
+    };
+    let optional_path = |key| single.get(key).map(|v| absolute(v)).transpose();
+    let host = match kind {
+        "tls" => {
+            if sans.is_empty() || sans.len() > 8 {
+                return Err(Error::invalid("SAN 数量必须为 1–8"));
+            }
+            HostCommand::TlsInit {
+                sans,
+                output_dir: absolute(required("--output-dir")?)?,
+            }
+        }
+        "token" => HostCommand::TokenInit {
+            output: absolute(required("--output")?)?,
+        },
+        "recover" => HostCommand::Recover {
+            state_dir: optional_path("--state-dir")?,
+        },
+        _ => HostCommand::Start(HostOptions {
+            listen: single
+                .get("--listen")
+                .copied()
+                .unwrap_or("127.0.0.1:8765")
+                .parse()
+                .map_err(|_| Error::invalid("listen 地址无效"))?,
+            tls_cert: absolute(required("--tls-cert")?)?,
+            tls_key: absolute(required("--tls-key")?)?,
+            token_file: absolute(required("--token-file")?)?,
+            state_dir: optional_path("--state-dir")?,
+            allowed_file_roots: roots,
+        }),
+    };
+    Ok(Command::Host(host))
+}
+
 pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面自动化工具（Rust + Swift）
 
 用法（默认单行 JSON，--json 可选）：
@@ -239,7 +440,7 @@ chrome start 仅创建并布局新窗口：主屏可用区域最左侧、全高�
 "#;
 
 pub fn help_text(scope: Scope, program: &str) -> String {
-    if scope == Scope::Desktop {
+    let base = if scope == Scope::Desktop {
         if program == "mcc" {
             // 只替换命令名，保留真实的 desktop-control-cli 运行目录。
             DESKTOP_HELP
@@ -250,7 +451,8 @@ pub fn help_text(scope: Scope, program: &str) -> String {
         }
     } else {
         HELP.to_owned()
-    }
+    };
+    format!("{base}\n远程：--remote <wss URL> [--ca-cert <abs>] --token-file <abs> [--remote-state-dir <abs>] <命令>\nHost：\n  host tls init [--ip <IP>]... [--dns <DNS>]... --output-dir <abs>\n  host token init --output <abs>\n  host start [--listen <ip:port>] --tls-cert <abs> --tls-key <abs> --token-file <abs> [--state-dir <abs>] [--files-root <abs>]...\n  host recover [--state-dir <abs>]\n")
 }
 
 pub const HELP: &str = r#"copis-chrome — 独立的 macOS Chrome 桌面自动化工具（Rust + Swift）
@@ -452,6 +654,81 @@ mod tests {
         ] {
             let error = parse(arguments.into_iter().map(str::to_owned)).unwrap_err();
             assert_eq!(error.code, "INVALID_ARGUMENT");
+        }
+    }
+}
+
+#[cfg(test)]
+mod remote_review_regressions {
+    use super::*;
+    #[test]
+    fn flag_like_values_remain_values_but_real_remote_overrides_are_rejected() {
+        for (tail, field, expected) in [
+            (
+                vec![
+                    "type",
+                    "--connection",
+                    "c",
+                    "--frame",
+                    "f",
+                    "--text",
+                    "--jev-key",
+                ],
+                "text",
+                "--jev-key",
+            ),
+            (
+                vec![
+                    "type",
+                    "--connection",
+                    "c",
+                    "--frame",
+                    "f",
+                    "--text",
+                    "--remote",
+                ],
+                "text",
+                "--remote",
+            ),
+            (
+                vec!["click-target", "--connection", "c", "--target", "--remote"],
+                "target",
+                "--remote",
+            ),
+            (
+                vec!["chrome", "start", "--profile", "--token-file"],
+                "profile",
+                "--token-file",
+            ),
+        ] {
+            let mut argv = vec!["--remote", "wss://x", "--token-file", "/tmp/token"];
+            argv.extend(tail);
+            let Command::Remote { command, .. } =
+                parse(argv.into_iter().map(str::to_owned)).unwrap()
+            else {
+                panic!()
+            };
+            let Command::Request { request, .. } = *command else {
+                panic!()
+            };
+            assert_eq!(request[field], expected);
+        }
+        for tail in [
+            vec![
+                "click-target",
+                "--connection",
+                "c",
+                "--target",
+                "button",
+                "--jev-key",
+                "secret",
+            ],
+            vec!["status", "--remote", "wss://x"],
+            vec!["--remote", "wss://x", "--token-file", "/tmp/t", "status"],
+        ] {
+            let mut argv = vec!["--remote", "wss://x", "--token-file", "/tmp/token"];
+            argv.extend(tail);
+            assert!(parse(argv.into_iter().map(str::to_owned)).is_err());
         }
     }
 }

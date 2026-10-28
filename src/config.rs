@@ -3,10 +3,12 @@ use crate::protocol::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Read;
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
+
+use crate::private_files;
 
 const MAX_BYTES: u64 = 64 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
@@ -299,26 +301,8 @@ impl Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
             Err(_) => return Err(invalid()),
         };
-        check_private(&metadata, false)?;
-        if metadata.len() > MAX_BYTES {
-            return Err(invalid());
-        }
-        let mut bytes = Vec::new();
-        // The private parent prevents replacement by other users; reject symlinks again at open.
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(target_os = "macos")]
-        options.custom_flags(0x100); // O_NOFOLLOW
-        #[cfg(target_os = "linux")]
-        options.custom_flags(0x20000); // O_NOFOLLOW
-        let file = options.open(path).map_err(|_| invalid())?;
-        check_private(&file.metadata().map_err(|_| invalid())?, false)?;
-        file.take(MAX_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| invalid())?;
-        if bytes.len() as u64 > MAX_BYTES {
-            return Err(invalid());
-        }
+        private_files::check_private(&metadata, false).map_err(|_| invalid())?;
+        let bytes = private_files::read_private(&path, MAX_BYTES).map_err(|_| invalid())?;
         let text = String::from_utf8(bytes).map_err(|_| invalid())?;
         // TOML errors contain the source line and hence may contain an API key. Discard them.
         toml::from_str(&text).map_err(|_| invalid())
@@ -326,7 +310,7 @@ impl Store {
     fn check_directory(&self) -> Result<bool> {
         match std::fs::symlink_metadata(&self.directory) {
             Ok(m) => {
-                check_private(&m, true)?;
+                private_files::check_private(&m, true).map_err(|_| invalid())?;
                 Ok(true)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -377,19 +361,13 @@ impl Store {
         }
         let dest = self.directory.join(filename);
         if let Ok(m) = std::fs::symlink_metadata(&dest) {
-            check_private(&m, false)?;
+            private_files::check_private(&m, false).map_err(|_| invalid())?;
         }
         let path = self
             .directory
             .join(format!(".{}.tmp", crate::protocol::random_id()?));
         let result = (|| {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            options.mode(0o600);
-            let mut file = options.open(&path).map_err(|_| invalid())?;
-            file.write_all(text.as_bytes()).map_err(|_| invalid())?;
-            file.sync_all().map_err(|_| invalid())?;
+            private_files::write_new(&path, text.as_bytes()).map_err(|_| invalid())?;
             std::fs::rename(&path, &dest).map_err(|_| invalid())?;
             std::fs::File::open(&self.directory)
                 .and_then(|f| f.sync_all())
@@ -405,24 +383,6 @@ impl Drop for Lock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
-}
-fn check_private(metadata: &std::fs::Metadata, directory: bool) -> Result<()> {
-    if (directory && !metadata.is_dir())
-        || (!directory && !metadata.is_file())
-        || metadata.file_type().is_symlink()
-    {
-        return Err(invalid());
-    }
-    #[cfg(unix)]
-    {
-        unsafe extern "C" {
-            fn geteuid() -> u32;
-        }
-        if metadata.permissions().mode() & 0o077 != 0 || metadata.uid() != unsafe { geteuid() } {
-            return Err(invalid());
-        }
-    }
-    Ok(())
 }
 fn masked(model: &Model) -> Value {
     json!({"enabled":model.enabled,"url":model.url,"model":model.model,"api_key":"[REDACTED]"})

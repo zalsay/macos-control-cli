@@ -53,10 +53,49 @@ final class InputCancellation {
     private var inputEpoch: UInt64 = 0
     private var executionEnd: (() -> Void)?
 
+    private var transportLocked = false
+
+    private func transportStateLocked() -> [String: Any] {
+        let state = stateLocked()
+        let phaseName: String
+        switch state {
+        case .paused: phaseName = "paused"
+        case .countdown: phaseName = { if case .awaitingCountdown = phase { return "awaitingCountdown" }; return "countdown" }()
+        case .running: phaseName = "running"
+        }
+        return ["transportPauseVersion": 1, "paused": state == .paused, "phase": phaseName,
+                "inputEpoch": inputEpoch, "lease": executionLease.map { $0 as Any } ?? NSNull(),
+                "recoveryRequired": transportLocked]
+    }
+
+    func transportState() -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }
+        return transportStateLocked()
+    }
+
+    func transportPause() -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }
+        transportLocked = true
+        _ = pauseLocked()
+        var receipt = transportStateLocked()
+        receipt["recovered"] = false
+        return receipt
+    }
+
+    // Called only through the daemon's owner-checked local recovery path.
+    func transportRecover() -> [String: Any] {
+        cancel()
+        lock.lock(); defer { lock.unlock() }
+        transportLocked = false
+        phase = .awaitingCountdown
+        return transportStateLocked()
+    }
+
     func beginExecution(generation expected: UInt64) throws -> UInt64 {
         lock.lock(); defer { lock.unlock() }
         guard generation == expected else { throw HelperFailure.cancelled }
         if let lease = executionLease { return lease }
+        guard !transportLocked else { throw HelperFailure.userPaused }
         leaseCounter &+= 1
         executionLease = leaseCounter
         phase = .awaitingCountdown
@@ -132,6 +171,7 @@ final class InputCancellation {
         if stateLocked() == .paused {
             inputEpoch &+= 1
             phase = .countdown(deadline: clock() + 3)
+            transportLocked = false
         }
         return true
     }
@@ -254,11 +294,10 @@ final class InputCancellation {
         captureCleanup = nil
     }
 
-    func cancel() {
-        lock.lock()
+    private func cancelLocked() -> (() -> Void)? {
         generation &+= 1
         executionLease = nil
-        phase = .awaitingCountdown
+        phase = transportLocked ? .paused : .awaitingCountdown
         inputEpoch &+= 1
         let onEnd = executionEnd
         executionEnd = nil
@@ -267,8 +306,25 @@ final class InputCancellation {
         held = nil
         captureCleanup?.operation()
         captureCleanup = nil
+        return onEnd
+    }
+
+    // Remote disconnect is atomic with pause and cannot erase a paused lease.
+    func cancelIfNotPaused(expectedEpoch: UInt64) throws {
+        lock.lock()
+        guard expectedEpoch == inputEpoch, stateLocked() != .paused, !transportLocked else {
+            lock.unlock()
+            throw HelperFailure.userPaused
+        }
+        let onEnd = cancelLocked()
         lock.unlock()
-        // UI 清理回调在锁外运行，不能与主线程布局互相等待。
+        onEnd?()
+    }
+
+    func cancel() {
+        lock.lock()
+        let onEnd = cancelLocked()
+        lock.unlock()
         onEnd?()
     }
 

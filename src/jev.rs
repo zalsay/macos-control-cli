@@ -40,6 +40,7 @@ const JEV_REQUEST_FAILED: &str = "JEV_REQUEST_FAILED";
 
 pub trait Decision: Send {
     fn decide(&mut self, endpoint: &str, key: &str, request: &Value) -> Result<Value>;
+    fn set_cancellation(&mut self, _cancelled: Option<Arc<AtomicBool>>) {}
 }
 
 #[derive(Default)]
@@ -56,6 +57,9 @@ impl JevClient {
 }
 
 impl Decision for JevClient {
+    fn set_cancellation(&mut self, cancelled: Option<Arc<AtomicBool>>) {
+        self.cancelled = cancelled;
+    }
     fn decide(&mut self, endpoint: &str, key: &str, request: &Value) -> Result<Value> {
         decide_with_executable_cancellable(
             Path::new(CURL_EXECUTABLE),

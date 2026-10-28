@@ -20,6 +20,8 @@ Version **0.2.3** adds the default **`mcc`** command, a user-level `sh` installe
 
 **v0.3.3:** Model profiles support `enabled` and local `--config enable <name>` / `disable <name>` commands. Legacy profiles default to enabled; a disabled default blocks `click-target` with `MODEL_DISABLED` before daemon/model activity without affecting ordinary OCR or coordinate clicks. See [model configuration](docs/MODEL-CONFIG.md).
 
+**v0.3.4:** Built-in authenticated WSS Host and explicit `--remote` client, private CA/IP certificate and token provisioning, cross-process sessions, bounded screenshot transfer, and pause-preserving cancellation through the original executor. Browser/OCR/Jev/input run on the Host; no local helper or local model configuration is used. See [remote Host setup and validation boundaries](docs/REMOTE-HOST.md).
+
 ## Features
 
 - List ordinary applications/windows and bind a connection to an exact window/PID/bundle ID.

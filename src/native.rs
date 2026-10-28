@@ -1,6 +1,7 @@
 use crate::protocol::{read_message, Error, Result, Scope};
 use crate::service::Native;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{BufReader, Write};
 #[cfg(unix)]
 use std::net::Shutdown;
@@ -26,10 +27,66 @@ pub struct Canceller {
     stdin: Arc<Mutex<Input>>,
     cancelled: Arc<AtomicBool>,
     terminating: Arc<AtomicBool>,
+    sideband: Arc<Mutex<HashMap<String, mpsc::SyncSender<Value>>>>,
     #[cfg(unix)]
     shutdown: Arc<(UnixStream, UnixStream)>,
 }
 impl Canceller {
+    pub(crate) fn helper_pid(&self) -> Result<u32> {
+        self.child
+            .lock()
+            .map(|child| child.id())
+            .map_err(|_| Error::new("HELPER_EOF", "原生 helper 不可用"))
+    }
+    pub(crate) fn transport(&self, action: &str) -> Result<Value> {
+        if !matches!(
+            action,
+            "transport-state" | "transport-pause" | "transport-recover"
+        ) || self.terminating.load(Ordering::Acquire)
+        {
+            return Err(Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"));
+        }
+        let id = format!(
+            "transport-{}",
+            crate::protocol::random_id()
+                .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?
+        );
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.sideband
+            .lock()
+            .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?
+            .insert(id.clone(), sender);
+        let result = (|| {
+            let mut input = self
+                .stdin
+                .try_lock()
+                .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?;
+            #[cfg(unix)]
+            input
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?;
+            let bytes = format!("{}\n", json!({"id":id,"action":action}));
+            input
+                .write_all(bytes.as_bytes())
+                .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?;
+            drop(input);
+            let response = receiver
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?;
+            if response["ok"] == true && response["data"].is_object() {
+                Ok(response["data"].clone())
+            } else {
+                Err(Error::new(
+                    "HELPER_UPGRADE_REQUIRED",
+                    "原生 helper 不支持安全传输控制",
+                ))
+            }
+        })();
+        if let Ok(mut pending) = self.sideband.lock() {
+            pending.remove(&id);
+        }
+        result
+    }
     pub fn terminate(&self) {
         if self.terminating.swap(true, Ordering::AcqRel) {
             return;
@@ -71,6 +128,8 @@ pub struct Helper {
     sequence: u64,
     timeout: Duration,
     overflowed: Arc<AtomicBool>,
+    input_epoch: Option<u64>,
+    owner_guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 impl Helper {
     pub fn spawn(path: &Path) -> Result<Self> {
@@ -130,10 +189,12 @@ impl Helper {
             stdin: Arc::new(Mutex::new(stdin)),
             cancelled: cancelled.clone(),
             terminating: Arc::new(AtomicBool::new(false)),
+            sideband: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(unix)]
             shutdown,
         };
         let reader_overflowed = overflowed.clone();
+        let reader_sideband = canceller.sideband.clone();
         let (sender, receiver) = mpsc::sync_channel(8);
         let reader = std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -149,6 +210,20 @@ impl Helper {
                         "原生 helper 返回了无效协议数据",
                     )),
                 };
+                // Sideband acknowledgements have unique IDs and bypass the action queue.
+                if let Ok(value) = &message {
+                    if let Some(id) = value["id"]
+                        .as_str()
+                        .filter(|id| id.starts_with("transport-"))
+                    {
+                        if let Ok(mut pending) = reader_sideband.lock() {
+                            if let Some(sender) = pending.remove(id) {
+                                let _ = sender.try_send(value.clone());
+                            }
+                        }
+                        continue;
+                    }
+                }
                 // ack 独立于响应队列；满队列不能阻止紧急取消确认。
                 if message.as_ref().is_ok_and(|value| {
                     value["id"] == "cancel"
@@ -178,6 +253,8 @@ impl Helper {
             sequence: 0,
             timeout,
             overflowed,
+            input_epoch: None,
+            owner_guard: None,
         })
     }
     pub fn canceller(&self) -> Canceller {
@@ -185,7 +262,19 @@ impl Helper {
     }
 }
 impl Native for Helper {
+    fn set_input_epoch(&mut self, epoch: Option<u64>) {
+        self.input_epoch = epoch;
+    }
+    fn set_owner_guard(&mut self, guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>) {
+        self.owner_guard = guard;
+    }
     fn request(&mut self, mut request: Value) -> Result<Value> {
+        if self.owner_guard.as_ref().is_some_and(|alive| !alive()) {
+            return Err(Error::new(
+                "USER_PAUSED",
+                crate::protocol::USER_PAUSED_PUBLIC_MESSAGE,
+            ));
+        }
         if self.canceller.terminating.load(Ordering::Acquire) {
             return Err(Error::new("HELPER_EOF", "原生 helper 已停止"));
         }
@@ -193,6 +282,18 @@ impl Native for Helper {
             return Err(Error::new("HELPER_PROTOCOL", "原生 helper 响应队列溢出"));
         }
         let deadline = Instant::now() + self.timeout;
+        if let Some(epoch) = self.input_epoch {
+            if request["action"] == "cancel" {
+                request["action"] = json!("transport-disconnect");
+                request["expectedInputEpoch"] = json!(epoch);
+            }
+            if matches!(
+                request["action"].as_str(),
+                Some("click" | "scroll" | "type" | "press" | "select-file" | "chrome-start")
+            ) {
+                request["expectedInputEpoch"] = json!(epoch);
+            }
+        }
         self.sequence += 1;
         let id = self.sequence.to_string();
         request["id"] = json!(id);
@@ -281,5 +382,61 @@ impl Drop for Helper {
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod transport_tests {
+    use super::*;
+    #[test]
+    fn transport_sideband_has_distinct_ack_and_preserves_state() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Temp(std::env::temp_dir().join(format!(
+            "mcc-native-sideband-{}",
+            crate::protocol::random_id().unwrap()
+        )));
+        std::fs::create_dir(&dir.0).unwrap();
+        let fake =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-helper.sh");
+        let quoted = fake.to_string_lossy().replace('\'', "'\\''");
+        let path = dir.0.join("helper.sh");
+        std::fs::write(&path, format!("#!/bin/sh\nunset COPIS_CHROME_RUNTIME_DIR COPIS_DESKTOP_RUNTIME_DIR\nexport MCC_FAKE_TRANSPORT_WRONG_ACK=1\nexec '{}' \"$@\"\n", quoted)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut helper = Helper::with_timeout(&path, Duration::from_secs(2)).unwrap();
+        let cancel = helper.canceller();
+        let initial = cancel.transport("transport-state").unwrap();
+        assert_eq!(initial["transportPauseVersion"], 1);
+        assert_eq!(initial["paused"], false);
+        helper.set_input_epoch(Some(0));
+        let receipt = cancel.transport("transport-pause").unwrap();
+        assert_eq!(receipt["paused"], true);
+        assert_eq!(
+            helper.request(json!({"action":"click"})).unwrap_err().code,
+            "USER_PAUSED"
+        );
+        assert_eq!(receipt["recovered"], false);
+        assert_eq!(
+            cancel.transport("transport-state").unwrap()["recoveryRequired"],
+            true
+        );
+        let state = cancel.transport("transport-recover").unwrap();
+        assert_eq!(state["recoveryRequired"], false);
+        assert_eq!(
+            helper.request(json!({"action":"click"})).unwrap_err().code,
+            "USER_PAUSED"
+        );
+        helper.set_input_epoch(None);
+        assert_eq!(
+            helper
+                .request(json!({"action":"permissions","request":false}))
+                .unwrap()["screenRecording"],
+            true
+        );
     }
 }

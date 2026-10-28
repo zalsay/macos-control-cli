@@ -15,6 +15,13 @@ private func chromeWindow(_ pid: pid_t, _ id: CGWindowID, _ bounds: WindowBounds
                  title: "test", bounds: bounds, layer: 0, appName: "Chrome")
 }
 
+// This mode runs only deterministic readback fakes: no osascript, subprocess or GUI.
+if ProcessInfo.processInfo.environment["MCC_CHROME_START_READBACK_ONLY"] == "1" {
+    do { try testStableReadback(); print("PASS: fake-only Chrome readback") }
+    catch { fputs("FAIL: unexpected readback error: \(error)\n", stderr); exit(1) }
+    exit(0)
+}
+
 // Automation preflight is non-prompting and must fail clearly before any window is created.
 try validateChromeAutomationPermission(0)
 try validateChromeAutomationPermission(-600) // Not running: the normal OS launch still enforces its own authorization.
@@ -46,6 +53,9 @@ for (code,name): (Int32,String) in [(-1743,"denied"),(-600,"target_not_running")
     require(result["osStatus"] as? Int32 == code,"返回原始OS状态供诊断")
 }
 
+// The normal suite still exercises subprocesses; this opt-in mode is exclusively
+// for the no-process fake validation requested for readback changes.
+if ProcessInfo.processInfo.environment["MCC_CHROME_START_FAKE_ONLY"] != "1" {
 // Exercise the same separator initialization through a real local osascript pipe.
 // No application is targeted: this cannot create a window or ask for automation consent.
 let formatCancellation=InputCancellation()
@@ -62,6 +72,8 @@ let formatted=String(data:formatData,encoding:.utf8)!
 require(formatted.filter{$0=="\t"}.count==4,"receipt分隔必须是四个真正的HT字符，不是Chrome tab术语文本")
 let pipeReceipt=try parseChromeCreationReceipt(formatted,expectedBounds:WindowBounds(x:0,y:25,width:800,height:600))
 require(pipeReceipt.appleScriptWindowID=="7007","本地真实子进程输出必须可解析为创建receipt")
+
+}
 
 // macOS clamps a full-height resize at the current y. Move first, then resize.
 var layoutOperations:[String]=[]
@@ -259,6 +271,7 @@ expect("CANCELLED") {
     _ = try cancelledSetup.beginSetup(generation: cancelledGeneration, expectedEpoch: cancelledEpoch)
 }
 
+if ProcessInfo.processInfo.environment["MCC_CHROME_START_FAKE_ONLY"] != "1" {
 // Given setup 子进程运行中 helper cancel，Then ACK 前子进程必须终止。
 let processCancellation = InputCancellation()
 let processGeneration = processCancellation.snapshot()
@@ -295,4 +308,187 @@ resultLock.lock(); let cancelledProcessFailure = processFailure; resultLock.unlo
 require(cancelledProcessFailure == "CANCELLED" && !child.isRunning,
         "cancel 必须通过 StartupPermit 中断并回收 setup 子进程")
 
-print("PASS: chrome-start 原生测试：主屏/Retina/负原点几何、A->B AppleScript receipt 与Chrome-only CG绑定、协议校验、授权查询false/显式申请true与状态映射、fresh/active/paused/cancel setup门禁及子进程回收；未启动 Chrome 或发送网站输入")
+}
+
+try testStableReadback()
+
+print("PASS: chrome-start 几何、receipt、协议、授权映射、setup门禁与readback fake；子进程测试：\(ProcessInfo.processInfo.environment["MCC_CHROME_START_FAKE_ONLY"] == "1" ? "跳过" : "已执行")；未启动 Chrome 或发送网站输入")
+
+
+private enum ReadbackEvent {
+    case unavailable
+    case unavailableWindow(WindowBounds)
+    case deadlineWindow(WindowBounds)
+    case sample(WindowBounds, WindowBounds, advance: TimeInterval = 0, failAfter: String? = nil)
+    case failure(String)
+    case wrongIdentity
+}
+private final class FakeReadback {
+    var time: TimeInterval = 0
+    var deadline: TimeInterval = 0.2
+    var events: [ReadbackEvent]
+    var reads = 0
+    var failure: String?
+    var checks = 0
+    var expireOnCheck: Int?
+    let expected = WindowBounds(x: 20, y: 25, width: 700, height: 600)
+    init(_ events: [ReadbackEvent]) { self.events = events }
+    func run() throws -> ChromeWindow {
+        try waitForChromeStableReadback(expected: expected, target: ChromeWindowIdentity(pid: 71, windowID: 502), scale: 1, maxWidthPx: 800,
+            deadline: deadline, now: { self.time }, check: {
+                self.checks += 1
+                if self.checks == self.expireOnCheck { self.time = self.deadline }
+                if let code = self.failure { throw HelperFailure(code: code, message: "fake control failure") }
+            }, read: {
+                self.reads += 1
+                let event = self.events.isEmpty ? ReadbackEvent.unavailable : self.events.removeFirst()
+                switch event {
+                case .unavailable: return .unavailable
+                case .unavailableWindow(let bounds): return .unavailableWindow(chromeWindow(71, 502, bounds))
+                case .deadlineWindow(let bounds): self.time = self.deadline; return .deadline(chromeWindow(71, 502, bounds))
+                case .failure(let code): throw HelperFailure(code: code, message: "fake failure")
+                case .wrongIdentity: return .sample(ax: self.expected, window: chromeWindow(71, 503, self.expected))
+                case .sample(let ax, let cg, let advance, let failAfter):
+                    self.time += advance
+                    self.failure = failAfter
+                    return .sample(ax: ax, window: chromeWindow(71, 502, cg))
+                }
+            }, sleep: { self.time += $0 })
+    }
+}
+private func testStableReadback() throws {
+    try testAXReadbackPrimitives()
+    let b = WindowBounds(x: 20, y: 25, width: 700, height: 600)
+    let good = ReadbackEvent.sample(b, b)
+    let retry = FakeReadback([.unavailable, good, good])
+    let result = try retry.run()
+    require(result.target.pid == 71 && result.target.windowId == 502 && retry.reads == 3,
+            "首次AX不可用后必须重新读取并取得两个连续稳定样本")
+
+    let cgOnly = FakeReadback([.unavailableWindow(b), good, good])
+    _ = try cgOnly.run()
+    require(cgOnly.reads == 3, "已取得CG但AX不可用时仍须连续两次完整读取")
+
+    let interrupted = FakeReadback([good, .unavailable, good])
+    expect("CHROME_LAYOUT_UNSTABLE") { _ = try interrupted.run() }
+    require(interrupted.reads > 3, "中间不可读必须清除旧稳定样本")
+
+    let jitter = WindowBounds(x: 20.4, y: 25, width: 700, height: 600)
+    let unstableAX = FakeReadback([good, .sample(jitter,b), good])
+    expect("CHROME_LAYOUT_UNSTABLE") { _ = try unstableAX.run() }
+    require(unstableAX.reads > 3, "AX变化时不能仅凭CG稳定判定成功")
+
+    let mismatch = WindowBounds(x: 23, y: 25, width: 700, height: 600)
+    let mismatchReset = FakeReadback([good, .sample(mismatch,b), good, good])
+    _ = try mismatchReset.run()
+    require(mismatchReset.reads == 4, "不匹配样本必须清除旧稳定样本")
+    let wrongIdentity = FakeReadback([.wrongIdentity, good, good])
+    expect("CHROME_WINDOW_IDENTITY") { _ = try wrongIdentity.run() }
+    require(wrongIdentity.reads == 1, "错误CG窗口身份必须立即终止")
+
+    let unavailable = FakeReadback([])
+    expect("CHROME_LAYOUT_READBACK_FAILED") { _ = try unavailable.run() }
+    require(unavailable.time >= unavailable.deadline && unavailable.reads <= 5, "永久不可读必须在原deadline有界失败")
+
+    let before = FakeReadback([good, good]); before.deadline = 0
+    expect("CHROME_LAYOUT_READBACK_FAILED") { _ = try before.run() }
+    require(before.reads == 0, "deadline到期前不得启动读取")
+
+    let late = FakeReadback([good, .sample(b, b, advance: 0.2)])
+    expect("CHROME_LAYOUT_UNSTABLE") { _ = try late.run() }
+    require(late.reads == 2, "迟到的第二样本不可被接受")
+    let justBeforeAccept = FakeReadback([good,good]); justBeforeAccept.expireOnCheck = 5
+    expect("CHROME_LAYOUT_UNSTABLE") { _ = try justBeforeAccept.run() }
+    require(justBeforeAccept.reads == 2, "接受最终结果前过期不能成功")
+    let pausedBeforeRead = FakeReadback([good,good]); pausedBeforeRead.failure = "USER_PAUSED"
+    expect("USER_PAUSED") { _ = try pausedBeforeRead.run() }
+    require(pausedBeforeRead.reads == 0, "暂停时不得开始新的AX/CG读取")
+    let cancelledAfterRead = FakeReadback([.sample(b,b,failAfter:"CANCELLED")])
+    expect("CANCELLED") { _ = try cancelledAfterRead.run() }
+    require(cancelledAfterRead.reads == 1, "读取后取消必须立即传播")
+    let afterReadPause = FakeReadback([good, .sample(b, b, failAfter: "USER_PAUSED")])
+    expect("USER_PAUSED") { _ = try afterReadPause.run() }
+    require(afterReadPause.reads == 2, "第二次读取后必须再次检查暂停")
+    for code in ["WINDOW_UNAVAILABLE", "CHROME_WINDOW_IDENTITY", "USER_PAUSED", "CANCELLED", "CHROME_START_TIMEOUT"] {
+        let fatal = FakeReadback([.failure(code), good, good])
+        expect(code) { _ = try fatal.run() }
+        require(fatal.reads == 1, "身份、窗口、暂停、取消和预算错误必须立即终止")
+    }
+    let deadlineOnly = FakeReadback([.deadlineWindow(b), good, good])
+    expect("CHROME_LAYOUT_READBACK_FAILED") { _ = try deadlineOnly.run() }
+    require(deadlineOnly.reads == 1, "读取中到期不得伪装成临时AX错误并继续读取")
+    let wide = WindowBounds(x: 20, y: 25, width: 801, height: 600)
+    for event in [ReadbackEvent.unavailableWindow(wide), .deadlineWindow(wide), .sample(wide,b), .sample(b,wide), .sample(wide,b,advance:0.2)] {
+        let invalid = FakeReadback([event,good,good])
+        expect("CHROME_WIDTH_CAP_UNMET") { _ = try invalid.run() }
+        require(invalid.reads == 1, "宽度越界应立即优先拒绝")
+    }
+    for bad in [WindowBounds(x: .nan, y: 25, width: 700, height: 600), WindowBounds(x: 20, y: 25, width: 0, height: 600)] {
+        for event in [ReadbackEvent.unavailableWindow(bad), .sample(bad,b), .sample(b,bad)] {
+            let invalid = FakeReadback([event,good,good])
+            expect("CHROME_LAYOUT_READBACK_FAILED") { _ = try invalid.run() }
+            require(invalid.reads == 1, "无效AX或CG几何不能被重试掩盖")
+        }
+    }
+}
+
+
+private func testAXReadbackPrimitives() throws {
+    var clock: TimeInterval = 10
+    var timeoutValues: [Float] = []
+    var calls = 0
+    func perform(_ deadline: TimeInterval?, defaultTimeout: Bool = false,
+                 status: AXError = .success, value: Int? = 7,
+                 advance: TimeInterval = 0) -> ChromeAXCallResult<Int> {
+        performBoundedAXCall(deadline: deadline, timeout: 0.35, setDefaultTimeout: defaultTimeout,
+                             now: { clock }, setTimeout: { timeoutValues.append($0) }, call: {
+                                 calls += 1; clock += advance; return (status, value)
+                             })
+    }
+    var point = CGPoint(x: 20, y: 25)
+    var size = CGSize(width: 700, height: 600)
+    let validPoint = AXValueCreate(.cgPoint, &point)!
+    let validSize = AXValueCreate(.cgSize, &size)!
+    let invalidType = "not-an-AX-value" as CFString
+    for (position, dimensions): (CFTypeRef, CFTypeRef) in [(invalidType, validSize), (validSize, validPoint)] {
+        expect("FOCUS_UNVERIFIED") { _ = try decodeChromeAXBounds(positionValue: position, sizeValue: dimensions, strict: false) }
+        expect("CHROME_LAYOUT_READBACK_FAILED") { _ = try decodeChromeAXBounds(positionValue: position, sizeValue: dimensions, strict: true) }
+    }
+    let parsed = try decodeChromeAXBounds(positionValue: validPoint, sizeValue: validSize, strict: true)
+    require(parsed.x == 20 && parsed.y == 25 && parsed.width == 700 && parsed.height == 600,
+            "合法AXValue几何应保留原样")
+    let defaultValue = perform(nil)
+    require(try requireChromeAXValue(defaultValue, strict: false, message: "fake") == 7,
+            "默认AX读取必须保持原始成功值")
+    require(timeoutValues.isEmpty && calls == 1, "默认属性读取不应新增timeout设置")
+    _ = perform(nil, defaultTimeout: true)
+    require(timeoutValues.count == 1 && abs(timeoutValues[0] - 0.35) < 0.0001,
+            "默认identifier需保留0.35秒timeout")
+    timeoutValues.removeAll(); calls = 0
+    let bounded = perform(10.12)
+    require(try requireChromeAXValue(bounded, strict: false, message: "fake") == 7,
+            "deadline内AX读取应成功")
+    require(timeoutValues.count == 1 && abs(timeoutValues[0] - 0.12) < 0.0001,
+            "AX timeout不得超过deadline剩余时间")
+    timeoutValues.removeAll(); calls = 0
+    let expired = perform(10)
+    if case .expired = expired {} else { require(false, "到期前不得读取AX") }
+    require(calls == 0 && timeoutValues.isEmpty, "过期时不得调用AX")
+    clock = 10; calls = 0
+    let expiredDuringSetup: ChromeAXCallResult<Int> = performBoundedAXCall(
+        deadline: 10.1, timeout: 0.35, setDefaultTimeout: false,
+        now: { clock }, setTimeout: { _ in clock = 10.1 }, call: { calls += 1; return (.success, 7) })
+    if case .expired = expiredDuringSetup {} else { require(false, "设置timeout期间过期必须拒绝") }
+    require(calls == 0, "设置timeout后到期不得继续调用AX")
+    clock = 10; calls = 0
+    let late = perform(10.1, advance: 0.1)
+    if case .expired = late {} else { require(false, "迟到的AX值不得接受") }
+    require(calls == 1, "迟到读取只能执行一次")
+    expect("FOCUS_UNVERIFIED") { _ = try requireChromeAXValue(ChromeAXCallResult<Int>.failure(.cannotComplete), strict: false, message: "fake") }
+    expect("FOCUS_UNVERIFIED") { _ = try requireChromeAXValue(ChromeAXCallResult<Int>.failure(.apiDisabled), strict: true, message: "fake") }
+    for outcome in [ChromeAXCallResult<Int>.failure(.cannotComplete), .failure(.invalidUIElement), .failure(.noValue), .expired] {
+        do { _ = try requireChromeAXValue(outcome, strict: true, message: "fake"); require(false, "暂不可读必须单独分类") }
+        catch is ChromeAXReadbackUnavailable {}
+        catch { require(false, "暂不可读分类错误") }
+    }
+}

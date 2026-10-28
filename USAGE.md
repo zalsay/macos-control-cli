@@ -20,6 +20,8 @@
 
 **v0.3.3新增：** 模型profile支持`enabled`布尔配置，`mcc --config enable <名称>` / `disable <名称>`启用或禁用。旧配置默认启用；禁用默认模型时`click-target`返回`MODEL_DISABLED`，普通OCR/坐标点击不受影响。见 [模型配置](docs/MODEL-CONFIG.md)。
 
+**v0.3.4新增：** 内置公网WSS Host与显式`--remote`客户端，支持私有CA/IP证书和独立token初始化、跨CLI会话、截图回传及原执行器保持暂停的断线取消。Chrome/OCR/Jev/输入在Host执行，本地不启动helper或读取模型配置；部署、恢复及实测边界见 [远端Host](docs/REMOTE-HOST.md)。
+
 ## 默认入口与安装（v0.2.3）
 
 运行 `sh ./install.sh` 安装完整功能包并注册 `mcc`；默认前缀 `~/.local`，可用 `--prefix` 和 `--package` 指定本地安装来源。安装不修改 shell 配置；按输出激活 PATH。`mcc --help` 提供命令、权限、原像素坐标、暂停与退出说明，`mcc` 与 `desktop-control` 等价，共用通用运行目录。

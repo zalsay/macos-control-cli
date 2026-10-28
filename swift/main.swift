@@ -35,9 +35,27 @@ func handleLine(_ line: Data, oversized: Bool) {
         if let id = json["id"] as? String, validRequestID(id) { responseID = id }
         var decodedRequest = try NativeRequest.decode(json, scope: scope)
         if ["click", "scroll", "type", "press", "select-file", "chrome-start"].contains(decodedRequest.action) {
-            decodedRequest.inputEpoch = cancellation.inputSnapshot()
+            if decodedRequest.inputEpoch == nil { decodedRequest.inputEpoch = cancellation.inputSnapshot() }
         }
         let request = decodedRequest
+        if request.action == "transport-state" {
+            writer.success(id: request.id, data: cancellation.transportState())
+            return
+        }
+        if request.action == "transport-pause" {
+            writer.success(id: request.id, data: cancellation.transportPause())
+            return
+        }
+        if request.action == "transport-disconnect" {
+            guard let epoch = request.inputEpoch else { throw HelperFailure.invalidArgument }
+            try cancellation.cancelIfNotPaused(expectedEpoch: epoch)
+            writer.success(id: request.id, data: ["cancelled": true])
+            return
+        }
+        if request.action == "transport-recover" {
+            writer.success(id: request.id, data: cancellation.transportRecover())
+            return
+        }
         if request.action == "cancel" {
             // 直接在 stdin 线程处理，不排在截图、焦点等待或文本输入后面。
             cancellation.cancel()
