@@ -48,3 +48,7 @@ Build from the repository root with `bash ./build.sh`; no Copis/Electron/Bun dep
 
 - [公网WSS远端Host、证书/token及恢复](REMOTE-HOST.md)
 - [v0.3.4开发与分层验收记录](V034-VERIFICATION.md)
+
+- [0.3.5 固定可见运行目录、helper改名与回滚](STABLE-INSTALL.md)
+
+- [0.3.5 验证记录与签名/授权边界](V035-VERIFICATION.md)

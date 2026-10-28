@@ -48,15 +48,17 @@ mcc permissions
 mcc apps
 ```
 
-The installer keeps the complete package under `~/.local/lib/macos-control-cli/0.2.3/` and links `~/.local/bin/mcc`. No sudo is needed. It does not edit shell configuration; add the printed PATH setting yourself for future terminals. **A child installer cannot change the current parent shell's PATH.**
+From 0.3.5, executables run from the visible, fixed `~/Applications/MCC/` directory. Both `mcc` and `macos-chrome-helper` are real files, not links into a version directory. Complete immutable packages remain under `~/.local/lib/macos-control-cli/<version>/`; `~/.local/bin/mcc` points to the stable runtime. No sudo is needed. It does not edit shell configuration; add the printed PATH setting yourself for future terminals. **A child installer cannot change the current parent shell's PATH.**
 
 A source checkout uses an existing build, or invokes `build.sh` if the complete package is missing (Rust and Xcode Command Line Tools required). An extracted distribution needs no Rust, Swift, Python, Node.js or network download. Platform, architecture and code signatures are checked. GitHub Release downloading is not part of this local installer.
 
 ```bash
 sh ./install.sh --help
 sh ./install.sh --prefix "$HOME/tools/mcc"
-sh ./install.sh --package /absolute/path/copis-chrome-0.2.3-darwin-arm64
+sh ./install.sh --package /absolute/path/copis-chrome-0.3.5-darwin-arm64
 ```
+
+See [stable installation and migration](docs/STABLE-INSTALL.md). Custom prefixes use `<prefix>/Applications/MCC`; an explicit `~/.local` prefix behaves like the default.
 
 Identical reinstalls preserve the installed version. Unrelated commands and different contents with the same version are not overwritten. Before upgrading, stop only your old task-owned daemon, then establish a new connection using the new entry point; never stop another task's daemon. A new installation path may require renewed macOS permissions.
 
@@ -82,16 +84,16 @@ cd macos-control-cli
 bash ./build.sh
 ```
 
-On Apple Silicon, version 0.2.2 produces:
+On Apple Silicon, version 0.3.5 produces:
 
 ```text
 dist/
-  copis-chrome-0.2.3-darwin-arm64/
+  copis-chrome-0.3.5-darwin-arm64/
     copis-chrome
     desktop-control
     mcc
     install.sh
-    copis-chrome-helper
+    macos-chrome-helper
     module.json
     README.md
     README.zh-CN.md
@@ -100,14 +102,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.2.3-darwin-arm64.tar.gz
-  copis-chrome-0.2.3-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.3.5-darwin-arm64.tar.gz
+  copis-chrome-0.3.5-darwin-arm64.tar.gz.sha256
 ```
 
 Intel uses `darwin-x64`. `bash ./build.sh debug` builds a debug package. Keep the CLI entry points, native helper, and `assets/` together at a stable installation path. You can use the build output directly or copy the entire versioned directory to a location you control; do not copy only the CLI executable.
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.3-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.3.5-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -115,10 +117,10 @@ Use the actual version/architecture directory produced by your build. The defaul
 
 ## General application control
 
-Keep `desktop-control`, `copis-chrome-helper`, and `assets/` together. Example after a native ARM build:
+Keep `desktop-control`, `macos-chrome-helper`, and `assets/` together. Example after a native ARM build:
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.3-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.3.5-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit

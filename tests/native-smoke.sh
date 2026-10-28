@@ -8,7 +8,7 @@ if [[ "$(uname -s)" != Darwin ]]; then
 fi
 scratch="$(mktemp -d /tmp/copis-chrome-native-smoke.XXXXXX)"
 trap 'rm -rf "$scratch"' EXIT
-helper="${1:-$scratch/copis-chrome-helper}"
+helper="${1:-$scratch/macos-chrome-helper}"
 host="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p' || true)"
 case "$host" in
   aarch64-apple-darwin) arch=arm64 ;;

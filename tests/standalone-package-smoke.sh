@@ -18,7 +18,7 @@ arch = {'arm64': 'arm64', 'x86_64': 'x64'}[platform.machine()]
 name = f'copis-chrome-{version}-darwin-{arch}'
 package = root / 'dist' / name
 archive = root / 'dist' / f'{name}.tar.gz'
-required = ['mcc', 'install.sh', 'source/install.sh', 'source/src/bin/mcc.rs', 'copis-chrome', 'desktop-control', 'copis-chrome-helper', 'module.json', 'LICENSE', 'USAGE.md',
+required = ['mcc', 'install.sh', 'source/install.sh', 'source/src/bin/mcc.rs', 'copis-chrome', 'desktop-control', 'macos-chrome-helper', 'module.json', 'LICENSE', 'USAGE.md',
             'README.md', 'README.zh-CN.md', 'assets/copis-logo.png', 'docs/AGENT-INTEGRATION.md',
             'source/Cargo.toml', 'source/Cargo.lock', 'source/build.sh', 'source/README.md',
             'source/README.zh-CN.md', 'source/src/main.rs', 'source/swift/main.swift']
@@ -27,6 +27,8 @@ for relative in required:
 metadata = json.loads((package / 'module.json').read_text())
 assert metadata['version'] == version and metadata['arch'] == arch
 assert metadata['protocolVersion'] == 1 and metadata['entrypoint'] == 'copis-chrome'
+assert metadata['helper'] == 'macos-chrome-helper'
+assert not (package / 'copis-chrome-helper').exists(), '新版不得夹带旧名 helper'
 expected_hash = archive.with_name(archive.name + '.sha256').read_text().split()[0]
 assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected_hash, '归档 SHA256 不匹配'
 with tarfile.open(archive) as tar:

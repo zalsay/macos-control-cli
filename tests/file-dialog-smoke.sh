@@ -87,7 +87,7 @@ try:
         observed = call('observe', '--connection', connection)
         frame = observed['frameId']
         children = subprocess.check_output(['pgrep', '-P', str(owned_daemon.pid)], text=True).split()
-        helpers = [int(child) for child in children if Path(subprocess.check_output(['ps', '-p', child, '-o', 'comm='], text=True).strip()).name == 'copis-chrome-helper']
+        helpers = [int(child) for child in children if Path(subprocess.check_output(['ps', '-p', child, '-o', 'comm='], text=True).strip()).name == 'macos-chrome-helper']
         assert len(helpers) == 1, '不能唯一确认隔离 helper'
         helper_pid = helpers[0]
         def hud(action):

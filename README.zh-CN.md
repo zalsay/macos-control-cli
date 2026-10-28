@@ -48,15 +48,17 @@ mcc permissions
 mcc apps
 ```
 
-默认将完整功能包安装到 `~/.local/lib/macos-control-cli/0.2.3/`，创建 `~/.local/bin/mcc` 命令链接。不需要 sudo，不改写 `.zshrc`、`.zprofile` 等用户配置；可自行将打印的 PATH 设置加入配置，后续终端自动可用。**安装脚本是子进程，不能直接修改当前终端的 PATH。**
+0.3.5 起，实际运行目录固定为 Finder 可见的 `~/Applications/MCC/`，其中 `mcc` 和 `macos-chrome-helper` 均为真实文件，不是指向版本目录的链接。`~/.local/lib/macos-control-cli/<version>/` 保留完整版本归档，`~/.local/bin/mcc` 链接到固定运行目录。不需要 sudo，不改写 `.zshrc`、`.zprofile` 等用户配置；可自行将打印的 PATH 设置加入配置，后续终端自动可用。**安装脚本是子进程，不能直接修改当前终端的 PATH。**
 
 源码目录优先使用已构建产物；没有完整产物时调用 `build.sh`，需要 Rust 与 Xcode Command Line Tools。解压包无需 Rust、Swift、Python、Node.js 或联网下载；架构和代码签名会在安装前校验。本脚本暂不从 GitHub Release 下载。
 
 ```bash
 sh ./install.sh --help
 sh ./install.sh --prefix "$HOME/tools/mcc"
-sh ./install.sh --package /绝对路径/copis-chrome-0.2.3-darwin-arm64
+sh ./install.sh --package /绝对路径/copis-chrome-0.3.5-darwin-arm64
 ```
+
+固定目录、旧版迁移和安全回滚见[稳定安装说明](docs/STABLE-INSTALL.md)。自定义 `--prefix` 的运行目录为 `<prefix>/Applications/MCC`（显式 `~/.local` 与默认一致）。
 
 重复安装相同内容不会改写已有版本；无关同名命令和内容不同的同版本安装会被拒绝。升级前先结束**自己运行目录**内旧 daemon，再用新入口建立新连接；不要停止其他任务的 daemon。更换安装路径可能需要重新授予系统权限。
 
@@ -86,12 +88,12 @@ Apple Silicon 上的 0.2.2 产物：
 
 ```text
 dist/
-  copis-chrome-0.2.3-darwin-arm64/
+  copis-chrome-0.3.5-darwin-arm64/
     copis-chrome
     desktop-control
     mcc
     install.sh
-    copis-chrome-helper
+    macos-chrome-helper
     module.json
     README.md
     README.zh-CN.md
@@ -100,14 +102,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.2.3-darwin-arm64.tar.gz
-  copis-chrome-0.2.3-darwin-arm64.tar.gz.sha256
+  copis-chrome-0.3.5-darwin-arm64.tar.gz
+  copis-chrome-0.3.5-darwin-arm64.tar.gz.sha256
 ```
 
 Intel 后缀为 `darwin-x64`。`bash ./build.sh debug` 可生成调试包。可以直接使用构建目录，也可将整个版本目录复制到稳定安装位置；CLI 入口、原生 helper 和 `assets/` 必须保持相邻，不要只复制 CLI。
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.3-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.3.5-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -115,10 +117,10 @@ export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.2.3-darwin-arm64/copis-chrome"
 
 ## 通用应用控制
 
-`desktop-control` 与 `copis-chrome-helper`、`assets/` 保持在同一目录。ARM 本机构建示例：
+`desktop-control` 与 `macos-chrome-helper`、`assets/` 保持在同一目录。ARM 本机构建示例：
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.2.3-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.3.5-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit

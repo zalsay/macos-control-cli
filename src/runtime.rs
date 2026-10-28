@@ -216,6 +216,13 @@ fn secure_file(path: &Path) -> Result<File> {
         Err(error) => Err(Error::io("无法创建私有运行文件", error)),
     }
 }
+fn adjacent_helper_path(executable: &Path) -> Result<PathBuf> {
+    Ok(executable
+        .parent()
+        .ok_or_else(|| Error::new("HELPER_NOT_FOUND", "无法定位功能包目录"))?
+        .join("macos-chrome-helper"))
+}
+
 pub fn helper_path(scope: Scope) -> Result<PathBuf> {
     let variable = match scope {
         Scope::Chrome => "COPIS_CHROME_HELPER",
@@ -224,19 +231,16 @@ pub fn helper_path(scope: Scope) -> Result<PathBuf> {
     let path = if let Some(path) = std::env::var_os(variable) {
         PathBuf::from(path)
     } else {
-        // 安装后的 mcc 是 bin/ 下的链接，资源必须相对真实版本目录查找。
+        // 命令入口可为链接；资源始终相对实际执行目录查找，兼容固定目录及独立解压包。
         let executable = std::env::current_exe()
             .and_then(fs::canonicalize)
             .map_err(|e| Error::io("无法定位当前可执行文件的真实路径", e))?;
-        executable
-            .parent()
-            .ok_or_else(|| Error::new("HELPER_NOT_FOUND", "无法定位功能包目录"))?
-            .join("copis-chrome-helper")
+        adjacent_helper_path(&executable)?
     };
     if !path.is_absolute() || !path.is_file() {
         return Err(Error::new(
             "HELPER_NOT_FOUND",
-            "找不到原生 helper；请运行功能包 build.sh，或将 copis-chrome-helper 放在 CLI 同目录",
+            "找不到原生 helper；请运行功能包 build.sh，或将 macos-chrome-helper 放在 CLI 同目录",
         ));
     }
     Ok(path)
@@ -371,6 +375,18 @@ mod scope_tests {
         assert_eq!(
             desktop.root,
             PathBuf::from("/Users/tester/.copis/desktop-control-cli")
+        );
+    }
+}
+
+#[cfg(test)]
+mod helper_filename_tests {
+    use super::*;
+    #[test]
+    fn default_helper_uses_macos_name_at_stable_visible_path() {
+        assert_eq!(
+            adjacent_helper_path(Path::new("/Users/example/Applications/MCC/mcc")).unwrap(),
+            Path::new("/Users/example/Applications/MCC/macos-chrome-helper")
         );
     }
 }

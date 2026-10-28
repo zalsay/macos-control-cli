@@ -29,16 +29,16 @@ trap 'rm -rf "$PACKAGE_STAGING"' EXIT
 PACKAGE_BUILD="$PACKAGE_STAGING/$PACKAGE_NAME"
 mkdir -p "$PACKAGE_BUILD"
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --manifest-path "$PACKAGE_DIR/Cargo.toml" --target-dir "$PACKAGE_DIR/target" --target "$RUST_HOST" --profile "$BUILD_PROFILE" >&2
-swiftc -O -target "$SWIFT_TARGET" "$PACKAGE_DIR"/swift/*.swift -o "$PACKAGE_BUILD/copis-chrome-helper"
+swiftc -O -target "$SWIFT_TARGET" "$PACKAGE_DIR"/swift/*.swift -o "$PACKAGE_BUILD/macos-chrome-helper"
 cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/copis-chrome" "$PACKAGE_BUILD/copis-chrome"
 cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/desktop-control" "$PACKAGE_BUILD/desktop-control"
 cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/mcc" "$PACKAGE_BUILD/mcc"
-chmod 755 "$PACKAGE_BUILD/mcc" "$PACKAGE_BUILD/copis-chrome" "$PACKAGE_BUILD/desktop-control" "$PACKAGE_BUILD/copis-chrome-helper"
+chmod 755 "$PACKAGE_BUILD/mcc" "$PACKAGE_BUILD/copis-chrome" "$PACKAGE_BUILD/desktop-control" "$PACKAGE_BUILD/macos-chrome-helper"
 
 # 为 CLI 和 helper 设置明确 identifier；系统权限是否沿用仍由 macOS TCC 决定。
 # 分发时可通过 COPIS_CHROME_SIGN_IDENTITY 指定 Developer ID；默认仅本机 ad-hoc 签名。
 PACKAGE_SIGN_IDENTITY="${COPIS_CHROME_SIGN_IDENTITY:--}"
-codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.chrome-desktop.helper "$PACKAGE_BUILD/copis-chrome-helper"
+codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.chrome-desktop.helper "$PACKAGE_BUILD/macos-chrome-helper"
 codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.chrome-desktop.cli "$PACKAGE_BUILD/copis-chrome"
 codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.desktop-control.cli "$PACKAGE_BUILD/desktop-control"
 codesign --force --sign "$PACKAGE_SIGN_IDENTITY" --identifier com.copis.macos-control.cli "$PACKAGE_BUILD/mcc"
@@ -61,7 +61,7 @@ cat > "$PACKAGE_BUILD/module.json" <<MANIFEST
   "minimumOsVersion": "14.0",
   "protocolVersion": 1,
   "entrypoint": "copis-chrome",
-  "helper": "copis-chrome-helper"
+  "helper": "macos-chrome-helper"
 }
 MANIFEST
 

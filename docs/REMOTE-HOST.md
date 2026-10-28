@@ -1,6 +1,6 @@
-# 公网 WSS 远端 Host（0.3.4）
+# 公网 WSS 远端 Host（0.3.4+）
 
-本页适用于0.3.4。代码/构建、TLS回环模拟与真实双机/公网验收分别记录在[V034验证记录](V034-VERIFICATION.md)，不以本机模拟成功代替真实部署验收。
+本页适用于0.3.4及之后版本；客户端/Host仍须精确匹配版本。代码/构建、TLS回环模拟与真实双机/公网验收分别记录在[V034验证记录](V034-VERIFICATION.md)，不以本机模拟成功代替真实部署验收。
 
 ## 运行方式和信任边界
 
@@ -18,7 +18,9 @@ Host token是该scope的桌面控制凭据，不能交给不可信者。远端�
 
 ## 1. 在远端Mac准备原有权限与账号
 
-先确认使用0.3.4完整包，CLI/helper来自同一版本：
+0.3.5起，默认实际执行文件固定为 `~/Applications/MCC/mcc` 和 `~/Applications/MCC/macos-chrome-helper`，均不是版本目录链接。GUI LaunchAgent应固定指向前者，升级不改该路径；归档、停机更新和回滚见[稳定安装](STABLE-INSTALL.md)。签名identifier保持不变，但ad-hoc签名仍可能要求重新授权。
+
+先确认使用同版本完整包，CLI/helper来自同一版本：
 
 ```sh
 mcc --version
