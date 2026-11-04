@@ -54,3 +54,7 @@ Build from the repository root with `bash ./build.sh`; no Copis/Electron/Bun dep
 - [0.3.5 验证记录与签名/授权边界](V035-VERIFICATION.md)
 
 - [0.3.5.1 帮助补丁与版本号说明](RELEASE-0.3.5.1.md)
+
+- [0.3.6 Host 自动软暂停接管候选与验证边界](V036-VERIFICATION.md)
+
+- [滚动方向、投递回执与本地 / 远端真实 Chrome 诊断](SCROLL-DIAGNOSTICS.md)

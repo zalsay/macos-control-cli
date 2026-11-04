@@ -42,8 +42,16 @@ impl Canceller {
         if !matches!(
             action,
             "transport-state" | "transport-pause" | "transport-recover"
-        ) || self.terminating.load(Ordering::Acquire)
-        {
+        ) {
+            return Err(Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"));
+        }
+        self.transport_request(json!({"action":action}))
+    }
+    pub(crate) fn resume_host_soft_pause(&self, lease: u64, epoch: u64) -> Result<Value> {
+        self.transport_request(json!({"action":"transport-auto-resume","expectedLease":lease,"expectedInputEpoch":epoch}))
+    }
+    fn transport_request(&self, mut request: Value) -> Result<Value> {
+        if self.terminating.load(Ordering::Acquire) {
             return Err(Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"));
         }
         let id = format!(
@@ -65,7 +73,8 @@ impl Canceller {
             input
                 .set_write_timeout(Some(Duration::from_secs(2)))
                 .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?;
-            let bytes = format!("{}\n", json!({"id":id,"action":action}));
+            request["id"] = json!(id);
+            let bytes = format!("{request}\n");
             input
                 .write_all(bytes.as_bytes())
                 .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?;
@@ -75,6 +84,13 @@ impl Canceller {
                 .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?;
             if response["ok"] == true && response["data"].is_object() {
                 Ok(response["data"].clone())
+            } else if request["action"] == "transport-auto-resume"
+                && response["error"]["code"] == "USER_PAUSED"
+            {
+                Err(Error::new(
+                    "USER_PAUSED",
+                    crate::protocol::USER_PAUSED_PUBLIC_MESSAGE,
+                ))
             } else {
                 Err(Error::new(
                     "HELPER_UPGRADE_REQUIRED",
@@ -259,6 +275,10 @@ impl Helper {
     }
     pub fn canceller(&self) -> Canceller {
         self.canceller.clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn set_test_request_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
     }
 }
 impl Native for Helper {

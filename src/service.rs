@@ -110,6 +110,36 @@ impl<N: Native> Service<N> {
     pub(crate) fn connected(&self) -> bool {
         self.connection.is_some()
     }
+    /// Pure connection/frame eligibility only. Real identity, geometry, focus,
+    /// permissions and countdown remain in the original native input path.
+    pub(crate) fn allows_host_soft_takeover(&self, intent: &Value) -> bool {
+        let Some(action) = intent["action"].as_str() else {
+            return false;
+        };
+        if !matches!(
+            action,
+            "click" | "scroll" | "type" | "press" | "click-target" | "select-file"
+        ) {
+            return false;
+        }
+        let Some(id) = intent["connectionId"].as_str() else {
+            return false;
+        };
+        let Ok(connection) = self.require_connection(id) else {
+            return false;
+        };
+        if connection.release_pending {
+            return false;
+        }
+        match intent.get("frameId") {
+            Some(Value::String(id)) => connection
+                .frames
+                .iter()
+                .any(|frame| frame.id == *id && frame.bounds == connection.window.bounds),
+            None => matches!(action, "click-target" | "select-file"),
+            _ => false,
+        }
+    }
     pub(crate) fn clear_remote_connection(&mut self) {
         self.clear();
     }
@@ -1815,5 +1845,65 @@ mod tests {
         assert_eq!(service.native.requests.len(), 1);
         assert_eq!(service.native.requests[0]["action"], "window");
         assert!(service.connected());
+    }
+    #[test]
+    fn soft_takeover_eligibility_is_read_only_bound_to_connection_and_current_frame() {
+        let (mut service, id) = connected_service(Ok(json!({"selected":true})));
+        let count = service.native.requests.len();
+        let bounds = service.connection.as_ref().unwrap().window.bounds;
+        service
+            .connection
+            .as_mut()
+            .unwrap()
+            .frames
+            .push_back(Frame {
+                id: "frame-a".into(),
+                path: PathBuf::from("/not-read"),
+                width: 900,
+                height: 700,
+                bounds,
+            });
+        assert!(service.allows_host_soft_takeover(
+            &json!({"action":"click","connectionId":id,"frameId":"frame-a"})
+        ));
+        assert!(
+            service.allows_host_soft_takeover(&json!({"action":"click-target","connectionId":id}))
+        );
+        assert!(
+            service.allows_host_soft_takeover(&json!({"action":"select-file","connectionId":id}))
+        );
+        for action in ["disconnect", "observe", "status", "connect", "chrome-start"] {
+            assert!(!service.allows_host_soft_takeover(
+                &json!({"action":action,"connectionId":id,"frameId":"frame-a"})
+            ));
+        }
+        assert!(!service.allows_host_soft_takeover(
+            &json!({"action":"click","connectionId":"other","frameId":"frame-a"})
+        ));
+        assert!(!service.allows_host_soft_takeover(
+            &json!({"action":"click","connectionId":id,"frameId":"other"})
+        ));
+        assert!(!service.allows_host_soft_takeover(&json!({"action":"click","connectionId":id})));
+        service
+            .connection
+            .as_mut()
+            .unwrap()
+            .frames
+            .front_mut()
+            .unwrap()
+            .bounds
+            .x += 1.0;
+        assert!(!service.allows_host_soft_takeover(
+            &json!({"action":"click","connectionId":id,"frameId":"frame-a"})
+        ));
+        service.connection.as_mut().unwrap().release_pending = true;
+        assert!(
+            !service.allows_host_soft_takeover(&json!({"action":"click-target","connectionId":id}))
+        );
+        assert_eq!(
+            service.native.requests.len(),
+            count,
+            "eligibility must not do AX/OCR/input or mutate native state"
+        );
     }
 }

@@ -40,8 +40,9 @@ final class InputCancellation {
     private let clock: () -> TimeInterval
     private var phase = Phase.awaitingCountdown
 
-    init(clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+    init(clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, initialInputEpoch: UInt64 = 0) {
         self.clock = clock
+        self.inputEpoch = initialInputEpoch
     }
 
     private let lock = NSLock()
@@ -53,6 +54,8 @@ final class InputCancellation {
     private var inputEpoch: UInt64 = 0
     private var executionEnd: (() -> Void)?
 
+    private enum PauseReason: String { case none, userInteraction, focusLoss, manual, transport }
+    private var pauseReason = PauseReason.none
     private var transportLocked = false
 
     private func transportStateLocked() -> [String: Any] {
@@ -63,7 +66,7 @@ final class InputCancellation {
         case .countdown: phaseName = { if case .awaitingCountdown = phase { return "awaitingCountdown" }; return "countdown" }()
         case .running: phaseName = "running"
         }
-        return ["transportPauseVersion": 1, "paused": state == .paused, "phase": phaseName,
+        return ["transportPauseVersion": 1, "hostAutoTakeoverVersion": 1, "pauseReason": pauseReason.rawValue, "paused": state == .paused, "phase": phaseName,
                 "inputEpoch": inputEpoch, "lease": executionLease.map { $0 as Any } ?? NSNull(),
                 "recoveryRequired": transportLocked]
     }
@@ -76,7 +79,7 @@ final class InputCancellation {
     func transportPause() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
         transportLocked = true
-        _ = pauseLocked()
+        _ = pauseLocked(reason: .transport)
         var receipt = transportStateLocked()
         receipt["recovered"] = false
         return receipt
@@ -88,6 +91,7 @@ final class InputCancellation {
         lock.lock(); defer { lock.unlock() }
         transportLocked = false
         phase = .awaitingCountdown
+        pauseReason = .none
         return transportStateLocked()
     }
 
@@ -140,8 +144,12 @@ final class InputCancellation {
         return true
     }
 
-    private func pauseLocked() -> Bool {
-        guard stateLocked() != .paused else { return false }
+    private func pauseLocked(reason: PauseReason) -> Bool {
+        if stateLocked() == .paused {
+            if reason == .transport || (reason == .manual && pauseReason != .transport) { pauseReason = reason }
+            return false
+        }
+        pauseReason = reason
         phase = .paused
         inputEpoch &+= 1
         // 在暂停返回前释放本 helper 按住的键/鼠标；不影响读截图，也不释放用户自己的按键。
@@ -153,7 +161,7 @@ final class InputCancellation {
     func pauseExecution(lease: UInt64) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard executionLease == lease else { return false }
-        return pauseLocked()
+        return pauseLocked(reason: .manual)
     }
 
     // 倒计时内允许用户移开鼠标；迟到的旧事件也不能在倒计时结束后把控制重新暂停。
@@ -161,7 +169,27 @@ final class InputCancellation {
         lock.lock(); defer { lock.unlock() }
         guard executionLease == lease, case .countdown(let deadline) = phase,
               stateLocked() == .running, timestamp >= deadline else { return false }
-        return pauseLocked()
+        return pauseLocked(reason: .userInteraction)
+    }
+
+    func pauseForFocusLoss(lease: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard executionLease == lease else { return false }
+        return pauseLocked(reason: .focusLoss)
+    }
+
+    // Bounded owner-mediated state transition; the original input path starts the timer.
+    func resumeHostSoftPause(expectedLease: UInt64, expectedEpoch: UInt64) throws -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }
+        guard let lease = executionLease, lease == expectedLease, inputEpoch == expectedEpoch,
+              case .paused = phase, (pauseReason == .userInteraction || pauseReason == .focusLoss),
+              !transportLocked, inputEpoch < UInt64.max else { throw HelperFailure.userPaused }
+        inputEpoch += 1
+        pauseReason = .none
+        phase = .awaitingCountdown
+        var receipt = transportStateLocked()
+        receipt["autoResumed"] = true
+        return receipt
     }
 
     func resumeExecution(lease: UInt64) -> Bool {
@@ -171,6 +199,7 @@ final class InputCancellation {
         if stateLocked() == .paused {
             inputEpoch &+= 1
             phase = .countdown(deadline: clock() + 3)
+            pauseReason = .none
             transportLocked = false
         }
         return true
@@ -298,6 +327,7 @@ final class InputCancellation {
         generation &+= 1
         executionLease = nil
         phase = transportLocked ? .paused : .awaitingCountdown
+        pauseReason = transportLocked ? .transport : .none
         inputEpoch &+= 1
         let onEnd = executionEnd
         executionEnd = nil

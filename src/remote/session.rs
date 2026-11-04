@@ -1116,7 +1116,9 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
             .ok_or_else(|| fail("INVALID_ARGUMENT"))?;
         // Only the already-public paused message is retained verbatim. All other
         // potentially dynamic transport/helper diagnostics are replaced by fixed copy.
-        let controlled = if message == crate::protocol::USER_PAUSED_PUBLIC_MESSAGE {
+        let controlled = if message == crate::protocol::USER_PAUSED_PUBLIC_MESSAGE
+            || message == crate::protocol::HOST_USER_PAUSED_PUBLIC_MESSAGE
+        {
             message
         } else {
             "远程操作失败，请查看错误代码"
@@ -1125,4 +1127,26 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
         out.insert("error".into(), Value::Object(error));
     }
     Ok(Value::Object(out))
+}
+
+#[cfg(test)]
+mod host_pause_receipt_tests {
+    use super::*;
+    #[test]
+    fn cache_retains_only_fixed_host_pause_guidance_and_redacts_dynamic_diagnostics() {
+        let public = crate::protocol::response_for_host(Err(fail("USER_PAUSED")), Scope::Desktop);
+        let cached = project_receipt("click", &public).unwrap();
+        assert_eq!(
+            cached["error"]["message"],
+            crate::protocol::HOST_USER_PAUSED_PUBLIC_MESSAGE
+        );
+        let mut private = public;
+        private["error"]["message"] = serde_json::json!("secret helper diagnostic");
+        let sanitized = project_receipt("click", &private).unwrap();
+        assert_eq!(
+            sanitized["error"]["message"],
+            "远程操作失败，请查看错误代码"
+        );
+        assert!(!sanitized.to_string().contains("secret helper"));
+    }
 }

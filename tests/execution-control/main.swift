@@ -220,3 +220,78 @@ try guarded.cancelIfNotPaused(expectedEpoch: guarded.inputSnapshot())
 require(guarded.transportState()["lease"] is NSNull, "当前epoch的正常远端disconnect可释放lease")
 
 print("PASS: 原执行/暂停/取消、transport 暂停、恢复倒计时与迟到 epoch BDD；未投递系统输入")
+
+// Host-only soft recovery retains the lease and waits for the actual toast.
+let autoClock = TestClock()
+let auto = InputCancellation(clock: autoClock.now)
+let autoGeneration = auto.snapshot()
+let autoLease = try auto.beginExecution(generation: autoGeneration)
+_ = auto.startCountdown(lease: autoLease)
+autoClock.advance(3)
+let stalePermit = try auto.beginInput(generation: autoGeneration)
+require(auto.pauseForUserInteraction(lease: autoLease, timestamp: autoClock.now()), "真实用户交互应软暂停")
+let softEpoch = auto.inputSnapshot()
+require(auto.transportState()["pauseReason"] as? String == "userInteraction", "软暂停原因")
+fails("USER_PAUSED") { _ = try auto.resumeHostSoftPause(expectedLease: autoLease + 1, expectedEpoch: softEpoch) }
+fails("USER_PAUSED") { _ = try auto.resumeHostSoftPause(expectedLease: autoLease, expectedEpoch: softEpoch + 1) }
+let receipt = try auto.resumeHostSoftPause(expectedLease: autoLease, expectedEpoch: softEpoch)
+require(receipt["autoResumed"] as? Bool == true && receipt["lease"] as? UInt64 == autoLease, "自动恢复保留lease")
+require(receipt["inputEpoch"] as? UInt64 == softEpoch + 1 && receipt["phase"] as? String == "awaitingCountdown", "恰好更新一代并等待展示")
+require(receipt["hostAutoTakeoverVersion"] as? Int == 1 && receipt["pauseReason"] as? String == "none", "恢复能力及原因")
+autoClock.advance(10)
+fails("TAKEOVER_PENDING") { _ = try auto.beginInput(generation: autoGeneration) }
+fails("USER_PAUSED") { try auto.checkInput(stalePermit) }
+_ = auto.startCountdown(lease: autoLease)
+autoClock.advance(2)
+fails("TAKEOVER_PENDING") { _ = try auto.beginInput(generation: autoGeneration) }
+autoClock.advance(1)
+_ = try auto.beginInput(generation: autoGeneration)
+require(auto.pauseForFocusLoss(lease: autoLease), "焦点丢失软暂停")
+require(auto.transportState()["pauseReason"] as? String == "focusLoss", "焦点原因")
+_ = auto.pauseExecution(lease: autoLease)
+require(auto.transportState()["pauseReason"] as? String == "manual", "手动暂停升级软暂停")
+fails("USER_PAUSED") { _ = try auto.resumeHostSoftPause(expectedLease: autoLease, expectedEpoch: auto.inputSnapshot()) }
+_ = auto.pauseForFocusLoss(lease: autoLease)
+require(auto.transportState()["pauseReason"] as? String == "manual", "软事件不能降级手动暂停")
+require(auto.resumeExecution(lease: autoLease), "本地手动继续")
+require(auto.executionState(lease: autoLease) == .countdown(3), "本地继续立即开始原倒计时")
+autoClock.advance(3)
+_ = auto.pauseForFocusLoss(lease: autoLease)
+_ = auto.transportPause()
+require(auto.transportState()["pauseReason"] as? String == "transport", "传输暂停升级软暂停")
+fails("USER_PAUSED") { _ = try auto.resumeHostSoftPause(expectedLease: autoLease, expectedEpoch: auto.inputSnapshot()) }
+auto.cancel()
+require(auto.transportState()["pauseReason"] as? String == "transport", "取消保留传输锁原因")
+fails("USER_PAUSED") { _ = try auto.resumeHostSoftPause(expectedLease: autoLease, expectedEpoch: auto.inputSnapshot()) }
+let emptyAuto = InputCancellation(clock: autoClock.now)
+fails("USER_PAUSED") { _ = try emptyAuto.resumeHostSoftPause(expectedLease: 0, expectedEpoch: 0) }
+let decodedAuto = try NativeRequest.decode(["id":"auto", "action":"transport-auto-resume", "expectedLease": UInt64.max, "expectedInputEpoch": UInt64.max])
+require(decodedAuto.expectedLease == UInt64.max && decodedAuto.inputEpoch == UInt64.max, "接受完整UInt64")
+for bad: [String: Any] in [
+    ["expectedLease": true, "expectedInputEpoch": 1], ["expectedLease": 1],
+    ["expectedLease": -1, "expectedInputEpoch": 1], ["expectedLease": 1.5, "expectedInputEpoch": 1],
+    ["expectedLease": 1, "expectedInputEpoch": false], ["expectedLease": 1, "expectedInputEpoch": -1],
+    ["expectedLease": 1, "expectedInputEpoch": 1.5], ["expectedLease": 1, "expectedInputEpoch": 1, "extra": 1]
+] {
+    var request = bad; request["id"] = "auto"; request["action"] = "transport-auto-resume"
+    fails("INVALID_ARGUMENT") { _ = try NativeRequest.decode(request) }
+}
+print("PASS: host soft takeover and strict decoding")
+
+let focus = InputCancellation(clock: autoClock.now)
+let focusLease = try focus.beginExecution(generation: focus.snapshot())
+require(focus.pauseForFocusLoss(lease: focusLease), "焦点丢失在等待倒计时时亦暂停")
+let focusReceipt = try focus.resumeHostSoftPause(expectedLease: focusLease, expectedEpoch: focus.inputSnapshot())
+require(focusReceipt["phase"] as? String == "awaitingCountdown", "焦点软暂停可恢复")
+focus.cancel()
+require(focus.transportState()["pauseReason"] as? String == "none", "普通取消清除原因")
+let overflow = InputCancellation(clock: autoClock.now, initialInputEpoch: UInt64.max - 1)
+let overflowLease = try overflow.beginExecution(generation: overflow.snapshot())
+_ = overflow.pauseForFocusLoss(lease: overflowLease)
+fails("USER_PAUSED") { _ = try overflow.resumeHostSoftPause(expectedLease: overflowLease, expectedEpoch: UInt64.max) }
+require(overflow.inputSnapshot() == UInt64.max && overflow.transportState()["pauseReason"] as? String == "focusLoss", "溢出不得改变状态")
+for raw in ["{\"id\":\"x\",\"action\":\"transport-auto-resume\",\"expectedLease\":18446744073709551616,\"expectedInputEpoch\":0}", "{\"id\":\"x\",\"action\":\"transport-auto-resume\",\"expectedLease\":0}"] {
+    let json = try JSONSerialization.jsonObject(with: Data(raw.utf8)) as! [String: Any]
+    fails("INVALID_ARGUMENT") { _ = try NativeRequest.decode(json) }
+}
+print("PASS: focus, cancellation, overflow and JSON bounds")

@@ -58,6 +58,9 @@ fn all_entrypoints_document_remote_security_lifecycle_and_correct_command_names(
             "300 秒",
             "USER_PAUSED",
             "RECOVERY_REQUIRED",
+            "Host 默认自动接管",
+            "软暂停",
+            "显式暂停/取消/关闭控制条",
             "docs/REMOTE-HOST.md",
         ] {
             assert!(help.contains(required), "{program}: missing {required}");
@@ -166,6 +169,50 @@ fn help_aliases_and_remote_host_help_never_create_runtime_config_or_credentials(
             assert!(output.stderr.is_empty());
             assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
             assert!(!root.exists(), "help created data under {}", root.display());
+        }
+    }
+}
+
+#[test]
+fn help_makes_scroll_direction_range_target_and_delivery_semantics_explicit() {
+    for (program, _, scope) in ENTRIES {
+        let help = args::help_text(scope, program);
+        for text in [
+            "[-1200,1200]",
+            "正数向下、负数向上",
+            "可滚动内容区域",
+            "--delta-y 1200",
+            "--delta-y -1200",
+            "不等于页面已滚动",
+        ] {
+            assert!(
+                help.contains(text),
+                "{program}: missing scroll contract {text}"
+            );
+        }
+        for delta in ["-1200", "1200"] {
+            let parsed = args::parse_for_scope(
+                [
+                    "scroll",
+                    "--connection",
+                    "conn-a",
+                    "--frame",
+                    "frame-a",
+                    "--x",
+                    "800",
+                    "--y",
+                    "600",
+                    "--delta-y",
+                    delta,
+                ]
+                .map(str::to_owned),
+                scope,
+            )
+            .unwrap();
+            let args::Command::Request { request, .. } = parsed else {
+                panic!("scroll must remain an ordinary request")
+            };
+            assert_eq!(request["deltaY"].as_i64(), delta.parse::<i64>().ok());
         }
     }
 }

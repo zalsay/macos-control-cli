@@ -233,7 +233,7 @@ Alt+ArrowLeft  Alt+ArrowRight
 | `FRAME_UNKNOWN` | 帧不属于当前连接或已被最近 32 帧策略移除；重新观察 |
 | `FRAME_GEOMETRY_CHANGED` | 窗口位置/尺寸变化；重新观察并重新确定位置 |
 | `CAPTURE_WINDOW_LIST_TIMEOUT` / `CAPTURE_IMAGE_TIMEOUT` / `CAPTURE_FALLBACK_TIMEOUT` / `CAPTURE_FALLBACK_FAILED` | 只读截图后端异常；本次观察没有投递输入，检查系统截图服务并在确认窗口后恢复观察 |
-| `FOCUS_LOST` 且 `reason: USER_PAUSED` | 用户已暂停；保留连接，停止输入重试。等待用户点击控制条“继续”后再构造新操作，并等待剩余三秒倒计时；不得用其他输入通道绕过暂停 |
+| `FOCUS_LOST` 且 `reason: USER_PAUSED` | 保留连接且不重放旧动作。本机模式或明确硬停止须本人继续；Host 0.3.6 的鼠标/普通失焦软暂停可先 Observe 确认部分生效，再构造下一条新输入，由原链路自动接管并等待三秒；不得绕过原输入校验 |
 | `FOCUS_LOST` / `FOCUS_UNVERIFIED` / `ACTIVATION_FAILED` | 确认目标窗口、当前桌面和权限状态；观察现场后再决定是否恢复操作 |
 | `POINTER_OBSCURED` / `POINTER_UNVERIFIED` | 实际输入命中窗口/AX 归属不符或无法确认；重新观察并处理真实遮挡，不使用裸 CGEventPost 绕过校验。鼠标可穿透的绘制层不等于输入遮挡 |
 | `WINDOW_UNAVAILABLE` | 重新列窗；不要猜测 ID 或自动改控另一窗口 |
@@ -377,7 +377,7 @@ Copis 内置工具使用临时私有 runtime，停止后删除目录及其 `daem
 保存 connectionId，跨子进程和多轮消息复用；同一桌面的输入必须串行。
 首次输入自动等待原生三秒倒计时后接管，无需点击执行；其他串行动作不重复倒计时。
 倒计时占用现有串行通道，不并发发起 Observe 或其他工具。
-收到 FOCUS_LOST 且 reason=USER_PAUSED 时停止输入重试，等待用户点击“继续”后再构造新操作；新调用等待剩余倒计时，不重放旧动作，不通过其他输入通道点击控制条。
+收到 FOCUS_LOST 且 reason=USER_PAUSED 时不重放旧动作。先 Observe 判断部分生效；本机模式或明确硬停止仍等待本人继续，Host 0.3.6 仅鼠标/普通失焦软暂停可由同 owner 的下一条新输入在原连接中自动接管并等待三秒。不得通过其他输入通道点击控制条或清除恢复锁。
 每次需要页面定位时执行 observe，用自己的图片工具读取 imagePath 后再选择坐标。
 只用目标窗口区域的原像素截图及其1:1裁切结果，禁止缩放、重采样、缩略图或分辨率改变；不采用缩放后再换算还原。
 当前接口不接受外部裁切区域元数据，不把二次裁切图的局部坐标传给旧frameId，也不让模型猜裁切原点。
@@ -423,6 +423,8 @@ CONNECTION_BUSY 时不抢占别人的连接，不自动 daemon stop。
 
 ## 执行控制条与鼠标接管（v0.1.7）
 
+以下描述本机手动暂停流程；Host 0.3.6 的软暂停例外见[远端策略](REMOTE-HOST.md#6-暂停断线和本地恢复)。明确暂停、取消或关闭控制条在两种模式都不是可自动解除的软暂停。
+
 屏幕上方的控制条在首次输入前自动倒计时 3 → 2 → 1 后接管，无需点击执行。倒计时内不发送输入，可移动鼠标，用户可点击“取消”；运行后提供“暂停”。用户接管鼠标或切走应用时暂停输入；Agent 收到 `FOCUS_LOST` 且 `reason: USER_PAUSED` 时必须停止输入重试，并保留原连接。内置工具对应 `CHROME_USER_PAUSED`。暂停不会自动恢复；用户点击“继续”后重新倒计时三秒，后续新调用等待剩余倒计时。其余串行动作不会重复倒计时；先 Observe 确认上一步是否部分生效，再构造新操作，不能重放中断的点击或整段文本。不要通过 shell、AX 或裸 CGEvent 点击控制条来解除用户暂停。
 
 倒计时占用现有串行通道，不能并发发起 Observe 或其他工具。暂停期间可单独 Observe；重复 Start 不会重新请求授权或解除暂停。协议主版本仍为 1，旧客户端把暂停视为可恢复的 `FOCUS_LOST`，新客户端进一步读取固定 `reason`，原连接和 frame 不因暂停消费或失效。不要发起额外的 connect 来抢占连接。disconnect/daemon stop 才结束本控制，随后控制条关闭。
@@ -459,3 +461,9 @@ Chrome目标的毛玻璃提示条限制在原生标签/地址栏区域内并跟�
 ## v0.2.3 原生应用授权弹窗
 
 `desktop-control` 支持经过 AX/CG 精确身份与几何验证的原生非零层级弹窗，Chrome-only 连接不自动扩权。新弹窗须单独枚举、连接与 Observe，使用其自己的 frame/OCR 坐标；不把任意“允许”按钮视为已获授权。非 key 面板只放宽指针所需的 key-window 条件，应用前台、实际输入归属、遮挡、暂停和取消仍验证；键盘不能投给主窗口。详见 [原生弹窗边界和中英文流程](NATIVE-DIALOGS.md)。
+
+## Host 自动软暂停接管（0.3.6 开发候选）
+
+首次接管仍自动倒计时三秒。鼠标活动/普通失焦中断当前动作后，先观察页面，明确下一步的新输入；原 owner、连接与有效帧保持时，Host 在原预留/Native lease 链路自动恢复，无需点继续。旧动作、旧序号和旧 permit 都不会被重放。status/Observe 本身不接管。
+
+显式暂停/取消/关闭控制条、断线不确定、未知状态、owner 死亡及恢复锁保持停止。不要注入 takeover/transport-auto-resume 字段或重建 runtime 绕过；这些不属于公开 WSS 命令。客户端任务结束只 disconnect，不通过 SSH 停止常驻 Host。

@@ -557,13 +557,34 @@ pub fn parse_hello(
     let hello: crate::remote::protocol::Hello = serde_json::from_slice(bytes)
         .map_err(|_| Error::new("PROTOCOL_ERROR", "远程握手消息无效"))?;
     if hello.remote_protocol != REMOTE_PROTOCOL
-        || hello.version != version
         || hello.scope != scope
         || !valid_id(&hello.boot_id)
         || hello.capabilities.len() > 64
         || hello.capabilities.iter().any(|v| !valid_id(v))
     {
         return Err(Error::new("PROTOCOL_ERROR", "远程版本、scope 或能力无效"));
+    }
+    if hello.version != version {
+        // Do not echo arbitrary authenticated peer text or an unbounded field.
+        // Keep the existing error code and exact-match gate; improve diagnostics only.
+        let display = |s: &str| {
+            if !s.is_empty()
+                && s.len() <= 32
+                && s.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
+                && s.bytes().all(|b| b.is_ascii_digit() || b".-+".contains(&b))
+            {
+                s.to_owned()
+            } else {
+                "<不可显示>".to_owned()
+            }
+        };
+        return Err(Error::new(
+            "PROTOCOL_ERROR",
+            &format!(
+            "远程版本不匹配：客户端 {}，Host {}；未发送桌面操作，请使用完全相同版本的客户端和 Host",
+            display(version), display(&hello.version)
+        ),
+        ));
     }
     Ok(hello)
 }

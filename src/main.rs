@@ -14,6 +14,7 @@ fn main() {
         })
         .collect::<Result<Vec<_>>>()
         .and_then(|args| args::parse_for_scope(args, scope));
+    let remote_output = matches!(&parsed, Ok(Command::Remote { .. }));
     let result = match parsed {
         Ok(Command::Help) => {
             let executable = std::env::args_os().next().unwrap_or_default();
@@ -39,7 +40,12 @@ fn main() {
         Err(error) => Err(error),
     };
     let failed = result.is_err();
-    println!("{}", response_for(result, scope));
+    let response = if remote_output {
+        copis_chrome::protocol::response_for_host(result, scope)
+    } else {
+        response_for(result, scope)
+    };
+    println!("{response}");
     if failed {
         std::process::exit(1);
     }

@@ -292,7 +292,7 @@ fn cached_frame_failure(cached: bool, scope: Scope, error: Error) -> Result<Valu
             "FRAME_NOT_FOUND" | "REMOTE_IMAGE_INVALID"
         )
     {
-        Ok(crate::protocol::response_for(
+        Ok(crate::protocol::response_for_host(
             Err(fail("FRAME_NOT_FOUND")),
             scope,
         ))
@@ -724,7 +724,7 @@ fn serve_connection(
                 &mut ws,
                 &candidate.id,
                 candidate.sequence,
-                crate::protocol::response_for(Err(fail("FILE_NOT_ALLOWED")), scope),
+                crate::protocol::response_for_host(Err(fail("FILE_NOT_ALLOWED")), scope),
             );
         }
         Err(error) => return Err(error),
@@ -768,7 +768,7 @@ fn serve_connection(
                 &mut ws,
                 &env.id,
                 env.sequence,
-                crate::protocol::response_for(response, scope),
+                crate::protocol::response_for_host(response, scope),
             );
         }
     }
@@ -820,7 +820,7 @@ fn serve_connection(
                 &mut ws,
                 &env.id,
                 env.sequence,
-                crate::protocol::response_for(Err(error), scope),
+                crate::protocol::response_for_host(Err(error), scope),
             );
         }
     };
@@ -915,7 +915,7 @@ fn serve_connection(
     };
     let mut response = match begin {
         Begin::Cached(_) => outcome?,
-        Begin::Execute => crate::protocol::response_for(outcome, scope),
+        Begin::Execute => crate::protocol::response_for_host(outcome, scope),
     };
     if action == "status" && response["ok"] == true {
         response["remoteHostState"] = json!(state_name(locked(&core)?.manager.state()));

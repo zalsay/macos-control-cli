@@ -413,7 +413,7 @@ pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面�
 观察返回 connectionId、frameId、imagePath 和 OCR；点击坐标使用该窗口截图的原像素，不缩放或猜偏移。
 帧可重复使用且无时间硬过期；页面或窗口几何变化后重新 observe。输入串行，不重放失败动作。
 只读观察不切前台；首次输入等待 3 秒接管倒计时，会占用真实鼠标键盘。
-人工接管或失焦后停止输入；USER_PAUSED 须等用户通过控制条继续，不重建 runtime 绕过暂停。
+本机模式人工接管或失焦后停止输入；USER_PAUSED 须等用户通过控制条继续，不重建 runtime 绕过暂停。
 原生授权弹窗须单独枚举、连接和观察；不能复用 Chrome 的连接或坐标，不能自动点击未获授权的“允许”。
 禁用默认模型后 click-target 返回 MODEL_DISABLED；--jev-key 不绕过禁用，普通 OCR/坐标点击不受影响。
 click-target 通过 models.toml 中完整 Decisions URL 发送 target 与 ID/文字；--jev-key 只覆盖本次密钥，不隐式读取 .env 或环境 key。
@@ -462,6 +462,14 @@ pub fn help_text(scope: Scope, program: &str) -> String {
 已有窗口可先 windows，再 connect --window <windowId>；chrome start 返回本次新窗口的连接。
 本机任务完成先 disconnect；仅需结束本任务自建 daemon 时，执行 {program} daemon stop，再用 {program} daemon status 确认 running:false；勿停止常驻 Host 或他人的 daemon。
 
+滚动方向与回执：
+--delta-y 是 [-1200,1200] 内的非零整数，正数向下、负数向上；不是“负数向下”。
+x/y 必须取自本帧完整窗口截图，并位于要滚动的可滚动内容区域，不用网页 clientX/clientY 或全屏坐标。
+  {program} scroll --connection <connectionId> --frame <frameId> --x <x> --y <y> --delta-y 1200
+  {program} scroll --connection <connectionId> --frame <frameId> --x <x> --y <y> --delta-y -1200
+顶部向上或底部向下可无变化；sent:true 不等于页面已滚动，应 observe 核验，异常保留完整 error.code/message。
+PageDown 依赖键盘焦点，不是坐标滚轮的等价替代，不自动兜底或重放滚动。
+
 模型配置（在执行桌面操作的 Mac 上设置，远端模式只在 Host 设置）：
   {program} --config set jev --url https://openrouter.ai/api/alpha/decisions --model typesafe/jev-1.13 --api-key-stdin
   {program} --config default jev
@@ -499,6 +507,7 @@ host start 是前台服务；公网监听需显式 --listen 0.0.0.0:8765 并放�
   {program} --remote wss://host.example:8765/mcc/v1 --ca-cert /absolute/host-ca.pem --token-file /absolute/access.token --remote-state-dir /absolute/client-state status
 --remote 必须紧跟命令名；连接参数在桌面命令之前。仅支持 wss://，固定路径 /mcc/v1，不支持明文 ws://。
 公共 CA 可省略 --ca-cert 使用系统信任；私有 CA 须指定客户端本地 host-ca.pem，不跳过证书校验。
+若握手返回 PROTOCOL_ERROR，先看版本/scope 错误并核对两端 --version；握手失败时换 scroll/PageDown 都不会执行。
 把 status 换为 chrome start、observe、click-target、type、press、disconnect 等桌面命令即可。
 客户端不读取本地模型配置、不在客户端启动 helper/Chrome/桌面 daemon；失败不回退本机、不自动重放输入。
 远端不支持 --config、--jev-key、daemon、host、permissions --request；这些管理操作只在 Host 本地执行。
@@ -506,8 +515,11 @@ host start 是前台服务；公网监听需显式 --listen 0.0.0.0:8765 并放�
 observe --out 指定客户端新图片路径，不覆盖已有文件；click-target 的截图/OCR/Jev 与坐标查询均在 Host。
 
 暂停、断线与恢复：
-USER_PAUSED/失焦/人工接管后停止输入，只能由远端本人通过控制条继续并等待原 3 秒倒计时。
-活动控制会话空闲 300 秒会暂停；已断开的非控制会话也会过期，新会话不解除原暂停或恢复锁。
+暂停回执保留 FOCUS_LOST / reason:USER_PAUSED 兼容字段；不代表可以重放旧动作。
+Host 默认自动接管：鼠标活动/普通失焦造成的软暂停，在同 owner、原连接及有效帧的新输入前自动恢复，无需用户点击继续。
+自动恢复保留原 lease、更新 epoch，仍经原窗口/焦点/几何/权限校验，控制条展示后等待原 3 秒倒计时；不重放旧动作。
+显式暂停/取消/关闭控制条、断线投递不确定或恢复锁保持停止，不能自动解除；本机非 Host 模式仍需本人点击继续。
+活动控制会话空闲 300 秒按传输硬暂停处理；已断开的非控制会话也会过期，新会话不解除原硬暂停或恢复锁。
 已断开会话过期可能返回 REMOTE_CLIENT_FAILED；确认无控制连接后，可保留旧缓存并显式选择新的私有 --remote-state-dir。
 Host 重启后旧客户端可能返回 RECOVERY_REQUIRED；不能靠清缓存/换 session/换 runtime 恢复输入。
 无可用控制条或 Host 留下恢复记录时，先停止 Host，再在远端核对原 daemon/helper 安全停止并执行：
@@ -545,7 +557,7 @@ pub const HELP: &str = r#"copis-chrome — 独立的 macOS Chrome 桌面自动�
 
 同一连接可跨命令复用；帧可多次输入，无时间硬过期，最多保留 32 帧。
 输入会激活目标 Chrome 并占用系统鼠标键盘；读取截图不会切前台。
-屏幕控制条可执行/暂停；用户接管鼠标后输入暂停，点击“继续”并等待 3 秒倒计时后才恢复新输入；暂停不会自动恢复，也不会重放旧输入。Observe 仍可用。
+屏幕控制条可执行/暂停；本机模式用户接管鼠标后输入暂停，点击“继续”并等待 3 秒倒计时后才恢复新输入；暂停不会自动恢复，也不会重放旧输入。Observe 仍可用。
 禁用默认模型后 click-target 返回 MODEL_DISABLED；--jev-key 不绕过禁用，普通 OCR/坐标点击不受影响。
 click-target 从 ~/.config/mcc/models.toml（或 MCC_CONFIG_DIR）读取 URL/key/model，发送 target 和 ID/文字；--jev-key 仅覆盖本次 key，不隐式读 .env。
 chrome start 需要宿主控制Google Chrome的macOS自动化权限；权限缺失明确拒绝。

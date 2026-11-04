@@ -344,7 +344,7 @@ final class ChromeControlToast: NSObject {
                           self.isCurrent(lease: current.lease, cancellation: current.cancellation),
                           current.cancellation.snapshot() == current.generation else { return }
                     guard let anchor else {
-                        _ = latest.cancellation.pauseExecution(lease: latest.lease)
+                        _ = latest.cancellation.pauseForFocusLoss(lease: latest.lease)
                         self.dismiss()
                         return
                     }

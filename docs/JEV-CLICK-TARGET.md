@@ -131,10 +131,10 @@ mcc click-target --connection "$CONNECTION_ID" --target '右上角的保存按�
 | JEV_AUTH_FAILED / JEV_RATE_LIMITED / JEV_UNAVAILABLE | 检查 key/服务状态；本次没有进入点击执行 |
 | JEV_TIMEOUT / JEV_REQUEST_FAILED / JEV_INVALID_RESPONSE | 网络或协议失败；本次没有进入点击执行，不自动重试 |
 | CANCELLED | 操作已撤销（包括网络等待中收到 daemon stop）；不重放，按原生命周期重新观察/连接 |
-| FOCUS_LOST + reason USER_PAUSED | 停止重试，等待用户点击控制条继续；旧语义点击不重放 |
+| FOCUS_LOST + reason USER_PAUSED | 不重放旧语义点击，先重新观察。本机/明确硬停止须本人继续；Host 0.3.6 的鼠标/普通失焦软暂停可由原 owner 的下一条新输入自动接管，仍保留三秒倒计时与全部原门禁 |
 | 其他原输入错误/超时 | 可能已有鼠标移动或部分事件；重新观察，不能假定没有副作用或直接重试 |
 
-连接清理沿用原流程：任务结束 disconnect → daemon stop → daemon status 核对 running:false，只操作自己持有的 runtime。语义点击只产生初始观察帧，沿用最近32帧保留及断开清理机制，没有额外复核截图。
+连接清理沿用原流程：任务结束 disconnect → daemon stop → daemon status 核对 running:false，只操作自己持有的 runtime；远端客户端结束任务只 disconnect，不停止常驻 Host。语义点击只产生初始观察帧，沿用最近32帧保留及断开清理机制，没有额外复核截图。
 
 当前OpenRouter工程/在线验证和未验收边界见 [OpenRouter验证记录](JEV-OPENROUTER-VERIFICATION.md)；[0.2.5记录](JEV-VERIFICATION.md)仅为历史快照。
 

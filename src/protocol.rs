@@ -23,6 +23,8 @@ impl Scope {
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub(crate) const USER_PAUSED_PUBLIC_MESSAGE: &str =
     "桌面输入已暂停，请点击屏幕上方控制条的继续按钮并等待 3 秒倒计时；暂停不会自动恢复，也不会重放旧输入";
+pub(crate) const HOST_USER_PAUSED_PUBLIC_MESSAGE: &str =
+    "Host 输入已暂停，不会重放旧输入；鼠标活动/失焦软暂停可在观察后发送下一条新输入时自动接管，仍等待 3 秒倒计时；明确暂停/取消或传输恢复锁保持停止，须本人确认";
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +78,15 @@ pub fn response_for(result: Result<Value>, scope: Scope) -> Value {
     };
     if scope == Scope::Desktop {
         value["scope"] = json!(scope.name());
+    }
+    value
+}
+
+/// Reuse the public envelope and redaction; only Host's fixed pause guidance differs.
+pub fn response_for_host(result: Result<Value>, scope: Scope) -> Value {
+    let mut value = response_for(result, scope);
+    if value["error"]["code"] == "FOCUS_LOST" && value["error"]["reason"] == "USER_PAUSED" {
+        value["error"]["message"] = json!(HOST_USER_PAUSED_PUBLIC_MESSAGE);
     }
     value
 }
@@ -201,5 +212,26 @@ mod tests {
             read_message(&mut std::io::Cursor::new(b"{}\n")).unwrap(),
             Some(json!({}))
         );
+    }
+    #[test]
+    fn host_pause_copy_distinguishes_soft_recovery_without_changing_local_envelope() {
+        let host = response_for_host(
+            Err(Error::new("USER_PAUSED", "private helper detail")),
+            Scope::Desktop,
+        );
+        assert_eq!(host["error"]["code"], "FOCUS_LOST");
+        assert_eq!(host["error"]["reason"], "USER_PAUSED");
+        assert_eq!(host["error"]["message"], HOST_USER_PAUSED_PUBLIC_MESSAGE);
+        assert!(!host.to_string().contains("private helper detail"));
+        let local = response_for(
+            Err(Error::new("USER_PAUSED", "private helper detail")),
+            Scope::Desktop,
+        );
+        assert_eq!(local["error"]["message"], USER_PAUSED_PUBLIC_MESSAGE);
+        let unrelated = response_for_host(
+            Err(Error::new("FOCUS_LOST", "ordinary focus loss")),
+            Scope::Desktop,
+        );
+        assert!(unrelated["error"].get("reason").is_none());
     }
 }

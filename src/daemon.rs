@@ -160,10 +160,28 @@ struct RemoteControl {
     active: Option<ActiveOperation>,
     active_read: Option<String>,
     recovery: bool,
+    soft_takeover_eligible: bool,
     paused_epoch: Option<u64>,
     paused_lease: Option<u64>,
     high_water: u64,
     last_completed: Option<CompletedOperation>,
+}
+impl RemoteControl {
+    fn require_recovery(&mut self) {
+        self.recovery = true;
+        self.soft_takeover_eligible = false;
+    }
+}
+fn native_soft_pause(state: &Value) -> bool {
+    state["hostAutoTakeoverVersion"] == 1
+        && state["paused"] == true
+        && state["phase"] == "paused"
+        && state["recoveryRequired"] == false
+        && state["lease"].as_u64().is_some()
+        && matches!(
+            state["pauseReason"].as_str(),
+            Some("userInteraction" | "focusLoss")
+        )
 }
 fn control_error(code: &str) -> Error {
     Error::new(code, "远程控制所有权或原生暂停状态不允许此操作")
@@ -212,6 +230,10 @@ fn remember_pause(control: &mut RemoteControl, state: &Value) {
     if !control.recovery || control.paused_epoch.is_none() {
         control.paused_epoch = state["inputEpoch"].as_u64();
         control.paused_lease = state["lease"].as_u64();
+        control.soft_takeover_eligible = !control.recovery && native_soft_pause(state);
+    }
+    if !native_soft_pause(state) {
+        control.soft_takeover_eligible = false;
     }
     control.recovery = true;
 }
@@ -229,6 +251,7 @@ fn reconcile(control: &mut RemoteControl, state: &Value) {
         && matches!(state["phase"].as_str(), Some("countdown" | "running"))
     {
         control.recovery = false;
+        control.soft_takeover_eligible = false;
         control.paused_epoch = None;
         control.paused_lease = None;
     }
@@ -332,10 +355,26 @@ pub fn remote_call(
         }),
     )
 }
-pub(crate) fn remote_reserve(runtime: &Runtime, owner: &str, operation: &str) -> Result<Value> {
+pub(crate) fn remote_reserve(
+    runtime: &Runtime,
+    owner: &str,
+    operation: &str,
+    request: &Value,
+) -> Result<Value> {
+    let mut reservation = json!({"action":"remote-control"});
+    if matches!(
+        request["action"].as_str(),
+        Some("click" | "scroll" | "type" | "press" | "click-target" | "select-file")
+    ) {
+        let mut intent = json!({"action":request["action"],"connectionId":request["connectionId"]});
+        if let Some(frame) = request.get("frameId") {
+            intent["frameId"] = frame.clone();
+        }
+        reservation["takeover"] = intent;
+    }
     call_context(
         runtime,
-        json!({"action":"remote-control"}),
+        reservation,
         Some(RemoteContext::Reserve {
             owner: owner.into(),
             operation: operation.into(),
@@ -543,7 +582,7 @@ fn check_owner_liveness(registry: &mut RemoteControl, canceller: &Canceller) {
         return;
     }
     registry.owner_dead = true;
-    registry.recovery = true;
+    registry.require_recovery();
     if let Some(active) = &registry.active {
         active.cancelled.store(true, Ordering::Release);
     }
@@ -764,6 +803,7 @@ fn reserve_operation(
     service: &Mutex<Service<Helper>>,
     canceller: &Canceller,
     operation: &str,
+    takeover: Option<&Value>,
 ) -> Result<()> {
     if !valid_capability(operation) {
         return Err(control_error("NOT_OWNER"));
@@ -772,14 +812,57 @@ fn reserve_operation(
         return Err(control_error("BUSY"));
     }
     let sequence = next_sequence(registry, operation)?;
-    let _service = service.try_lock().map_err(|_| control_error("BUSY"))?;
-    let state = native_state(canceller).map_err(|_| {
-        registry.recovery = true;
+    let service = service.try_lock().map_err(|_| control_error("BUSY"))?;
+    let mut state = native_state(canceller).map_err(|_| {
+        registry.require_recovery();
         control_error("CANCEL_UNCONFIRMED")
     })?;
     if state["paused"] == true {
         remember_pause(registry, &state);
-        return Err(control_error("USER_PAUSED"));
+        let eligible = registry.soft_takeover_eligible
+            && native_soft_pause(&state)
+            && takeover.is_some_and(|intent| service.allows_host_soft_takeover(intent));
+        if !eligible {
+            return Err(control_error("USER_PAUSED"));
+        }
+        let lease = state["lease"]
+            .as_u64()
+            .ok_or_else(|| control_error("USER_PAUSED"))?;
+        let epoch = state["inputEpoch"]
+            .as_u64()
+            .ok_or_else(|| control_error("USER_PAUSED"))?;
+        let expected = epoch
+            .checked_add(1)
+            .ok_or_else(|| control_error("RECOVERY_REQUIRED"))?;
+        let resumed = match canceller.resume_host_soft_pause(lease, epoch) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                registry.require_recovery();
+                if error.code != "USER_PAUSED" {
+                    let _ = pause_transport(canceller);
+                }
+                return Err(error);
+            }
+        };
+        if resumed["autoResumed"] != true
+            || resumed["hostAutoTakeoverVersion"] != 1
+            || resumed["transportPauseVersion"] != 1
+            || resumed["paused"] != false
+            || resumed["recoveryRequired"] != false
+            || resumed["pauseReason"] != "none"
+            || resumed["phase"] != "awaitingCountdown"
+            || resumed["lease"].as_u64() != Some(lease)
+            || resumed["inputEpoch"].as_u64() != Some(expected)
+        {
+            registry.require_recovery();
+            let _ = pause_transport(canceller);
+            return Err(control_error("CANCEL_UNCONFIRMED"));
+        }
+        state = resumed;
+        registry.recovery = false;
+        registry.soft_takeover_eligible = false;
+        registry.paused_epoch = None;
+        registry.paused_lease = None;
     }
     reconcile(registry, &state);
     if registry.recovery || state["recoveryRequired"] == true {
@@ -893,7 +976,7 @@ fn handle_remote(
             }
             let sequence = next_sequence(&registry, &operation)?;
             let state = native_state(canceller).map_err(|_| {
-                registry.recovery = true;
+                registry.require_recovery();
                 control_error("CANCEL_UNCONFIRMED")
             })?;
             if state["paused"] == true {
@@ -926,7 +1009,7 @@ fn handle_remote(
                     }
                 }
                 Err(_) => {
-                    registry.recovery = true;
+                    registry.require_recovery();
                     registry.last_completed = None;
                 }
             }
@@ -940,12 +1023,18 @@ fn handle_remote(
                         | "HELPER_PROTOCOL"
                 )
             }) {
-                registry.recovery = true;
+                registry.require_recovery();
             }
             result
         }
         RemoteContext::Reserve { operation, .. } => {
-            reserve_operation(&mut registry, service, canceller, &operation)?;
+            reserve_operation(
+                &mut registry,
+                service,
+                canceller,
+                &operation,
+                request.get("takeover"),
+            )?;
             Ok(json!({"reserved":true}))
         }
         RemoteContext::Abandon { operation, .. } => {
@@ -981,7 +1070,7 @@ fn handle_remote(
                     }
                     let completed_lease = completed.lease;
                     let state = native_state(canceller).map_err(|_| {
-                        registry.recovery = true;
+                        registry.require_recovery();
                         control_error("CANCEL_UNCONFIRMED")
                     })?;
                     if state["lease"].as_u64() != completed_lease {
@@ -989,7 +1078,7 @@ fn handle_remote(
                     }
                 }
             }
-            registry.recovery = true;
+            registry.require_recovery();
             if let Some(active) = &registry.active {
                 active.cancelled.store(true, Ordering::Release);
             }
@@ -999,7 +1088,7 @@ fn handle_remote(
         }
         RemoteContext::State { .. } => {
             let mut state = native_state(canceller).map_err(|_| {
-                registry.recovery = true;
+                registry.require_recovery();
                 control_error("CANCEL_UNCONFIRMED")
             })?;
             if state["paused"] == true {
@@ -1016,7 +1105,7 @@ fn handle_remote(
             }
             let service = service.try_lock().map_err(|_| control_error("BUSY"))?;
             let state = native_state(canceller).map_err(|_| {
-                registry.recovery = true;
+                registry.require_recovery();
                 control_error("CANCEL_UNCONFIRMED")
             })?;
             if service.connected()
@@ -1055,7 +1144,7 @@ fn handle_remote(
                 (None, None) => {}
                 _ => return Err(control_error("RECOVERY_REQUIRED")),
             }
-            registry.recovery = true;
+            registry.require_recovery();
             if registry.active_read.is_some() {
                 let paused = pause_transport(canceller)?;
                 remember_pause(&mut registry, &paused);
@@ -1091,7 +1180,13 @@ fn handle_remote(
         }
         RemoteContext::Call { operation, .. } => {
             if registry.active.is_none() {
-                reserve_operation(&mut registry, service, canceller, &operation)?;
+                reserve_operation(
+                    &mut registry,
+                    service,
+                    canceller,
+                    &operation,
+                    Some(&request),
+                )?;
             }
             let active = registry
                 .active
@@ -1133,7 +1228,7 @@ fn handle_remote(
                 .map_err(|_| control_error("CANCEL_UNCONFIRMED"))?;
             if !owner_alive() {
                 registry.owner_dead = true;
-                registry.recovery = true;
+                registry.require_recovery();
                 if !registry.watchdog_pause_confirmed {
                     if let Ok(receipt) = pause_transport(canceller) {
                         remember_pause(&mut registry, &receipt);
@@ -1172,7 +1267,7 @@ fn handle_remote(
                     });
                 }
                 Err(_) => {
-                    registry.recovery = true;
+                    registry.require_recovery();
                     registry.last_completed = None;
                 }
             }
@@ -1183,7 +1278,7 @@ fn handle_remote(
             {
                 match native_state(canceller) {
                     Ok(state) => remember_pause(&mut registry, &state),
-                    Err(_) => registry.recovery = true,
+                    Err(_) => registry.require_recovery(),
                 }
             }
             if result.as_ref().err().is_some_and(|e| {
@@ -1196,7 +1291,7 @@ fn handle_remote(
                         "WINDOW_UNAVAILABLE" | "CHROME_WINDOW_UNAVAILABLE"
                     ))
             }) {
-                registry.recovery = true;
+                registry.require_recovery();
             }
             result
         }
@@ -1402,18 +1497,20 @@ mod remote_control_tests {
             } else {
                 format!("/bin/sleep {:.3}\n", delay.as_secs_f64())
             };
-            std::fs::write(&wrapper, format!("#!/bin/sh\n{}unset COPIS_CHROME_RUNTIME_DIR COPIS_DESKTOP_RUNTIME_DIR\nexport MCC_FAKE_REMOTE_OCR=1\nexport MCC_FAKE_PREPARE_LEASE=1\nexport MCC_FAKE_TRANSPORT_UNSUPPORTED={}\nexport MCC_FAKE_REMOTE_TRACE={}\nexport MCC_FAKE_REMOTE_WINDOW_FAIL={}\nexport MCC_FAKE_REMOTE_RESUME={}\nexport MCC_FAKE_REMOTE_SLOW_WINDOW={}\nexec {} \"$@\"\n", startup, if legacy {1} else {0}, quote(&root.join("clicks")), quote(&root.join("fail-window")), quote(&root.join("resume")), quote(&root.join("slow-window")), quote(&path))).unwrap();
+            std::fs::write(&wrapper, format!("#!/bin/sh\n{}unset COPIS_CHROME_RUNTIME_DIR COPIS_DESKTOP_RUNTIME_DIR\nexport MCC_FAKE_REMOTE_OCR=1\nexport MCC_FAKE_PREPARE_LEASE=1\nexport MCC_FAKE_HOST_AUTO_TAKEOVER=1\nexport MCC_FAKE_HOST_SOFT_PAUSE={}\nexport MCC_FAKE_HOST_MANUAL_PAUSE={}\nexport MCC_FAKE_HOST_AUTO_TRACE={}\nexport MCC_FAKE_HOST_AUTO_RACE={}\nexport MCC_FAKE_HOST_AUTO_BAD_ACK={}\nexport MCC_FAKE_TRANSPORT_UNSUPPORTED={}\nexport MCC_FAKE_REMOTE_TRACE={}\nexport MCC_FAKE_REMOTE_WINDOW_FAIL={}\nexport MCC_FAKE_REMOTE_RESUME={}\nexport MCC_FAKE_REMOTE_SLOW_WINDOW={}\nexec {} \"$@\"\n", startup, quote(&root.join("soft-pause")), quote(&root.join("manual-pause")), quote(&root.join("auto-resumes")), quote(&root.join("race-manual")), quote(&root.join("bad-auto-ack")), if legacy {1} else {0}, quote(&root.join("clicks")), quote(&root.join("fail-window")), quote(&root.join("resume")), quote(&root.join("slow-window")), quote(&path))).unwrap();
             std::fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
             let mut helper =
-                Helper::with_timeout_for_scope(&wrapper, Scope::Chrome, Duration::from_secs(3))
+                Helper::with_timeout_for_scope(&wrapper, Scope::Chrome, Duration::from_secs(10))
                     .unwrap();
-            // The fake process may not have entered its JSONL loop immediately
-            // after spawn. Establish readiness within the fixture's 3s budget,
-            // without retrying Claim or altering the production sideband timeout.
+            // Test-only startup budget: a cold shell may not yet be reading JSONL.
+            // Send one read-only readiness request, then restore the existing 3s
+            // request budget before exercising any control or input assertion.
+            // Production helper and sideband deadlines are unchanged.
             let ready = helper
                 .request(json!({"action":"permissions","request":false}))
                 .unwrap();
             assert_eq!(ready["chromeAutomation"]["requested"], false);
+            helper.set_test_request_timeout(Duration::from_secs(3));
             let cancel = helper.canceller();
             let stopping = Arc::new(AtomicBool::new(false));
             let decider = decider.unwrap_or_else(|| {
@@ -3175,9 +3272,9 @@ mod remote_control_tests {
     #[test]
     fn delayed_fake_helper_is_ready_before_first_claim_without_changing_native_state() {
         let started = Instant::now();
-        let f = Fixture::with_startup_delay(None, false, Duration::from_millis(2200));
+        let f = Fixture::with_startup_delay(None, false, Duration::from_millis(3200));
         assert!(
-            started.elapsed() >= Duration::from_millis(2100),
+            started.elapsed() >= Duration::from_millis(3100),
             "fixture must wait for the injected startup delay"
         );
         let claim = f.invoke(RemoteContext::Claim { owner: owner() }, json!({}));
@@ -3193,5 +3290,235 @@ mod remote_control_tests {
         assert_eq!(state["phase"], "awaitingCountdown");
         assert_eq!(state["inputEpoch"], 0);
         assert!(state["lease"].is_null());
+    }
+    fn connected_takeover_fixture() -> (Fixture, String, String) {
+        let f = Fixture::new();
+        f.invoke(RemoteContext::Claim { owner: owner() }, json!({}))
+            .unwrap();
+        let conn = f
+            .invoke(
+                RemoteContext::Call {
+                    owner: owner(),
+                    operation: "1".into(),
+                },
+                json!({"action":"connect","windowId":42}),
+            )
+            .unwrap()["connectionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let frame = f
+            .invoke(
+                RemoteContext::Read {
+                    owner: owner(),
+                    operation: "2".into(),
+                },
+                json!({"action":"observe","connectionId":conn}),
+            )
+            .unwrap()["frameId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        (f, conn, frame)
+    }
+    #[test]
+    fn host_fresh_input_automatically_reserves_after_soft_pause_on_same_lease() {
+        for reason in ["userInteraction", "focusLoss"] {
+            let (f, conn, frame) = connected_takeover_fixture();
+            let before = f.cancel.transport("transport-state").unwrap();
+            fs::write(f.root.join("soft-pause"), reason).unwrap();
+            let intent = json!({"action":"remote-control","takeover":{"action":"click","connectionId":conn,"frameId":frame}});
+            let reserve = f.invoke(
+                RemoteContext::Reserve {
+                    owner: owner(),
+                    operation: "3".into(),
+                },
+                intent,
+            );
+            assert!(
+                reserve.is_ok(),
+                "Host should auto-resume a proven {reason} pause: {reserve:?}"
+            );
+            let after = f.cancel.transport("transport-state").unwrap();
+            assert_eq!(after["lease"], before["lease"]);
+            assert_eq!(after["phase"], "awaitingCountdown");
+            assert_eq!(
+                after["inputEpoch"].as_u64().unwrap(),
+                before["inputEpoch"].as_u64().unwrap() + 2
+            );
+            f.invoke(RemoteContext::Call { owner: owner(), operation: "3".into() }, json!({"action":"click","connectionId":conn,"frameId":frame,"x":60,"y":40,"clickCount":1})).unwrap();
+            assert_eq!(
+                fs::read(f.root.join("auto-resumes")).unwrap(),
+                b"auto-resume\n"
+            );
+            assert_eq!(fs::read(f.root.join("clicks")).unwrap(), b"click\n");
+            assert_eq!(
+                f.invoke(
+                    RemoteContext::Reserve {
+                        owner: owner(),
+                        operation: "3".into()
+                    },
+                    json!({"action":"remote-control"})
+                )
+                .unwrap_err()
+                .code,
+                "OPERATION_REPLAY"
+            );
+        }
+    }
+    #[test]
+    fn host_explicit_manual_and_transport_pauses_remain_blocked() {
+        for manual in [true, false] {
+            let (f, conn, frame) = connected_takeover_fixture();
+            if manual {
+                fs::write(f.root.join("manual-pause"), b"stop").unwrap();
+            } else {
+                f.invoke(
+                    RemoteContext::Pause {
+                        owner: owner(),
+                        operation: None,
+                    },
+                    json!({}),
+                )
+                .unwrap();
+            }
+            let r=f.invoke(RemoteContext::Reserve { owner: owner(), operation: "3".into() },json!({"action":"remote-control","takeover":{"action":"click","connectionId":conn,"frameId":frame}}));
+            assert!(r.is_err());
+            assert!(!f.root.join("auto-resumes").exists());
+            assert!(!f.root.join("clicks").exists());
+        }
+    }
+    #[test]
+    fn host_wrong_owner_stale_sequence_invalid_target_and_non_input_never_resume() {
+        for case in [
+            "owner",
+            "sequence",
+            "connection",
+            "frame",
+            "non-input",
+            "no-intent",
+        ] {
+            let (f, conn, frame) = connected_takeover_fixture();
+            fs::write(f.root.join("soft-pause"), b"userInteraction").unwrap();
+            let intent = match case {
+                "connection" => json!({"action":"click","connectionId":"wrong","frameId":frame}),
+                "frame" => json!({"action":"click","connectionId":conn,"frameId":"missing"}),
+                "non-input" => json!({"action":"disconnect","connectionId":conn}),
+                _ => json!({"action":"click","connectionId":conn,"frameId":frame}),
+            };
+            let reservation = if case == "no-intent" {
+                json!({"action":"remote-control"})
+            } else {
+                json!({"action":"remote-control","takeover":intent})
+            };
+            let result = f.invoke(
+                RemoteContext::Reserve {
+                    owner: if case == "owner" {
+                        "intruder".into()
+                    } else {
+                        owner()
+                    },
+                    operation: if case == "sequence" {
+                        "2".into()
+                    } else {
+                        "3".into()
+                    },
+                },
+                reservation,
+            );
+            assert!(result.is_err(), "{case} must not auto-resume");
+            assert!(!f.root.join("auto-resumes").exists());
+            assert!(!f.root.join("clicks").exists());
+            assert_eq!(f.control.lock().unwrap().high_water, 2);
+        }
+    }
+    #[test]
+    fn host_known_soft_pause_cannot_override_manual_escalation_or_uncertain_recovery() {
+        for case in ["manual", "transport", "uncertain"] {
+            let (f, conn, frame) = connected_takeover_fixture();
+            fs::write(f.root.join("soft-pause"), b"focusLoss").unwrap();
+            f.invoke(RemoteContext::State { owner: owner() }, json!({}))
+                .unwrap();
+            assert!(f.control.lock().unwrap().soft_takeover_eligible);
+            match case {
+                "manual" => {
+                    fs::write(f.root.join("manual-pause"), b"stop").unwrap();
+                }
+                "transport" => {
+                    f.invoke(
+                        RemoteContext::Pause {
+                            owner: owner(),
+                            operation: None,
+                        },
+                        json!({}),
+                    )
+                    .unwrap();
+                }
+                _ => f.control.lock().unwrap().require_recovery(),
+            }
+            assert!(f.invoke(RemoteContext::Reserve{owner:owner(),operation:"3".into()},json!({"action":"remote-control","takeover":{"action":"click","connectionId":conn,"frameId":frame}})).is_err());
+            assert!(!f.root.join("auto-resumes").exists());
+            assert!(!f.root.join("clicks").exists());
+        }
+    }
+    #[test]
+    fn host_auto_resume_bad_ack_or_manual_race_stops_before_input() {
+        for marker in ["bad-auto-ack", "race-manual"] {
+            let (f, conn, frame) = connected_takeover_fixture();
+            fs::write(f.root.join("soft-pause"), b"userInteraction").unwrap();
+            fs::write(f.root.join(marker), b"simulate").unwrap();
+            let reservation = json!({"action":"remote-control","takeover":{"action":"click","connectionId":conn,"frameId":frame}});
+            assert!(f
+                .invoke(
+                    RemoteContext::Reserve {
+                        owner: owner(),
+                        operation: "3".into()
+                    },
+                    reservation.clone()
+                )
+                .is_err());
+            assert!(f.control.lock().unwrap().recovery);
+            assert!(!f.control.lock().unwrap().soft_takeover_eligible);
+            assert!(f
+                .invoke(
+                    RemoteContext::Reserve {
+                        owner: owner(),
+                        operation: "4".into()
+                    },
+                    reservation
+                )
+                .is_err());
+            assert!(!f.root.join("clicks").exists());
+            let state = f.cancel.transport("transport-state").unwrap();
+            assert_eq!(state["paused"], true);
+            if marker == "bad-auto-ack" {
+                assert_eq!(state["recoveryRequired"], true);
+            }
+        }
+    }
+    #[test]
+    fn host_auto_takeover_requires_explicit_known_capability_and_soft_reason() {
+        let state = json!({"hostAutoTakeoverVersion":1,"paused":true,"phase":"paused","recoveryRequired":false,"lease":1,"pauseReason":"focusLoss"});
+        assert!(native_soft_pause(&state));
+        for field in [
+            "hostAutoTakeoverVersion",
+            "paused",
+            "phase",
+            "recoveryRequired",
+            "lease",
+            "pauseReason",
+        ] {
+            let mut bad = state.clone();
+            bad.as_object_mut().unwrap().remove(field);
+            assert!(!native_soft_pause(&bad));
+        }
+        for reason in ["manual", "transport", "none", "unknown"] {
+            let mut bad = state.clone();
+            bad["pauseReason"] = json!(reason);
+            assert!(!native_soft_pause(&bad));
+        }
+        let mut locked = state;
+        locked["recoveryRequired"] = json!(true);
+        assert!(!native_soft_pause(&locked));
     }
 }

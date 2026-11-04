@@ -205,6 +205,12 @@ impl ProcessGuard {
         if host && self.root.join("fixture-ocr").exists() {
             c.env("MCC_FAKE_REMOTE_OCR", "1");
         }
+        if host && self.root.join("fixture-auto-takeover").exists() {
+            c.env("MCC_FAKE_HOST_AUTO_TAKEOVER", "1")
+                .env("MCC_FAKE_HOST_SOFT_PAUSE", self.root.join("soft-pause"))
+                .env("MCC_FAKE_HOST_MANUAL_PAUSE", self.root.join("manual-pause"))
+                .env("MCC_FAKE_HOST_AUTO_TRACE", self.root.join("auto-resumes"));
+        }
         c
     }
     fn init(&self) {
@@ -1642,4 +1648,76 @@ fn replayed_evicted_click_target_does_not_revive_or_displace_new_frames() {
         serde_json::json!({"action":"disconnect","connectionId":id}),
     );
     assert_eq!(disconnected["response"]["ok"], true);
+}
+
+#[test]
+fn host_auto_takeover_recovers_soft_pause_on_new_input_but_not_explicit_manual_stop() {
+    let mut f = ProcessGuard::new();
+    fs::write(f.root.join("fixture-auto-takeover"), b"enable").unwrap();
+    f.init();
+    f.start();
+    let connected = ok(&f.remote(
+        "owner",
+        "tls/host-ca.pem",
+        "token",
+        &["connect", "--window", "42"],
+    ));
+    let id = connected["connectionId"].as_str().unwrap();
+    let observed = ok(&f.remote(
+        "owner",
+        "tls/host-ca.pem",
+        "token",
+        &["observe", "--connection", id],
+    ));
+    let frame = observed["frameId"].as_str().unwrap();
+    let click = [
+        "click",
+        "--connection",
+        id,
+        "--frame",
+        frame,
+        "--x",
+        "60",
+        "--y",
+        "40",
+    ];
+    ok(&f.remote("owner", "tls/host-ca.pem", "token", &click));
+    assert_eq!(native_action_count(&f, "click"), 1);
+    fs::write(f.root.join("soft-pause"), b"userInteraction").unwrap();
+    ok(&f.remote("owner", "tls/host-ca.pem", "token", &["status"]));
+    assert_eq!(
+        native_action_count(&f, "transport-auto-resume"),
+        0,
+        "read-only status must not take over"
+    );
+    assert_eq!(native_action_count(&f, "click"), 1);
+    ok(&f.remote("owner", "tls/host-ca.pem", "token", &click));
+    assert_eq!(native_action_count(&f, "click"), 2);
+    assert_eq!(native_action_count(&f, "transport-auto-resume"), 1);
+    assert_eq!(native_action_count(&f, "transport-recover"), 0);
+    fs::write(f.root.join("manual-pause"), b"explicit-stop").unwrap();
+    for _ in 0..2 {
+        let out = f.remote("owner", "tls/host-ca.pem", "token", &click);
+        assert!(!out.status.success());
+        let response = json(&out);
+        assert!(
+            matches!(
+                response["error"]["code"].as_str(),
+                Some("USER_PAUSED" | "RECOVERY_REQUIRED")
+            ) || (response["error"]["code"] == "FOCUS_LOST"
+                && response["error"]["reason"] == "USER_PAUSED"),
+            "{response}"
+        );
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("软暂停"),
+            "Host guidance must distinguish soft and explicit stops: {response}"
+        );
+    }
+    assert_eq!(native_action_count(&f, "click"), 2);
+    assert_eq!(native_action_count(&f, "transport-auto-resume"), 1);
+    assert_eq!(native_action_count(&f, "transport-recover"), 0);
+    f.isolated();
 }

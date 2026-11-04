@@ -123,7 +123,7 @@ pub fn execute_remote_request(
     if crate::daemon::remote_read_only(&request) {
         return crate::daemon::remote_read(&runtime, owner, operation, request);
     }
-    crate::daemon::remote_reserve(&runtime, owner, operation)?;
+    crate::daemon::remote_reserve(&runtime, owner, operation, &request)?;
     let result = execute_request_inner(request, None, scope, Some((owner, operation)));
     // A dispatched operation has already cleared its reservation; a preprocessing
     // failure leaves only the matching not-yet-running reservation to abandon.

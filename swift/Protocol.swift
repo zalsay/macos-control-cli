@@ -70,6 +70,7 @@ struct NativeRequest {
     var prepareToast = false
     // 仅由 stdin 接收线程签发，协议请求不能自行指定或绕过暂停前的排队代次。
     var inputEpoch: UInt64?
+    var expectedLease: UInt64?
 
     static func decode(_ json: [String: Any], scope: DesktopScope = .chrome) throws -> NativeRequest {
         guard let id = json["id"] as? String, validRequestID(id),
@@ -80,6 +81,7 @@ struct NativeRequest {
             "permissions": ["request"], "windows": [], "cancel": [],
             "transport-state": [], "transport-pause": [], "transport-recover": [],
             "transport-disconnect": ["expectedInputEpoch"],
+            "transport-auto-resume": ["expectedLease", "expectedInputEpoch"],
             "window": ["windowId", "pid", "prepareToast"],
             "observe": ["windowId", "pid", "imagePath", "maxEdge"],
             "chrome-start": ["url", "maxWidthPx", "profile", "profileMarkerPath"],
@@ -103,12 +105,12 @@ struct NativeRequest {
             throw HelperFailure.invalidArgument
         }
         var request = NativeRequest(id: id, action: action)
-        if let value = json["expectedInputEpoch"] {
-            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
-                  number.int64Value >= 0, number.doubleValue == Double(number.int64Value) else { throw HelperFailure.invalidArgument }
-            request.inputEpoch = number.uint64Value
-        }
+        if let value = json["expectedInputEpoch"] { request.inputEpoch = try unsignedInteger(value) }
+        if let value = json["expectedLease"] { request.expectedLease = try unsignedInteger(value) }
         if action == "transport-disconnect" && request.inputEpoch == nil { throw HelperFailure.invalidArgument }
+        if action == "transport-auto-resume" && (request.inputEpoch == nil || request.expectedLease == nil) {
+            throw HelperFailure.invalidArgument
+        }
         if action == "permissions", let value = json["request"] {
             guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
                 throw HelperFailure.invalidArgument
@@ -212,6 +214,19 @@ func finiteNumber(_ value: Any?) throws -> Double {
         throw HelperFailure.invalidArgument
     }
     return number.doubleValue
+}
+
+func unsignedInteger(_ value: Any) throws -> UInt64 {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+          number.doubleValue.isFinite,
+          var decimal = Decimal(string: number.stringValue, locale: Locale(identifier: "en_US_POSIX")),
+          let maximum = Decimal(string: "18446744073709551615"), decimal >= 0, decimal <= maximum else {
+        throw HelperFailure.invalidArgument
+    }
+    var rounded = Decimal()
+    NSDecimalRound(&rounded, &decimal, 0, .down)
+    guard rounded == decimal else { throw HelperFailure.invalidArgument }
+    return NSDecimalNumber(decimal: decimal).uint64Value
 }
 
 func integer(_ value: Any?, range: ClosedRange<Int64>) throws -> Int64 {
