@@ -2,6 +2,10 @@
 
 本页适用于0.3.4及之后版本；客户端/Host仍须精确匹配版本。代码/构建、TLS回环模拟与真实双机/公网验收分别记录在[V034验证记录](V034-VERIFICATION.md)，不以本机模拟成功代替真实部署验收。
 
+Ubuntu 22.04 Docker 桌面可使用同一 WSS Host 和客户端控制普通 Firefox/X11；容器的初始化、进程托管、端口发布和持久化见 [Docker Host 模式](MCC-DOCKER.md#host-模式从容器外控制桌面)。下述 macOS 权限和物理桌面准备步骤适用于 Mac Host。
+
+Docker 的独立桌面不因普通 noVNC 键鼠、失焦或控制 owner 在命令之间空闲 300 秒而进入持续人工暂停，也不等待三秒倒计时；每条新输入先激活目标。下文的自动人工接管和空闲暂停描述适用于 macOS Host。Docker 仍保留明确暂停/取消、在途心跳和传输故障停止、输入释放及恢复锁。
+
 ## 运行方式和信任边界
 
 ```text
@@ -90,7 +94,7 @@ mcc host start \
 
 Host为前台常驻进程；默认bind为127.0.0.1:8765，公网必须显式指定可达地址并由操作者设置网络/防火墙/路由。所有监听地址都要求TLS和token，不能裸露ws://。
 
-Host启动入口固定scope：mcc和desktop-control为desktop，copis-chrome为chrome；客户端scope不匹配拒绝，不静默提升权限。一个Host同时一个控制会话，一个活动动作；其他会话不能接管既有connectionId或frameId。Host不会为了取得控制断开他人的本地连接、kill他人daemon或重建helper绕过暂停。
+Host启动入口固定scope：mcc和desktop-control为desktop，copis-chrome为chrome；客户端scope不匹配拒绝，不静默提升权限。一个Host同时一个控制会话，一个活动动作；默认其他会话不能接管既有connectionId或frameId。Docker 桌面例外：持同一 Host token 的客户端可用 status 取回 connectionId，并在没有活动请求、待关闭传输或后台动作时续用同一连接；原生 owner capability 和窗口保持，旧帧及原客户端上传文件失效，旧回执仅可只读查询、不能重放，需重新 observe/上传。明确暂停、取消不确定和恢复锁不因此解除。Host不会为了取得控制断开他人的本地连接、kill他人daemon或重建helper绕过暂停。
 
 可选 `--state-dir <绝对私有目录>` 指定Host状态位置；不提供时在MCC_CONFIG_DIR（默认~/.config/mcc）下使用scope隔离的remote-host目录。不要在Host运行时删除恢复记录或更换状态目录规避保护。
 
@@ -147,7 +151,20 @@ mcc host recover --state-dir /absolute/private/host-state
 
 ## 7. 文件与管理接口
 
-默认远端select-file拒绝。Host本人显式设置允许根时才开放，例如：
+默认拒绝文件传输和远端 `select-file`。Host 可显式启用私有文件接收目录：
+
+```sh
+mcc host start ... --upload-dir /absolute/private/transfers
+# 在客户端执行，复用原 --remote/CA/token/--remote-state-dir 参数：
+mcc --remote ... file put --connection CONNECTION_ID --local /absolute/client/report.pdf
+mcc --remote ... select-file --connection CONNECTION_ID --file-id FILE_ID
+```
+
+`file put` 返回 `fileId/name/bytes/sha256`。接收前检查 owner/connection，按 32KiB 二进制块接收，长度和 SHA256 一致后才发布。单文件最多 64MiB、整个目录最多 256MiB/128 项；55 秒总预算，单次读等待最多 5 秒。文件名仅允许 basename。文件保存在私有目录，不能指定任意 Host 目标路径。`fileId` 绑定原 Host 会话和 connection；跨会话/连接、文件被替换或内容被修改时拒绝。显式 disconnect 清理该连接的文件；异常退出残留继续占配额，由本地操作者在 Host 停止后检查清理。
+
+客户端需先点击网页上传控件打开原生文件选择框，再调用 `select-file`。Docker Firefox 通过 X11 系统事件完成 GTK 原生选择框，选择文件不自动提交网页。Docker 配置与完整示例见 [Docker 使用指南](MCC-DOCKER.md#从宿主传文件并上传网页)。Host 握手仅在启用接收目录时声明 `remote.files.v1`；旧 Host 不支持这两个新增用法。
+
+Host 本人也可沿用原有路径白名单，例如：
 
 ```sh
 mcc host start ... --files-root /absolute/host/uploads

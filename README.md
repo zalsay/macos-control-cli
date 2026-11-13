@@ -1,8 +1,10 @@
 # macOS Control CLI
 
-Development candidate **0.3.6** adds automatic Host takeover for proven soft pauses, while explicit stops, transport uncertainty and recovery locks remain blocked. Local non-Host behavior is unchanged. This is not an installation or remote deployment.
+Version **4.0.0** adds an isolated Ubuntu 22.04 desktop with Xvfb, Openbox, Firefox/X11 and noVNC. See the [Docker guide](docs/MCC-DOCKER.md) for startup, password setup and CLI usage. This mode controls applications inside its container.
 
-Current patch: Git tag **0.3.5.1**, Cargo/package/CLI version **0.3.5+1** (Cargo requires three-component SemVer). This patch refreshes `--help` and accepts numeric build metadata in status receipts; existing input and security behavior is unchanged. See [release notes](docs/RELEASE-0.3.5.1.md).
+Version **4.0.0** includes persistent Firefox profiles, system mouse/keyboard events without WebDriver, authenticated remote Host control, file transfer for web uploads, shared model configuration, and idle Docker connection handoff. See [release notes](docs/RELEASE-4.0.0.md) for validation boundaries. Host soft-pause takeover from 0.3.6 is retained; explicit stops, transport uncertainty and recovery locks remain blocked.
+
+Previous patch: Git tag **0.3.5.1**, Cargo/package/CLI version **0.3.5+1** (Cargo requires three-component SemVer). This patch refreshes `--help` and accepts numeric build metadata in status receipts; existing input and security behavior is unchanged. See [release notes](docs/RELEASE-0.3.5.1.md).
 
 [简体中文](README.zh-CN.md) · [Usage reference](USAGE.md) · [Agent integration](docs/AGENT-INTEGRATION.md)
 
@@ -59,7 +61,7 @@ A source checkout uses an existing build, or invokes `build.sh` if the complete 
 ```bash
 sh ./install.sh --help
 sh ./install.sh --prefix "$HOME/tools/mcc"
-sh ./install.sh --package /absolute/path/copis-chrome-0.3.6-darwin-arm64
+sh ./install.sh --package /absolute/path/copis-chrome-4.0.0-darwin-arm64
 ```
 
 See [stable installation and migration](docs/STABLE-INSTALL.md). Custom prefixes use `<prefix>/Applications/MCC`; an explicit `~/.local` prefix behaves like the default.
@@ -88,11 +90,11 @@ cd macos-control-cli
 bash ./build.sh
 ```
 
-On Apple Silicon, development version 0.3.6 produces:
+On Apple Silicon, version 4.0.0 can be packaged as:
 
 ```text
 dist/
-  copis-chrome-0.3.6-darwin-arm64/
+  copis-chrome-4.0.0-darwin-arm64/
     copis-chrome
     desktop-control
     mcc
@@ -106,14 +108,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.3.6-darwin-arm64.tar.gz
-  copis-chrome-0.3.6-darwin-arm64.tar.gz.sha256
+  copis-chrome-4.0.0-darwin-arm64.tar.gz
+  copis-chrome-4.0.0-darwin-arm64.tar.gz.sha256
 ```
 
 Intel uses `darwin-x64`. `bash ./build.sh debug` builds a debug package. Keep the CLI entry points, native helper, and `assets/` together at a stable installation path. You can use the build output directly or copy the entire versioned directory to a location you control; do not copy only the CLI executable.
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.3.6-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-4.0.0-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -124,7 +126,7 @@ Use the actual version/architecture directory produced by your build. The defaul
 Keep `desktop-control`, `macos-chrome-helper`, and `assets/` together. Example after a native ARM build:
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.3.6-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-4.0.0-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit
@@ -136,7 +138,7 @@ export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 
 The general default runtime is `~/.copis/desktop-control-cli`, overridden by `COPIS_DESKTOP_RUNTIME_DIR`. The Chrome entry point retains `~/.copis/chrome-desktop-cli` and `COPIS_CHROME_RUNTIME_DIR`. Requests to a daemon of the other mode are rejected, including stop requests. Separate runtimes still share the real desktop input devices.
 
-Generic `observe`, OCR, `click`, `scroll`, `type`, `press`, countdown, pause/resume, and cleanup follow the same contracts as the Chrome examples below. The control panel shows the application name and window title. **`select-file` currently retains only the verified Chrome adapter**; other apps return `FILE_DIALOG_UNSUPPORTED`. Menu bars, arbitrary sheets, and child windows are not implicitly included in a connection.
+Generic `observe`, OCR, `click`, `scroll`, `type`, `press`, countdown, pause/resume, and cleanup follow the same contracts as the Chrome examples below. The control panel shows the application name and window title. `select-file` supports the verified Chrome adapter and managed Linux Firefox GTK pickers in [Docker](docs/MCC-DOCKER.md); other apps return `FILE_DIALOG_UNSUPPORTED`. Menu bars, arbitrary sheets, and child windows are not implicitly included in a connection.
 
 ## Chrome-compatible quick start
 

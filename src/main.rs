@@ -34,6 +34,9 @@ fn main() {
         },
         Ok(Command::Remote { options, command }) => match *command {
             Command::Request { request, output } => client::run(options, request, output, scope),
+            Command::FilePut { connection, local } => {
+                client::put_file(options, &connection, &local, scope)
+            }
             _ => Err(Error::invalid("远程只允许请求命令")),
         },
         Ok(command) => copis_chrome::execution::execute_local(command, scope),

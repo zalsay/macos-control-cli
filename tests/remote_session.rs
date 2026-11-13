@@ -103,6 +103,33 @@ fn readonly_loss_does_not_lock_and_idle_does() {
     assert_eq!(m.expire(300_001).unwrap(), Effect::PauseOwnedOperation);
 }
 #[test]
+fn dedicated_docker_owner_remains_ready_after_idle_but_transport_loss_still_pauses() {
+    let mut m = SessionManager::new("boot", false).unwrap();
+    m.issue("owner", Scope::Desktop, 0).unwrap();
+    m.claim_control("owner", "conn", 0).unwrap();
+    if copis_chrome::execution::container_desktop_enabled(Scope::Desktop) {
+        assert_eq!(m.expire(600_001).unwrap(), Effect::None);
+        assert_eq!(m.state(), State::Ready);
+        m.authorize_connection("owner", "conn").unwrap();
+        assert_eq!(
+            m.lost("owner", 600_002).unwrap(),
+            Effect::PauseOwnedOperation
+        );
+    } else {
+        assert_eq!(m.expire(600_001).unwrap(), Effect::PauseOwnedOperation);
+    }
+}
+#[test]
+fn owner_inflight_heartbeat_timeout_still_pauses_the_docker_desktop() {
+    let mut m = SessionManager::new("boot", false).unwrap();
+    m.issue("owner", Scope::Desktop, 0).unwrap();
+    m.claim_control("owner", "conn", 0).unwrap();
+    m.begin("owner", 1, "rpc", br#"{"action":"status"}"#, 0)
+        .unwrap();
+    assert_eq!(m.expire(15_001).unwrap(), Effect::PauseOwnedOperation);
+    assert_eq!(m.state(), State::CancellationUnconfirmed);
+}
+#[test]
 fn evicted_replays_timeout_and_boot_checks() {
     let mut m = SessionManager::new("boot", false).unwrap();
     m.issue("s", Scope::Chrome, 0).unwrap();

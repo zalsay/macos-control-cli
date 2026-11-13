@@ -1,5 +1,6 @@
 pub mod client;
 pub mod credentials;
+pub mod files;
 pub mod host;
 pub mod images;
 pub mod options;

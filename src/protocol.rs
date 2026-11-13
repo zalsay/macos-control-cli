@@ -31,16 +31,23 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Error {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<Value>,
 }
 impl Error {
     pub fn new(code: &str, message: &str) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
+            receipt: None,
         }
     }
     pub fn invalid(message: &str) -> Self {
         Self::new("INVALID_ARGUMENT", message)
+    }
+    pub fn with_receipt(mut self, receipt: Value) -> Self {
+        self.receipt = Some(receipt);
+        self
     }
     pub fn io(context: &str, error: std::io::Error) -> Self {
         Self::new("IO_ERROR", &format!("{context}: {error}"))
@@ -65,7 +72,8 @@ pub fn response_for(result: Result<Value>, scope: Scope) -> Value {
             Value::Object(data)
         }
         Ok(_) => response(Err(Error::new("PROTOCOL_ERROR", "响应必须是 JSON 对象"))),
-        Err(error) if error.code == "USER_PAUSED" => json!({
+        Err(error) if error.code == "USER_PAUSED" => {
+            let mut response = json!({
             "protocolVersion":PROTOCOL_VERSION,
             "ok":false,
             "error":{
@@ -73,7 +81,12 @@ pub fn response_for(result: Result<Value>, scope: Scope) -> Value {
                 "reason":"USER_PAUSED",
                 "message":USER_PAUSED_PUBLIC_MESSAGE
             }
-        }),
+            });
+            if let Some(receipt) = error.receipt {
+                response["error"]["receipt"] = receipt;
+            }
+            response
+        }
         Err(error) => json!({"protocolVersion":PROTOCOL_VERSION,"ok":false,"error":error}),
     };
     if scope == Scope::Desktop {

@@ -1,0 +1,32 @@
+services:
+  mcc:
+    image: mcc-desktop:dev
+    build:
+      context: .
+      target: runtime
+    # Native linux/arm64 on Apple Silicon; use buildx for linux/amd64 delivery.
+    user: "1000:1000"
+    ports:
+      - "127.0.0.1:6080:6080"
+    shm_size: "1gb"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,mode=1777
+    volumes:
+      - mcc-config:/home/mcc/.config/mcc
+      - firefox-profiles:/home/mcc/.local/share/mcc/profiles/firefox
+      - vnc-secrets:/home/mcc/.secrets
+      - mcc-transfers:/home/mcc/.local/share/mcc/transfers
+    environment:
+      MCC_SCREEN_SIZE: "1440x900"
+    stop_grace_period: 20s
+    restart: "no"
+
+volumes:
+  mcc-config:
+  firefox-profiles:
+  vnc-secrets:
+  mcc-transfers:

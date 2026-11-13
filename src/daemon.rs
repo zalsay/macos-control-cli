@@ -11,7 +11,7 @@ use std::io::{BufReader, Write};
 use std::os::unix::fs::FileTypeExt;
 #[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
@@ -113,7 +113,59 @@ fn process_identity(pid: libc::pid_t) -> Result<OwnerIdentity> {
         start_usec: info.pbi_start_tvusec,
     })
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "linux", test))]
+fn linux_start_ticks(stat: &str, expected_pid: libc::pid_t) -> Result<u64> {
+    let (pid, _) = stat
+        .split_once(" (")
+        .ok_or_else(|| control_error("RECOVERY_REQUIRED"))?;
+    if pid.parse::<libc::pid_t>().ok() != Some(expected_pid) || expected_pid <= 0 {
+        return Err(control_error("RECOVERY_REQUIRED"));
+    }
+    // Linux comm may itself contain spaces and parentheses; fields begin after its final ')'.
+    let (_, tail) = stat
+        .rsplit_once(") ")
+        .ok_or_else(|| control_error("RECOVERY_REQUIRED"))?;
+    let fields: Vec<&str> = tail.split_whitespace().collect();
+    if !matches!(fields.first().copied(), Some("R" | "S" | "D" | "I")) {
+        return Err(control_error("RECOVERY_REQUIRED"));
+    }
+    fields
+        .get(19)
+        .and_then(|n| n.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .ok_or_else(|| control_error("RECOVERY_REQUIRED"))
+}
+#[cfg(target_os = "linux")]
+fn process_identity(pid: libc::pid_t) -> Result<OwnerIdentity> {
+    if pid <= 0 {
+        return Err(control_error("RECOVERY_REQUIRED"));
+    }
+    let path = format!("/proc/{pid}");
+    let stat = fs::read_to_string(format!("{path}/stat"))
+        .map_err(|_| control_error("RECOVERY_REQUIRED"))?;
+    let ticks = linux_start_ticks(&stat, pid)?;
+    let status = fs::read_to_string(format!("{path}/status"))
+        .map_err(|_| control_error("RECOVERY_REQUIRED"))?;
+    let effective_uid = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|uids| uids.split_whitespace().nth(1))
+        .and_then(|uid| uid.parse::<u32>().ok());
+    if effective_uid != Some(unsafe { libc::geteuid() }) {
+        return Err(control_error("RECOVERY_REQUIRED"));
+    }
+    let checked = fs::read_to_string(format!("{path}/stat"))
+        .map_err(|_| control_error("RECOVERY_REQUIRED"))?;
+    if linux_start_ticks(&checked, pid)? != ticks {
+        return Err(control_error("RECOVERY_REQUIRED"));
+    }
+    Ok(OwnerIdentity {
+        pid,
+        start_sec: ticks,
+        start_usec: 0,
+    })
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn process_identity(_: libc::pid_t) -> Result<OwnerIdentity> {
     Err(control_error("UNSUPPORTED_PLATFORM"))
 }
@@ -136,7 +188,29 @@ fn peer_identity(stream: &UnixStream) -> Result<OwnerIdentity> {
     }
     process_identity(pid)
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn peer_identity(stream: &UnixStream) -> Result<OwnerIdentity> {
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::zeroed();
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    if result != 0 || len as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(control_error("RECOVERY_REQUIRED"));
+    }
+    let credentials = unsafe { credentials.assume_init() };
+    if credentials.uid != unsafe { libc::geteuid() } || credentials.pid <= 0 {
+        return Err(control_error("RECOVERY_REQUIRED"));
+    }
+    process_identity(credentials.pid)
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn peer_identity(_: &UnixStream) -> Result<OwnerIdentity> {
     Err(control_error("UNSUPPORTED_PLATFORM"))
 }
@@ -328,7 +402,8 @@ pub(crate) fn remote_read(
 /// claim after release/recovery; do not reuse an earlier capability. Receipts
 /// contain `owned`, `daemonPid`, and `helperPid`. Within this owner, operations
 /// use nonzero canonical decimal u64 sequence strings, strictly increasing;
-/// the Host passes the validated envelope sequence, never a peer-provided ID.
+/// the Host passes a validated envelope sequence (or its global RPC ticket for
+/// the shared Docker desktop), never a peer-provided operation ID.
 pub fn remote_claim(runtime: &Runtime, owner: &str) -> Result<Value> {
     call_context(
         runtime,
@@ -338,7 +413,7 @@ pub fn remote_claim(runtime: &Runtime, owner: &str) -> Result<Value> {
         }),
     )
 }
-/// Dispatch with the validated envelope sequence encoded as a canonical
+/// Dispatch with the trusted Host operation sequence encoded as a canonical
 /// decimal u64. Sequences at or below the owner's high-water mark are rejected.
 pub fn remote_call(
     runtime: &Runtime,
@@ -364,7 +439,18 @@ pub(crate) fn remote_reserve(
     let mut reservation = json!({"action":"remote-control"});
     if matches!(
         request["action"].as_str(),
-        Some("click" | "scroll" | "type" | "press" | "click-target" | "select-file")
+        Some(
+            "click"
+                | "scroll"
+                | "type"
+                | "press"
+                | "click-target"
+                | "select-file"
+                | "move"
+                | "hover"
+                | "drag"
+                | "actions"
+        )
     ) {
         let mut intent = json!({"action":request["action"],"connectionId":request["connectionId"]});
         if let Some(frame) = request.get("frameId") {
@@ -478,7 +564,11 @@ fn validate_response_scope(value: &Value, expected: Scope) -> Result<()> {
 
 fn relayed_error(value: &Value) -> Result<Error> {
     if value["code"] == "FOCUS_LOST" && value["reason"] == "USER_PAUSED" {
-        return Ok(Error::new("USER_PAUSED", USER_PAUSED_PUBLIC_MESSAGE));
+        let mut normalized = value.clone();
+        normalized["code"] = json!("USER_PAUSED");
+        normalized["message"] = json!(USER_PAUSED_PUBLIC_MESSAGE);
+        return serde_json::from_value(normalized)
+            .map_err(|_| Error::new("PROTOCOL_ERROR", "后台进程错误格式无效"));
     }
     serde_json::from_value(value.clone())
         .map_err(|_| Error::new("PROTOCOL_ERROR", "后台进程错误格式无效"))
@@ -773,6 +863,19 @@ fn handle(
         || (action == "permissions" && envelope.request["request"] != true);
     if registry.owner.is_some() && !read_only {
         return Err(control_error("BUSY"));
+    }
+    if action == "control" {
+        if scope != Scope::Desktop {
+            return Err(Error::new("SCOPE_MISMATCH", "control 只适用于桌面模式"));
+        }
+        crate::protocol::fields(&envelope.request, &["action", "command"])?;
+        crate::args::validate_desktop_extension(&envelope.request)?;
+        // Keep owner exclusion while sideband interrupts an input holding Service.
+        return canceller.local_control(
+            envelope.request["command"]
+                .as_str()
+                .expect("已校验 command"),
+        );
     }
     let mut service = service
         .try_lock()
@@ -3520,5 +3623,73 @@ mod remote_control_tests {
         let mut locked = state;
         locked["recoveryRequired"] = json!(true);
         assert!(!native_soft_pause(&locked));
+    }
+}
+
+#[cfg(test)]
+mod linux_identity_parser_tests {
+    use super::*;
+    #[test]
+    fn linux_stat_identity_uses_start_ticks_after_last_parenthesis() {
+        let stat = "42 (name with ) parens) S 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345 0";
+        assert_eq!(linux_start_ticks(stat, 42).unwrap(), 12345);
+        assert!(linux_start_ticks(stat, 43).is_err());
+        assert!(linux_start_ticks(&stat.replace(") S ", ") Z "), 42).is_err());
+        assert!(linux_start_ticks("42 (bad) S 0", 42).is_err());
+        assert!(linux_start_ticks(&stat.replace("12345", "0"), 42).is_err());
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_peer_credentials_match_current_process_and_uid() {
+        let (a, _) = UnixStream::pair().unwrap();
+        assert!(peer_identity(&a)
+            .is_ok_and(|id| id == process_identity(std::process::id() as libc::pid_t).unwrap()));
+        assert!(process_identity(-1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod local_control_tests {
+    use super::*;
+    #[test]
+    fn local_control_interrupts_without_service_lock_but_never_overrides_remote_owner() {
+        let root = std::env::temp_dir().join(format!(
+            "mcc-control-{}",
+            crate::protocol::random_id().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("helper.py");
+        fs::write(&path,"#!/usr/bin/env python3\nimport sys,json\nfor line in sys.stdin:\n r=json.loads(line)\n print(json.dumps({'id':r['id'],'ok':True,'data':{'paused':True,'command':r.get('command')}}),flush=True)\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let helper =
+            Helper::with_timeout_for_scope(&path, Scope::Desktop, Duration::from_secs(2)).unwrap();
+        let canceller = helper.canceller();
+        let service = Mutex::new(Service::with_scope(
+            helper,
+            root.join("frames"),
+            Scope::Desktop,
+        ));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let control = Mutex::new(RemoteControl::default());
+        let invoke = || {
+            let (server, mut client) = UnixStream::pair().unwrap();
+            serde_json::to_writer(&mut client,&json!({"protocolVersion":PROTOCOL_VERSION,"scope":"desktop","request":{"action":"control","command":"pause"}})).unwrap();
+            client.write_all(b"\n").unwrap();
+            handle(
+                &server,
+                &service,
+                &stopping,
+                &canceller,
+                &control,
+                Scope::Desktop,
+            )
+        };
+        let held = service.lock().unwrap();
+        assert_eq!(invoke().unwrap()["paused"], true);
+        control.lock().unwrap().owner = Some("remote-owner".into());
+        assert_eq!(invoke().unwrap_err().code, "BUSY");
+        drop(held);
+        drop(service);
+        fs::remove_dir_all(root).unwrap();
     }
 }

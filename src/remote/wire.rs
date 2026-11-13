@@ -119,6 +119,10 @@ pub fn parse_client_control(bytes: &[u8]) -> Result<ClientControl> {
     deny_unknown_fields
 )]
 pub enum ServerControl {
+    FileReady {
+        id: String,
+        sequence: u64,
+    },
     Session {
         session: String,
         boot_id: String,
@@ -139,6 +143,11 @@ pub enum ServerControl {
 impl fmt::Debug for ServerControl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::FileReady { id, sequence } => f
+                .debug_struct("FileReady")
+                .field("id", id)
+                .field("sequence", sequence)
+                .finish(),
             Self::Session { boot_id, state, .. } => f
                 .debug_struct("Session")
                 .field("boot_id", boot_id)
@@ -372,7 +381,7 @@ pub fn parse_server_control(bytes: &[u8]) -> Result<ServerControl> {
                 return Err(Error::new("PROTOCOL_ERROR", "远程会话响应无效"));
             }
         }
-        ServerControl::Acked { id, sequence } => {
+        ServerControl::FileReady { id, sequence } | ServerControl::Acked { id, sequence } => {
             if !valid_id(id) || *sequence == 0 {
                 return Err(Error::new("PROTOCOL_ERROR", "远程确认无效"));
             }
@@ -560,7 +569,13 @@ pub fn parse_hello(
         || hello.scope != scope
         || !valid_id(&hello.boot_id)
         || hello.capabilities.len() > 64
-        || hello.capabilities.iter().any(|v| !valid_id(v))
+        || hello.capabilities.iter().any(|v| {
+            !valid_id(v)
+                && !matches!(
+                    v.as_str(),
+                    "firefox.x11.v1" | "firefox.system-input.v1" | "remote.files.v1"
+                )
+        })
     {
         return Err(Error::new("PROTOCOL_ERROR", "远程版本、scope 或能力无效"));
     }

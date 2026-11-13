@@ -9,6 +9,7 @@ pub struct HostOptions {
     pub token_file: PathBuf,
     pub state_dir: Option<PathBuf>,
     pub allowed_file_roots: Vec<PathBuf>,
+    pub upload_dir: Option<PathBuf>,
 }
 #[derive(Clone)]
 pub struct ClientOptions {

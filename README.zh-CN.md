@@ -1,8 +1,10 @@
 # macOS Control CLI
 
-开发候选 **0.3.6**：Host 对已确认的软暂停默认自动接管；明确停止、传输不确定状态和恢复锁不自动解除。本机非 Host 行为不变，不代表已安装或部署到远端。
+**4.0.0** 提供独立的 Ubuntu 22.04 容器桌面：Xvfb、Openbox、Firefox/X11 与 noVNC。启动、密码设置和命令见 [Docker 使用说明](docs/MCC-DOCKER.md)，从宿主调用见 [mccd 使用指南](docs/MCCD-USAGE.md)。此模式控制容器内应用，不连接宿主桌面。
 
-当前补丁：Git tag 为 **0.3.5.1**，Cargo/功能包/CLI 版本为 **0.3.5+1**（Cargo 不接受四段版本号）。本补丁更新 `--help`，修复状态回执对版本元数据 `+` 的兼容，不改变输入与安全门禁。见[版本说明](docs/RELEASE-0.3.5.1.md)。
+**4.0.0** 包含 Firefox profile 持久化、无 WebDriver 的系统键鼠事件、远程 Host 控制、网页上传文件通道、模型配置及 Docker 空闲连接跨客户端续用。验证边界见 [版本说明](docs/RELEASE-4.0.0.md)。保留 0.3.6 的 Host 软暂停自动接管；明确停止、传输不确定状态和恢复锁不自动解除。
+
+此前补丁：Git tag 为 **0.3.5.1**，Cargo/功能包/CLI 版本为 **0.3.5+1**（Cargo 不接受四段版本号）。本补丁更新 `--help`，修复状态回执对版本元数据 `+` 的兼容，不改变输入与安全门禁。见[版本说明](docs/RELEASE-0.3.5.1.md)。
 
 [English](README.md) · [完整使用说明](USAGE.md) · [Agent 接入指南](docs/AGENT-INTEGRATION.md)
 
@@ -59,7 +61,7 @@ mcc apps
 ```bash
 sh ./install.sh --help
 sh ./install.sh --prefix "$HOME/tools/mcc"
-sh ./install.sh --package /绝对路径/copis-chrome-0.3.6-darwin-arm64
+sh ./install.sh --package /绝对路径/copis-chrome-4.0.0-darwin-arm64
 ```
 
 固定目录、旧版迁移和安全回滚见[稳定安装说明](docs/STABLE-INSTALL.md)。自定义 `--prefix` 的运行目录为 `<prefix>/Applications/MCC`（显式 `~/.local` 与默认一致）。
@@ -88,11 +90,11 @@ cd macos-control-cli
 bash ./build.sh
 ```
 
-Apple Silicon 上的 0.3.6 开发产物：
+Apple Silicon 上的 4.0.0 打包目录示例：
 
 ```text
 dist/
-  copis-chrome-0.3.6-darwin-arm64/
+  copis-chrome-4.0.0-darwin-arm64/
     copis-chrome
     desktop-control
     mcc
@@ -106,14 +108,14 @@ dist/
     assets/
     docs/
     source/
-  copis-chrome-0.3.6-darwin-arm64.tar.gz
-  copis-chrome-0.3.6-darwin-arm64.tar.gz.sha256
+  copis-chrome-4.0.0-darwin-arm64.tar.gz
+  copis-chrome-4.0.0-darwin-arm64.tar.gz.sha256
 ```
 
 Intel 后缀为 `darwin-x64`。`bash ./build.sh debug` 可生成调试包。可以直接使用构建目录，也可将整个版本目录复制到稳定安装位置；CLI 入口、原生 helper 和 `assets/` 必须保持相邻，不要只复制 CLI。
 
 ```bash
-export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.3.6-darwin-arm64/copis-chrome"
+export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-4.0.0-darwin-arm64/copis-chrome"
 "$COPIS_CHROME_CLI" --version
 ```
 
@@ -124,7 +126,7 @@ export COPIS_CHROME_CLI="$PWD/dist/copis-chrome-0.3.6-darwin-arm64/copis-chrome"
 `desktop-control` 与 `macos-chrome-helper`、`assets/` 保持在同一目录。ARM 本机构建示例：
 
 ```bash
-export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-0.3.6-darwin-arm64/desktop-control"
+export DESKTOP_CONTROL_CLI="$PWD/dist/copis-chrome-4.0.0-darwin-arm64/desktop-control"
 export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 "$DESKTOP_CONTROL_CLI" apps
 "$DESKTOP_CONTROL_CLI" windows --app com.apple.TextEdit
@@ -136,7 +138,7 @@ export COPIS_DESKTOP_RUNTIME_DIR="$(mktemp -d /tmp/desktop-control.XXXXXX)"
 
 通用模式默认 runtime 为 `~/.copis/desktop-control-cli`，使用 `COPIS_DESKTOP_RUNTIME_DIR`；Chrome 兼容模式保留原目录和 `COPIS_CHROME_RUNTIME_DIR`。两种模式的跨模式请求（含停止）会被拒绝，避免共享目录误控。不同 runtime 仍共用真实鼠标键盘。
 
-通用模式的截图/OCR、点击、滚动、输入、按键、倒计时、暂停和退出清理沿用下文契约；控制条显示应用名与窗口标题。**`select-file` 暂时只保留已验证的 Chrome 适配**，其他应用明确返回 `FILE_DIALOG_UNSUPPORTED`。系统菜单、任意 sheet、子窗口不自动纳入连接。
+通用模式的截图/OCR、点击、滚动、输入、按键、倒计时、暂停和退出清理沿用下文契约；控制条显示应用名与窗口标题。`select-file` 支持已验证的 Chrome 适配，以及 [Docker](docs/MCC-DOCKER.md) 中受管理 Linux Firefox 的 GTK 文件选择框；其他应用明确返回 `FILE_DIALOG_UNSUPPORTED`。系统菜单、任意 sheet、子窗口不自动纳入连接。
 
 ## Chrome 兼容入口快速上手
 

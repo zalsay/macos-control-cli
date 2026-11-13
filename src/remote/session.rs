@@ -69,6 +69,8 @@ struct Flight {
 pub struct SessionManager {
     boot: String,
     allow_files: bool,
+    pause_idle_desktop_owner: bool,
+    allow_idle_adoption: bool,
     clock: Option<u64>,
     state: State,
     sessions: HashMap<String, Session>,
@@ -104,6 +106,8 @@ impl SessionManager {
         Ok(Self {
             boot: boot.into(),
             allow_files: false,
+            pause_idle_desktop_owner: !crate::execution::container_desktop_enabled(Scope::Desktop),
+            allow_idle_adoption: crate::execution::container_desktop_enabled(Scope::Desktop),
             clock: None,
             state: if recovery_required {
                 State::RecoveryRequired
@@ -234,6 +238,49 @@ impl SessionManager {
         self.reservation_high = None;
         Ok(())
     }
+    /// Called only by the authenticated Host while its transport/backend are idle.
+    /// Retain the native capability and connection; invalidate old frames and receipt replay.
+    pub(crate) fn adopt_idle_connection(
+        &mut self,
+        credential: &str,
+        requested: Option<&str>,
+        now: u64,
+    ) -> Result<Option<(String, String)>> {
+        self.check_time(now)?;
+        if !self.allow_idle_adoption || self.owner.as_deref() == Some(credential) {
+            return Ok(None);
+        }
+        let Some(connection) = self.connection.as_deref() else {
+            return Ok(None);
+        };
+        if requested.is_some_and(|id| id != connection) {
+            return Err(fail("NOT_OWNER"));
+        }
+        if !matches!(self.state, State::Ready | State::LostPaused) {
+            return Err(fail("RECOVERY_REQUIRED"));
+        }
+        if self.flight.is_some() || !self.closes.is_empty() {
+            return Err(fail("BUSY"));
+        }
+        let session = self
+            .sessions
+            .get(credential)
+            .ok_or_else(|| fail("SESSION_INVALID"))?;
+        if session.scope != Scope::Desktop {
+            return Err(fail("NOT_OWNER"));
+        }
+        let previous = self.owner.clone().ok_or_else(|| fail("NOT_OWNER"))?;
+        let connection = connection.to_owned();
+        let epoch = self
+            .lease_epoch
+            .checked_add(1)
+            .ok_or_else(|| fail("RECOVERY_REQUIRED"))?;
+        self.frames.clear();
+        self.lease_epoch = epoch;
+        self.owner = Some(credential.to_owned());
+        self.sessions.get_mut(credential).unwrap().last_activity = now;
+        Ok(Some((previous, connection)))
+    }
     /// Host confirms reservation was rejected before dispatch or a matching connect failed.
     pub fn rollback_reservation(
         &mut self,
@@ -262,7 +309,10 @@ impl SessionManager {
                             && r.id == id
                             && r.lease_epoch == self.lease_epoch
                             && r.acknowledged
-                            && matches!(r.action.as_str(), "connect" | "chrome-start")
+                            && matches!(
+                                r.action.as_str(),
+                                "connect" | "chrome-start" | "firefox-start"
+                            )
                             && serde_json::from_slice::<serde_json::Value>(&r.result)
                                 .ok()
                                 .is_some_and(|v| v["ok"] == false)
@@ -421,6 +471,9 @@ impl SessionManager {
                 .ok_or_else(|| fail("STALE_SEQUENCE"))?;
             if r.id != id || r.request_digest != request_digest(request) {
                 return Err(fail("REPLAY_MISMATCH"));
+            }
+            if self.allow_idle_adoption && r.lease_epoch != self.lease_epoch {
+                return Err(fail("STALE_SEQUENCE"));
             }
             let result = r.result.clone();
             self.flight = Some(Flight {
@@ -729,15 +782,19 @@ impl SessionManager {
         }
         if let Some(owner) = &self.owner {
             let id = owner.clone();
-            let last = self
+            let session = self
                 .sessions
                 .get(&id)
-                .ok_or_else(|| fail("SESSION_INVALID"))?
-                .last_activity;
+                .ok_or_else(|| fail("SESSION_INVALID"))?;
+            let last = session.last_activity;
             if now < last {
                 return Err(fail("INVALID_TIME"));
             }
-            if now - last >= IDLE_MS {
+            // A dedicated Docker desktop can wait between commands indefinitely.
+            // In-flight heartbeat loss above still pauses every kind of Host.
+            if now - last >= IDLE_MS
+                && (self.pause_idle_desktop_owner || session.scope != Scope::Desktop)
+            {
                 return self.lost(&id, now);
             }
         }
@@ -801,6 +858,13 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
     use serde_json::{Map, Value};
     fn valid(name: &str, v: &Value) -> bool {
         match name {
+            "backend" => matches!(v.as_str(), Some("firefox-x11" | "x11")),
+            "dispatchState" => matches!(
+                v.as_str(),
+                Some("notSent" | "completed" | "partial" | "unknown")
+            ),
+            "inputState" => matches!(v.as_str(), Some("released" | "held" | "unknown")),
+            "completedSteps" => v.as_u64().is_some_and(|n| n <= 8192),
             "ok" | "running" | "connected" | "sent" | "effectVerified" | "untrusted"
             | "truncated" | "created" | "selected" | "dialogClosed" | "screenRecording"
             | "accessibility" | "requested" | "granted" | "dynamicEndpoint" => v.is_boolean(),
@@ -808,7 +872,7 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
             | "probability" | "x" | "y" | "windowId" | "pid" | "widthPx" | "heightPx" | "scale"
             | "maxWidthPx" | "availableWidthPx" | "availableHeightPx" | "osStatus" | "observe"
             | "decision" | "click" | "total" => v.is_number(),
-            "connectionId" | "frameId" | "candidateId" | "code" | "reason" => {
+            "connectionId" | "frameId" | "fileId" | "candidateId" | "code" | "reason" => {
                 v.as_str().is_some_and(valid_id)
             }
             "scope" => matches!(v.as_str(), Some("chrome" | "desktop")),
@@ -835,6 +899,12 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
             "directory" | "path" => v.as_str().is_some_and(|s| {
                 !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control)
             }),
+            "bytes" => v
+                .as_u64()
+                .is_some_and(|n| n <= super::files::MAX_FILE_BYTES),
+            "sha256" => v
+                .as_str()
+                .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())),
             "version" => v.as_str().is_some_and(|s| {
                 !s.is_empty()
                     && s.len() <= 32
@@ -904,7 +974,9 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
     let source = value.as_object().ok_or_else(|| fail("INVALID_ARGUMENT"))?;
     let mut out = fields(source, &["ok", "protocolVersion", "scope"], &[])?;
     let action_fields: &[&str] = match action {
-        "click" | "scroll" | "type" | "press" => &["sent", "connectionId", "frameId"],
+        "click" | "scroll" | "type" | "press" | "move" | "hover" | "drag" | "actions" => {
+            &["sent", "connectionId", "frameId"]
+        }
         "click-target" => &[
             "sent",
             "status",
@@ -913,7 +985,7 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
             "effectVerified",
             "untrusted",
         ],
-        "connect" | "chrome-start" => &["connectionId", "connected", "created"],
+        "connect" | "chrome-start" | "firefox-start" => &["connectionId", "connected", "created"],
         "observe" => &[
             "connectionId",
             "frameId",
@@ -927,13 +999,48 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
         ],
         "disconnect" => &["connected"],
         "select-file" => &["selected", "dialogClosed", "connectionId"],
-        "status" => &["running", "connected", "version"],
+        "file-put" => &["fileId", "name", "bytes", "sha256"],
+        "status" => &["running", "connected", "connectionId", "version"],
         "permissions" => &["screenRecording", "accessibility"],
         "apps" | "windows" | "session" | "frame" => &[],
         _ => return Err(fail("INVALID_ARGUMENT")),
     };
     out.extend(fields(source, action_fields, &[])?);
-    if matches!(action, "connect" | "chrome-start" | "status") {
+    if matches!(
+        action,
+        "click"
+            | "click-target"
+            | "scroll"
+            | "type"
+            | "press"
+            | "move"
+            | "hover"
+            | "drag"
+            | "actions"
+            | "firefox-start"
+            | "connect"
+    ) {
+        out.extend(fields(
+            source,
+            &[
+                "backend",
+                "dispatchState",
+                "completedSteps",
+                "inputState",
+                "effectVerified",
+            ],
+            &[],
+        )?);
+    }
+    if action == "firefox-start" {
+        if let Some(profile) = obj(source, "profile", &["name"], &["name"])? {
+            out.insert("profile".into(), profile);
+        }
+    }
+    if matches!(
+        action,
+        "connect" | "chrome-start" | "firefox-start" | "status"
+    ) {
         if let Some(v) = source.get("window") {
             if v.is_null() && action == "status" {
                 out.insert("window".into(), Value::Null);
@@ -967,7 +1074,7 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
             out.insert(name.into(), Value::Array(projected?));
         }
     }
-    if matches!(action, "connect" | "chrome-start") {
+    if matches!(action, "connect" | "chrome-start" | "firefox-start") {
         if let Some(value) = source.get("permissions") {
             let permissions = value.as_object().ok_or_else(|| fail("INVALID_ARGUMENT"))?;
             let mut projected = fields(
@@ -1124,6 +1231,26 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
             "远程操作失败，请查看错误代码"
         };
         error.insert("message".into(), Value::String(controlled.into()));
+        if let Some(receipt) = obj(
+            src,
+            "receipt",
+            &[
+                "backend",
+                "dispatchState",
+                "completedSteps",
+                "inputState",
+                "effectVerified",
+            ],
+            &[
+                "backend",
+                "dispatchState",
+                "completedSteps",
+                "inputState",
+                "effectVerified",
+            ],
+        )? {
+            error.insert("receipt".into(), receipt);
+        }
         out.insert("error".into(), Value::Object(error));
     }
     Ok(Value::Object(out))
@@ -1148,5 +1275,125 @@ mod host_pause_receipt_tests {
             "远程操作失败，请查看错误代码"
         );
         assert!(!sanitized.to_string().contains("secret helper"));
+    }
+}
+
+#[cfg(test)]
+mod firefox_receipt_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn partial_firefox_receipt_is_typed_preserved_and_strips_untrusted_fields() {
+        let source = json!({"ok":false,"error":{"code":"INPUT_STATE_UNKNOWN","message":"private helper diagnostics","receipt":{"backend":"firefox-x11","dispatchState":"partial","completedSteps":2,"inputState":"unknown","effectVerified":false,"cookie":"private"}}});
+        let result = project_receipt("drag", &source).unwrap();
+        assert_eq!(
+            result["error"]["receipt"],
+            json!({"backend":"firefox-x11","dispatchState":"partial","completedSteps":2,"inputState":"unknown","effectVerified":false})
+        );
+        assert_eq!(result["error"]["message"], "远程操作失败，请查看错误代码");
+        let mut invalid = source;
+        invalid["error"]["receipt"]["completedSteps"] = json!("two");
+        assert!(project_receipt("drag", &invalid).is_err());
+    }
+    #[test]
+    fn native_x11_receipt_backend_is_retained() {
+        let source = json!({"ok":true,"sent":true,"connectionId":"c","frameId":"f","backend":"x11","effectVerified":false});
+        assert_eq!(project_receipt("click", &source).unwrap(), source);
+    }
+}
+
+#[cfg(test)]
+mod firefox_connect_receipt_tests {
+    use super::*;
+    #[test]
+    fn direct_managed_firefox_connect_keeps_backend_in_cached_receipt() {
+        let receipt =
+            serde_json::json!({"connectionId":"c","connected":true,"backend":"firefox-x11"});
+        assert_eq!(project_receipt("connect", &receipt).unwrap(), receipt);
+    }
+}
+
+#[cfg(test)]
+mod shared_desktop_tests {
+    use super::*;
+    fn desktop() -> SessionManager {
+        let mut m = SessionManager::new("boot", false).unwrap();
+        m.allow_idle_adoption = true;
+        m.issue("a", Scope::Desktop, 0).unwrap();
+        m.issue("b", Scope::Desktop, 0).unwrap();
+        m.claim_control("a", "connection", 0).unwrap();
+        m.register_frame("a", "connection", "old-frame").unwrap();
+        m
+    }
+    #[test]
+    fn idle_adoption_retains_connection_and_invalidates_frames_and_receipt_replay() {
+        let mut m = desktop();
+        let request = br#"{"action":"status"}"#;
+        let (_, ticket) = m.begin_rpc("a", 1, "request", request, 1).unwrap();
+        m.complete("a", 1, "request", br#"{"ok":true}"#, 2).unwrap();
+        let permit = m.ack_rpc("a", 1, "request", ticket, 3).unwrap();
+        assert_eq!(
+            m.adopt_idle_connection("b", None, 3).unwrap_err().code,
+            "BUSY"
+        );
+        m.normal_close("a", 1, "request", permit).unwrap();
+        assert_eq!(
+            m.adopt_idle_connection("b", None, 4).unwrap(),
+            Some(("a".into(), "connection".into()))
+        );
+        m.authorize_connection("b", "connection").unwrap();
+        assert!(m.authorize_connection("a", "connection").is_err());
+        assert!(m.authorize_frame("b", "connection", "old-frame").is_err());
+        assert_eq!(
+            m.query_cached("a", 1, "request", request).unwrap(),
+            br#"{"ok":true}"#
+        );
+        m.register_frame("b", "connection", "new-frame").unwrap();
+        m.adopt_idle_connection("a", Some("connection"), 5).unwrap();
+        assert!(m.authorize_frame("a", "connection", "new-frame").is_err());
+        m.authorize_connection("a", "connection").unwrap();
+        assert_eq!(
+            m.begin_rpc("a", 1, "request", request, 6).unwrap_err().code,
+            "STALE_SEQUENCE"
+        );
+    }
+    #[test]
+    fn idle_adoption_preserves_pause_and_rejects_flights_recovery_and_wrong_connection() {
+        let mut m = desktop();
+        assert_eq!(
+            m.adopt_idle_connection("b", Some("other"), 1)
+                .unwrap_err()
+                .code,
+            "NOT_OWNER"
+        );
+        m.begin_rpc("a", 1, "request", br#"{"action":"status"}"#, 2)
+            .unwrap();
+        assert_eq!(
+            m.adopt_idle_connection("b", None, 3).unwrap_err().code,
+            "BUSY"
+        );
+        m.flight = None;
+        m.state = State::LostPaused;
+        m.adopt_idle_connection("b", None, 4).unwrap();
+        assert_eq!(m.state(), State::LostPaused);
+        assert!(m.begin_rpc("b", 1, "input", br#"{"action":"press","connectionId":"connection","frameId":"old-frame","key":"Enter"}"#, 5).is_err());
+        for state in [State::RecoveryRequired, State::CancellationUnconfirmed] {
+            m.state = state;
+            assert_eq!(
+                m.adopt_idle_connection("a", None, 6).unwrap_err().code,
+                "RECOVERY_REQUIRED"
+            );
+        }
+        m.state = State::Ready;
+        m.allow_idle_adoption = false;
+        assert_eq!(m.adopt_idle_connection("a", None, 7).unwrap(), None);
+        m.authorize_connection("b", "connection").unwrap();
+    }
+    #[test]
+    fn docker_status_projects_reusable_connection_id() {
+        let value = serde_json::json!({"ok":true,"running":true,"connected":true,"connectionId":"connection","version":"0.3.6"});
+        assert_eq!(project_receipt("status", &value).unwrap(), value);
+        let empty = serde_json::json!({"ok":true,"running":true,"connected":false});
+        assert_eq!(project_receipt("status", &empty).unwrap(), empty);
     }
 }

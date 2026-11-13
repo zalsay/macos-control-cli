@@ -112,20 +112,48 @@ pub fn validate_action_with_files(scope: Scope, request: &Value, allow_files: bo
         "status" | "apps" | "session" => &["action"],
         "windows" => &["action", "bundleId"],
         "permissions" => &["action", "request"],
-        "chrome-start" => &["action", "url", "profile"],
+        "chrome-start" | "firefox-start" => &["action", "url", "profile"],
+        "move" | "hover" => &["action", "connectionId", "frameId", "x", "y", "durationMs"],
+        "drag" => &[
+            "action",
+            "connectionId",
+            "frameId",
+            "fromX",
+            "fromY",
+            "toX",
+            "toY",
+            "durationMs",
+        ],
+        "actions" => &["action", "connectionId", "frameId", "actions"],
         "connect" => &["action", "windowId"],
         "observe" | "disconnect" => &["action", "connectionId"],
-        "click" => &["action", "connectionId", "frameId", "x", "y", "clickCount"],
+        "click" => &[
+            "action",
+            "connectionId",
+            "frameId",
+            "x",
+            "y",
+            "clickCount",
+            "button",
+            "modifiers",
+        ],
         "click-target" => &["action", "connectionId", "target"],
         "scroll" => &["action", "connectionId", "frameId", "x", "y", "deltaY"],
         "type" => &["action", "connectionId", "frameId", "text"],
         "press" => &["action", "connectionId", "frameId", "key"],
         "frame" => &["action", "connectionId", "frameId"],
-        "select-file" if allow_files => &["action", "connectionId", "path"],
+        "select-file" if allow_files => &["action", "connectionId", "path", "fileId"],
+        "file-put" if allow_files => &["action", "connectionId", "name", "bytes", "sha256"],
         _ => return Err(Error::invalid("不支持的远程命令")),
     };
     fields(request, allowed)?;
-    if (action == "apps" && scope != Scope::Desktop)
+    if (scope != Scope::Desktop
+        && (matches!(
+            action,
+            "firefox-start" | "move" | "hover" | "drag" | "actions"
+        ) || request.get("button").is_some()
+            || request.get("modifiers").is_some()))
+        || (action == "apps" && scope != Scope::Desktop)
         || (action == "windows" && scope != Scope::Desktop && request.get("bundleId").is_some())
     {
         return Err(Error::invalid("scope 不允许此命令"));
@@ -145,10 +173,15 @@ pub fn validate_action_with_files(scope: Scope, request: &Value, allow_files: bo
         }
     }
     let required: &[&str] = match action {
+        "firefox-start" => &["profile"],
+        "move" | "hover" => &["connectionId", "frameId", "x", "y"],
+        "drag" => &["connectionId", "frameId", "fromX", "fromY", "toX", "toY"],
+        "actions" => &["connectionId", "frameId", "actions"],
         "connect" => &["windowId"],
         "observe" | "disconnect" => &["connectionId"],
         "click-target" => &["connectionId", "target"],
-        "select-file" => &["connectionId", "path"],
+        "select-file" => &["connectionId"],
+        "file-put" => &["connectionId", "name", "bytes", "sha256"],
         "click" => &["connectionId", "frameId", "x", "y"],
         "scroll" => &["connectionId", "frameId", "x", "y", "deltaY"],
         "type" => &["connectionId", "frameId", "text"],
@@ -161,7 +194,18 @@ pub fn validate_action_with_files(scope: Scope, request: &Value, allow_files: bo
             return Err(Error::invalid("缺少必要字段"));
         }
     }
-    for key in ["windowId", "x", "y", "clickCount", "deltaY"] {
+    for key in [
+        "windowId",
+        "x",
+        "y",
+        "clickCount",
+        "deltaY",
+        "fromX",
+        "fromY",
+        "toX",
+        "toY",
+        "durationMs",
+    ] {
         if request.get(key).is_some_and(|v| !v.is_i64()) {
             return Err(Error::invalid("数字字段无效"));
         }
@@ -174,7 +218,21 @@ pub fn validate_action_with_files(scope: Scope, request: &Value, allow_files: bo
             return Err(Error::invalid("字符串字段无效"));
         }
     }
+    crate::args::validate_desktop_extension(request)?;
+    if action == "file-put" {
+        let manifest:crate::remote::files::Manifest=serde_json::from_value(serde_json::json!({"name":request["name"],"bytes":request["bytes"],"sha256":request["sha256"]})).map_err(|_|Error::invalid("文件 manifest 无效"))?;
+        manifest.validate()?;
+    }
     if action == "select-file" {
+        if request.get("path").is_some() == request.get("fileId").is_some() {
+            return Err(Error::invalid("文件路径与 ID 必须二选一"));
+        }
+        if let Some(id) = request.get("fileId") {
+            if !id.as_str().is_some_and(valid_id) {
+                return Err(Error::invalid("文件 ID 无效"));
+            }
+            return Ok(());
+        }
         let path = request
             .get("path")
             .and_then(Value::as_str)
@@ -186,6 +244,39 @@ pub fn validate_action_with_files(scope: Scope, request: &Value, allow_files: bo
         {
             return Err(Error::invalid("文件路径必须为有效绝对路径"));
         }
+    }
+    Ok(())
+}
+
+pub fn required_capability(request: &Value) -> Option<&'static str> {
+    if request["action"] == "file-put" || request.get("fileId").is_some() {
+        return Some("remote.files.v1");
+    }
+    match request["action"].as_str() {
+        Some("firefox-start") => Some("firefox.x11.v1"),
+        Some("move" | "hover" | "drag" | "actions") => Some("firefox.system-input.v1"),
+        Some("click") if request.get("button").is_some() || request.get("modifiers").is_some() => {
+            Some("firefox.system-input.v1")
+        }
+        _ => None,
+    }
+}
+pub fn host_capabilities(scope: Scope) -> Vec<String> {
+    let mut capabilities = vec!["remote-v1".to_owned()];
+    if crate::execution::container_desktop_enabled(scope) {
+        capabilities.extend([
+            "firefox.x11.v1".to_owned(),
+            "firefox.system-input.v1".to_owned(),
+        ]);
+    }
+    capabilities
+}
+pub fn require_capability(request: &Value, capabilities: &[String]) -> Result<()> {
+    if required_capability(request).is_some_and(|name| !capabilities.iter().any(|c| c == name)) {
+        return Err(Error::new(
+            "ACTION_UNSUPPORTED",
+            "Host 未声明该命令所需能力",
+        ));
     }
     Ok(())
 }

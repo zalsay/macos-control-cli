@@ -111,7 +111,7 @@ PY
 "$COPIS_CHROME_CLI" connect --window 7185
 ```
 
-成功响应包含 `connectionId`、`connected: true`、`window` 和 `permissions`。保存本次返回的 `connectionId`，后续子进程调用持续复用。`status` 不返回该凭据，不能靠它恢复丢失的连接 ID。
+成功响应包含 `connectionId`、`connected: true`、`window` 和 `permissions`。保存本次返回的 `connectionId`，后续子进程调用持续复用。macOS 本地/Host 的 `status` 不返回该 ID。**Docker 桌面支持通过 `mccd status`（或容器内 `mcc status`）取得已有连接的 `connectionId`**，无需原启动回执。持同一 Host token 的其他客户端可在请求空闲时续用原连接；接续后重新 `observe`，不得复用旧帧/旧上传文件 ID，也不解除明确暂停或恢复锁。`connectionId` 是连接标识，不能替代 Host token 认证。
 
 独立 CLI 通过明确的窗口选择和 macOS 权限工作，不需要构造 Copis 内部 capability token，也不需要调用 Electron 的 IPC 或内部 HTTP 接口。
 
@@ -227,7 +227,7 @@ Alt+ArrowLeft  Alt+ArrowRight
 | 错误码 | 调用方处理 |
 | --- | --- |
 | `SCREEN_PERMISSION_REQUIRED` / `ACCESSIBILITY_PERMISSION_REQUIRED` | 用户完成系统授权后再检查；输入还可能被系统事件投递权限拒绝 |
-| `CONNECTION_BUSY` | 检查是否为自己已有的连接；有凭据则复用，没有凭据则交还持有者或由用户处理 |
+| `CONNECTION_BUSY` | Docker 先 `mccd status` 取回 `connectionId`，然后重新观察并续用；macOS 检查是否为自己已有的连接，无原凭据时交还持有者或由用户处理 |
 | `BUSY` | 已有动作执行中，不会排队；等待当前动作结束并观察，再判断是否仍需发起动作 |
 | `CONNECTION_INVALID` | 旧连接已失效或凭据不符；确认任务归属后重新列窗、连接和观察 |
 | `FRAME_UNKNOWN` | 帧不属于当前连接或已被最近 32 帧策略移除；重新观察 |
