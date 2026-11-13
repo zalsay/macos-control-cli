@@ -1,6 +1,29 @@
 import Foundation
 import WebKit
 import SafarierCore
+import Darwin
+
+#if SAFARIER_BOUND_LOCAL_CANDIDATE
+private func factoryTrace(_ phase: String, _ start: UInt64, _ result: String = "ok") {
+    let now = DispatchTime.now().uptimeNanoseconds
+    let ms = now >= start ? (now - start) / 1_000_000 : 0
+    fputs("BOUND_DIAG phase=\(phase) elapsed_ms=\(ms) result=\(result)\n", stderr)
+}
+private func factoryError(_ error: Error) -> String {
+    if let error = error as? AutomationError { return error.code.rawValue }
+    if error is CancellationError { return "cancelled" }
+    if let error = error as? RunnerPreparationError {
+        switch error {
+        case .profileMismatch: return "profileMismatch"
+        case .invalidBackgroundLaunch: return "invalidBackgroundLaunch"
+        case .boundNodeMismatch: return "boundNodeMismatch"
+        case .proxyNotFound: return "proxyNotFound"
+        case .proxyMismatch: return "proxyMismatch"
+        }
+    }
+    return "unknown"
+}
+#endif
 
 public enum WebViewConfigurationError: Error, Equatable {
     case proxyNotFound(UUID)
@@ -15,6 +38,13 @@ public struct WebViewConfigurationFactory {
         public let configuration: WKWebViewConfiguration
         /// Runner 在创建 WebView 之后还会补上每个 WebView 上才能设置的项（机型像素比）。
         public var report: PrivacyCapabilityReport
+        public let executionPolicy: BrowserExecutionPolicy
+
+        init(configuration: WKWebViewConfiguration, report: PrivacyCapabilityReport, executionPolicy: BrowserExecutionPolicy = .interactive) {
+            self.configuration = configuration
+            self.report = report
+            self.executionPolicy = executionPolicy
+        }
     }
 
     public let dataStores: DataStoreManager
@@ -57,11 +87,80 @@ public struct WebViewConfigurationFactory {
     /// - Parameters:
     ///   - proxy: profile.proxyID 指向的代理；profile 没配代理时传 nil。
     ///   - processLanguages: Runner 进程实际生效的 AppleLanguages，用来判断 `-AppleLanguages` 有没有带进来。
+    public static func requireExecutionPolicy(_ executionPolicy: BrowserExecutionPolicy) throws {
+        guard executionPolicy == .interactive else { throw AutomationError(code: .uiPolicyUnavailable) }
+    }
+
+    static func proxyPassword(
+        for proxy: ProxySettings,
+        credentials: any CredentialStore,
+        executionPolicy: BrowserExecutionPolicy
+    ) throws -> String? {
+        guard proxy.username != nil else { return nil }
+        switch executionPolicy {
+        case .interactive:
+            return try credentials.password(forKey: proxy.credentialKey)
+        case .automationBackground:
+            guard proxy.username?.isEmpty == false else { return nil }
+            do {
+                guard let password = try credentials.passwordWithoutInteraction(forKey: proxy.credentialKey) else {
+                    throw AutomationError(code: .interactionRequired)
+                }
+                return password
+            } catch CredentialStoreError.interactionRequired {
+                throw AutomationError(code: .interactionRequired)
+            }
+        }
+    }
+
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+    /// Local candidate only: Core's sealed context, not a caller-provided flag,
+    /// authorizes a configuration for the bound profile. This never admits general pages.
+    public func makeBoundLocal(plan: RunnerPreparationPlan, effectiveProfile: Profile, proxy: ProxySettings?, context: RunnerBinderContext) async throws -> Output {
+        let started = DispatchTime.now().uptimeNanoseconds
+        var phase = "factory.validate.before"
+        do {
+            factoryTrace(phase, started)
+            try await context.validate()
+            phase = "factory.validate.after"; factoryTrace(phase, started)
+            try await context.validate(preparation: plan)
+            guard plan.profile.id == context.profileID else { throw AutomationError(code: .profileNotAllowed) }
+            var expected = plan.profile
+            if plan.boundNode != nil { expected.proxyID = proxy?.id }
+            guard expected == effectiveProfile,
+                  (plan.boundNode != nil ? proxy != nil : proxy == plan.proxy) else { throw AutomationError(code: .profileNotAllowed) }
+            _ = try context.localFixtureURL()
+            try context.checkLive()
+            phase = "factory.configuration.before"; factoryTrace(phase, started)
+            let isMainThread = pthread_main_np() != 0
+            factoryTrace("factory.configuration.is_main_thread", started, isMainThread ? "true" : "false")
+            guard isMainThread else { throw AutomationError(code: .uiPolicyUnavailable) }
+            var output = try buildConfiguration(profile: effectiveProfile, proxy: proxy,
+                processLanguages: UserDefaults.standard.stringArray(forKey: "AppleLanguages") ?? [],
+                executionPolicy: .automationBackground)
+            // Keep background media admission stricter than interactive windows.
+            output.configuration.mediaTypesRequiringUserActionForPlayback = .all
+            output.report.set(.unverified("Bound local candidate; background controls not verified"), for: .dataIsolation)
+            phase = "factory.final_validate.before"; factoryTrace(phase, started)
+            try await context.validate(preparation: plan)
+            try context.checkLive()
+            phase = "factory.final_validate.after"; factoryTrace(phase, started)
+            return output
+        } catch { factoryTrace(phase, started, factoryError(error)); throw error }
+    }
+    #endif
+
     public func make(
         profile: Profile,
         proxy: ProxySettings?,
-        processLanguages: [String] = UserDefaults.standard.stringArray(forKey: "AppleLanguages") ?? []
+        processLanguages: [String] = UserDefaults.standard.stringArray(forKey: "AppleLanguages") ?? [],
+        executionPolicy: BrowserExecutionPolicy = .interactive
     ) throws -> Output {
+        try Self.requireExecutionPolicy(executionPolicy)
+        return try buildConfiguration(profile: profile, proxy: proxy, processLanguages: processLanguages, executionPolicy: executionPolicy)
+    }
+
+    private func buildConfiguration(profile: Profile, proxy: ProxySettings?, processLanguages: [String], executionPolicy: BrowserExecutionPolicy) throws -> Output {
         var report = PrivacyCapabilityReport()
         let configuration = WKWebViewConfiguration()
 
@@ -76,7 +175,7 @@ public struct WebViewConfigurationFactory {
         if let proxyID = profile.proxyID {
             guard let proxy else { throw WebViewConfigurationError.proxyNotFound(proxyID) }
             guard proxy.id == proxyID else { throw WebViewConfigurationError.proxyMismatch(expected: proxyID, got: proxy.id) }
-            let password = proxy.username == nil ? nil : try credentials.password(forKey: proxy.credentialKey)
+            let password = try Self.proxyPassword(for: proxy, credentials: credentials, executionPolicy: executionPolicy)
             try ProxyConfigurationBuilder.apply(proxy, password: password, to: store)
             report.set(
                 .active("\(proxy.kind.rawValue) \(proxy.host):\(proxy.port)（DNS/WebRTC 泄漏见 M0-3、M0-4）"),
@@ -129,7 +228,7 @@ public struct WebViewConfigurationFactory {
             for: .displayCapabilities
         )
         privacy.apply(to: configuration, for: profile, report: &report)
-        return Output(configuration: configuration, report: report)
+        return Output(configuration: configuration, report: report, executionPolicy: executionPolicy)
     }
 }
 

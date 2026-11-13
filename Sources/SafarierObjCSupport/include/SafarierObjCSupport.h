@@ -68,4 +68,45 @@ FOUNDATION_EXPORT SFRCallStatus SFRCallVoid(id target, NSString *selectorName, N
 /// 只检查参数是 block（类型编码 `@?`）；回调在 WebKit 给的线程上执行（WKWebView 的回调在主线程）。
 FOUNDATION_EXPORT SFRCallStatus SFRCallWithDataCompletion(id target, NSString *selectorName, void (^completion)(NSData * _Nullable data, NSError * _Nullable error), NSString * _Nullable * _Nullable detail);
 
+/// `-(void)<selector>(id, void (^)(id))`；只核验 block 参数编码，回调线程由目标决定。
+FOUNDATION_EXPORT SFRCallStatus SFRCallWithObjectCompletion(id target, NSString *selectorName, id argument, void (^completion)(id _Nullable object), NSString * _Nullable * _Nullable detail);
+
+/// 仅在主线程同步 operation 中提供本进程的逻辑鼠标按钮状态；其它线程继续调用原实现。
+/// 检查 +[NSEvent pressedMouseButtons] 签名，退出/异常/嵌套后恢复原 IMP。
+/// 不投递任何系统事件，不移动鼠标，不改变其它进程的鼠标或键盘状态。
+FOUNDATION_EXPORT SFRCallStatus SFRWithScopedMouseButtons(NSUInteger buttons, void (NS_NOESCAPE ^operation)(void), NSString * _Nullable * _Nullable detail);
+
+/// 在 ObjC 内完成鼠标状态范围和事件调用，NSException 不穿过 Swift 调用栈。
+/// 只接受明确的左键/移动/滚轮事件；目标仍由调用方限定在已授权页面视图。
+FOUNDATION_EXPORT SFRCallStatus SFRDispatchScopedMouseEvent(id target, id event, NSUInteger buttons, NSString * _Nullable * _Nullable detail);
+
+/// `-(void)<selector>(void (^)(void))`，核验 block 参数和 void 返回后调用。
+FOUNDATION_EXPORT SFRCallStatus SFRCallWithVoidCompletion(id target, NSString *selectorName, void (^completion)(void), NSString * _Nullable * _Nullable detail);
+
+/// 为已验证 WebKit 版本建立本进程的后台页面活动上下文，不激活 NSWindow 或系统 App。
+/// 仅已核验 WebKit 调用点在 Runner 主线程的窗口查询返回逻辑窗口；AppKit 和应用自身读取真实状态。
+/// 必须持有 lease，并在结束时调用 SFRFinishBackgroundPageActivity；释放 lease 也会恢复查询。
+FOUNDATION_EXPORT SFRCallStatus SFRBeginBackgroundPageActivity(id webView, id _Nullable __autoreleasing * _Nonnull lease, void (^ready)(void), NSString * _Nullable * _Nullable detail);
+FOUNDATION_EXPORT SFRCallStatus SFRFinishBackgroundPageActivity(id lease, void (^ready)(void), NSString * _Nullable * _Nullable detail);
+
+/// Runner 内的常驻光标写保护；主线程前台行为走原实现，后台或非主线程写入被抑制，其他进程不受影响。
+FOUNDATION_EXPORT BOOL SFRBackgroundCursorProtectionIsInstalled(void);
+FOUNDATION_EXPORT NSUInteger SFRBackgroundCursorWritesSuppressed(void);
+
+/// Install the fixed legacy and modern drag boundaries on one WKWebView subclass, on the main thread.
+/// The historical permission selector applies to every entry; gesture is installed only if inherited.
+/// No superclass implementation is replaced. Reinstallation verifies ownership and IMPs.
+FOUNDATION_EXPORT SFRCallStatus SFRInstallLegacySystemDragBoundary(Class targetClass, NSString * _Nullable * _Nullable detail);
+
+#if defined(SAFARIER_WHEEL_OBSERVER_PROBE)
+/// Observer-only private bridge returns SFRCallStatus; callbacks: 1 armed,
+/// 2 observed (not an ACK), 3 logically cancelled, 4 failure.
+FOUNDATION_EXPORT SFRCallStatus SFRWheelObserverConfigure(id configuration, NSURL *bundleURL);
+FOUNDATION_EXPORT SFRCallStatus SFRWheelObserverBegin(id webView, NSString *payload, void (^callback)(NSInteger event));
+FOUNDATION_EXPORT SFRCallStatus SFRWheelObserverCancel(id webView);
+FOUNDATION_EXPORT SFRCallStatus SFRWheelObserverDetach(id webView);
+/// Invalidates only process-local callback state; it does not claim deregistration.
+FOUNDATION_EXPORT void SFRWheelObserverAbandon(void);
+#endif
+
 NS_ASSUME_NONNULL_END

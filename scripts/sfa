@@ -1,0 +1,23 @@
+#!/bin/sh
+# Resolve only an explicitly selected bundle or the two stable installations.
+fail() {
+    printf '%s\n' "$1" '请设置 SF_APP 为实际 App 路径，例如：SF_APP="$HOME/Applications/Safarier AI.app" sfa --help' >&2
+    exit 1
+}
+
+if [ -n "${SF_APP:-}" ]; then
+    app="$SF_APP"
+elif [ -e "$HOME/Applications/Safarier AI.app" ] || [ -L "$HOME/Applications/Safarier AI.app" ]; then
+    app="$HOME/Applications/Safarier AI.app"
+else
+    app="$HOME/Applications/Safarier.app"
+fi
+[ -d "$app" ] && [ ! -L "$app" ] || fail '找不到实际 Safarier App 目录。'
+app=$(CDPATH= cd -P -- "$app" && pwd -P) || fail '无法读取 App 路径。'
+plist="$app/Contents/Info.plist"
+[ -f "$plist" ] && [ ! -L "$plist" ] || fail 'App 缺少有效 Info.plist。'
+leaf=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist" 2>/dev/null) || fail '无法读取 CFBundleExecutable。'
+case "$leaf" in ''|.|..|*/*) fail 'App 可执行文件名无效。' ;; esac
+binary="$app/Contents/MacOS/$leaf"
+[ -f "$binary" ] && [ -x "$binary" ] && [ ! -L "$binary" ] || fail 'App 可执行文件不存在或不可执行。'
+exec "$binary" "$@"

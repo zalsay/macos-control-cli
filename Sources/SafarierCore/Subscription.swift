@@ -1,6 +1,6 @@
 import Foundation
 
-/// Protocols understood by the subscription parser and sing-box bridge.
+/// Protocols understood by the subscription parser and the proxy cores.
 public enum SubscriptionNodeType: String, Codable, Sendable, CaseIterable {
     case vless
     case vmess
@@ -8,6 +8,8 @@ public enum SubscriptionNodeType: String, Codable, Sendable, CaseIterable {
     case shadowsocks
     case socks
     case anytls
+    /// 只出现在 Clash 订阅里，由 mihomo 后端运行。
+    case hysteria2
 }
 
 /// A proxy node cached from a subscription.
@@ -31,6 +33,9 @@ public struct SubscriptionNode: Codable, Equatable, Identifiable, Sendable {
     public var alterID: Int?
     /// Protocol-specific values retained from the URI query string.
     public var parameters: [String: String]
+    /// mihomo 后端的节点：订阅里原样保留的 Clash 代理条目。节点自己在第一个，之后是它经 `dialer-proxy` 依赖的上游，
+    /// 一直到没有上游为止。nil 表示 sing-box 后端（URI 节点）。
+    public var mihomoProxies: [JSONValue]?
 
     public init(
         id: UUID = UUID(),
@@ -49,7 +54,8 @@ public struct SubscriptionNode: Codable, Equatable, Identifiable, Sendable {
         transportHost: String? = nil,
         flow: String? = nil,
         alterID: Int? = nil,
-        parameters: [String: String] = [:]
+        parameters: [String: String] = [:],
+        mihomoProxies: [JSONValue]? = nil
     ) {
         self.id = id
         self.name = name
@@ -68,11 +74,18 @@ public struct SubscriptionNode: Codable, Equatable, Identifiable, Sendable {
         self.flow = flow
         self.alterID = alterID
         self.parameters = parameters
+        self.mihomoProxies = mihomoProxies
     }
 
     public func validate() throws {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw SubscriptionNodeValidationError.emptyName }
+        if let mihomoProxies {
+            // 配置里要有节点自己的条目，否则 mihomo 的 select 组会指向不存在的代理。
+            guard mihomoProxies.contains(where: { $0["name"]?.stringValue == name }) else {
+                throw SubscriptionNodeValidationError.invalidProxyChain
+            }
+        }
         guard !server.isEmpty, !server.contains(where: { $0.isWhitespace }), !server.contains("/") else {
             throw SubscriptionNodeValidationError.invalidServer(server)
         }
@@ -82,7 +95,7 @@ public struct SubscriptionNode: Codable, Equatable, Identifiable, Sendable {
         switch type {
         case .vless, .vmess:
             guard let uuid, !uuid.isEmpty else { throw SubscriptionNodeValidationError.missingIdentity }
-        case .trojan, .anytls:
+        case .trojan, .anytls, .hysteria2:
             guard let password, !password.isEmpty else { throw SubscriptionNodeValidationError.missingCredential }
         case .socks:
             // 用户名、密码都可以没有（无认证）；只给密码没给用户名的 SOCKS5 认证不成立。
@@ -106,6 +119,8 @@ public enum SubscriptionNodeValidationError: Error, Equatable {
     case invalidPort(Int)
     case missingIdentity
     case missingCredential
+    /// mihomo 节点的条目里找不到节点自己（配置被改坏或解析不完整）。
+    case invalidProxyChain
 }
 
 /// A subscription and its last successfully parsed node cache.

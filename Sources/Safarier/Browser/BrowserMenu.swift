@@ -10,14 +10,14 @@ enum BrowserMenu {
     static func make() -> NSMenu {
         let main = NSMenu()
 
-        main.addItem(submenu("Safarier", [
-            item("关于 Safarier", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+        main.addItem(submenu("Safarier AI Browser", [
+            item("关于 Safarier AI Browser", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
-            item("隐藏 Safarier", #selector(NSApplication.hide(_:)), "h"),
+            item("隐藏 Safarier AI Browser", #selector(NSApplication.hide(_:)), "h"),
             item("隐藏其他", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
             item("全部显示", #selector(NSApplication.unhideAllApplications(_:))),
             .separator(),
-            item("退出 Safarier", #selector(NSApplication.terminate(_:)), "q"),
+            item("退出 Safarier AI Browser", #selector(NSApplication.terminate(_:)), "q"),
         ]))
 
         main.addItem(submenu("文件", [
@@ -44,6 +44,9 @@ enum BrowserMenu {
             item("拷贝", #selector(NSText.copy(_:)), "c"),
             item("粘贴", #selector(NSText.paste(_:)), "v"),
             item("全选", #selector(NSText.selectAll(_:)), "a"),
+            .separator(),
+            item("自动填写表单", #selector(BrowserActions.autofillCurrentPage(_:)), "f", [.command, .option]),
+            item("已保存密码…", #selector(BrowserActions.showSavedPasswords(_:)), "p", [.command, .option]),
             .separator(),
             item("查找…", #selector(BrowserActions.showFind(_:)), "f"),
             item("查找下一个", #selector(BrowserActions.findNextMatch(_:)), "g"),
@@ -74,11 +77,18 @@ enum BrowserMenu {
         main.addItem(submenu("历史记录", [
             item("后退", #selector(BrowserActions.goBack(_:)), "["),
             hidden(item("后退", #selector(BrowserActions.goBack(_:)), leftArrow)),
+            hidden(item("后退", #selector(BrowserActions.goBack(_:)), leftArrow, .option)),
             item("前进", #selector(BrowserActions.goForward(_:)), "]"),
             hidden(item("前进", #selector(BrowserActions.goForward(_:)), rightArrow)),
+            hidden(item("前进", #selector(BrowserActions.goForward(_:)), rightArrow, .option)),
             item("起始页面", #selector(BrowserActions.goHome(_:)), "h", [.command, .shift]),
             .separator(),
             item("重新打开上次关闭的标签页", #selector(BrowserActions.reopenClosedTab(_:))),
+        ]))
+
+        main.addItem(submenu("书签", [
+            item("显示收藏夹列表", #selector(BrowserActions.showBookmarksList(_:)), "b", [.command, .option]),
+            item("添加书签…", #selector(BrowserActions.addBookmark(_:)), "d"),
         ]))
 
         main.addItem(submenu("开发", [
@@ -181,6 +191,10 @@ enum BrowserMenu {
     @objc optional func goBack(_ sender: Any?)
     @objc optional func goForward(_ sender: Any?)
     @objc optional func goHome(_ sender: Any?)
+    @objc optional func autofillCurrentPage(_ sender: Any?)
+    @objc optional func showSavedPasswords(_ sender: Any?)
+    @objc optional func showBookmarksList(_ sender: Any?)
+    @objc optional func addBookmark(_ sender: Any?)
     @objc optional func copyPageURL(_ sender: Any?)
     @objc optional func showWebInspector(_ sender: Any?)
     @objc optional func showJavaScriptConsole(_ sender: Any?)

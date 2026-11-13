@@ -29,18 +29,30 @@ final class ManagerModel: ObservableObject {
     enum Selection: Hashable {
         case profile(UUID)
         case subscription(UUID)
+        case dshWeb
+    }
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case profiles = "profiles"
+        case subscriptions = "subscriptions"
+        case dsh = "dsh"
+        case settings = "settings"
+
+        var id: String { rawValue }
     }
 
     enum Sheet: Identifiable {
         case newProfile
         case editProfile(Profile)
         case newSubscription
+        case jevConfig
 
         var id: String {
             switch self {
             case .newProfile: return "new-profile"
             case .editProfile(let profile): return "edit-\(profile.id.uuidString)"
             case .newSubscription: return "new-subscription"
+            case .jevConfig: return "jev-config"
             }
         }
     }
@@ -68,7 +80,28 @@ final class ManagerModel: ObservableObject {
     @Published private(set) var refreshing: Set<UUID> = []
     /// 正在清理网站数据的 profile。
     @Published private(set) var purging: Set<UUID> = []
-    @Published var selection: Selection?
+    /// 节点的测速结果缓存 (node.id -> NodeSpeedResult)
+    @Published public private(set) var nodeSpeeds: [UUID: NodeSpeedResult] = [:]
+    /// 正在测速的单个节点 ID 集合
+    @Published public private(set) var testingNodeIDs: Set<UUID> = []
+    /// 正在进行批量测速的订阅 ID 集合
+    @Published public private(set) var batchTestingSubscriptionIDs: Set<UUID> = []
+    private var batchTestTasks: [UUID: Task<Void, Never>] = [:]
+    @Published var selectedTab: Tab = .profiles
+    @Published var selection: Selection? {
+        didSet {
+            switch selection {
+            case .profile:
+                if selectedTab != .profiles { selectedTab = .profiles }
+            case .subscription:
+                if selectedTab != .subscriptions { selectedTab = .subscriptions }
+            case .dshWeb:
+                if selectedTab != .dsh { selectedTab = .dsh }
+            case nil:
+                break
+            }
+        }
+    }
     @Published var sheet: Sheet?
     @Published var confirmation: Confirmation?
     @Published var message: Message?
@@ -79,14 +112,43 @@ final class ManagerModel: ObservableObject {
     init(workspace: SafarierWorkspace) {
         self.workspace = workspace
         reload()
-        selection = profiles.first.map { .profile($0.id) } ?? subscriptions.first.map { .subscription($0.id) }
+        if let firstProfile = profiles.first {
+            selection = .profile(firstProfile.id)
+            selectedTab = .profiles
+        } else if let firstSub = subscriptions.first {
+            selection = .subscription(firstSub.id)
+            selectedTab = .subscriptions
+        } else {
+            selectedTab = .profiles
+        }
+    }
+
+    func switchTab(_ tab: Tab) {
+        selectedTab = tab
+        switch tab {
+        case .profiles:
+            if case .profile = selection {} else {
+                selection = profiles.first.map { .profile($0.id) }
+            }
+        case .subscriptions:
+            if case .subscription = selection {} else {
+                selection = subscriptions.first.map { .subscription($0.id) }
+            }
+        case .dsh:
+            selection = .dshWeb
+        case .settings:
+            break
+        }
     }
 
     // MARK: - 读取
 
     func reload() {
         do {
-            let profiles = try workspace.profiles.all()
+            let profiles: [Profile]
+            do { profiles = try workspace.profiles.all() }
+            catch { ManagerAutomationHooks.profilePermissionsChanged?([]); throw error }
+            ManagerAutomationHooks.profilePermissionsChanged?(Set(profiles.filter(\.allowsAgentAccess).map(\.id)))
             let proxies = try workspace.proxies.all()
             let subscriptions = try workspace.subscriptions.all()
             if profiles != self.profiles { self.profiles = profiles }
@@ -163,11 +225,15 @@ final class ManagerModel: ObservableObject {
 
     func launch(_ profile: Profile) {
         guard runState(profile.id) == .stopped else { return }
-        // Runner 找不到 sing-box 也会失败退出，这里先拦下来，提示更直接。
-        let singbox = SingboxProcessManager.defaultExecutableURL
-        if profile.subscriptionID != nil, !FileManager.default.isExecutableFile(atPath: singbox.path) {
-            report("无法启动「\(profile.name)」", SingboxProcessError.executableNotFound(singbox))
-            return
+        // Runner 找不到节点对应的代理内核（sing-box 或 mihomo）也会失败退出，这里先拦下来，提示更直接。
+        if profile.subscriptionID != nil {
+            var engine = ProxyCoreEngine.singbox
+            if case .node(_, let node) = proxyBinding(for: profile) { engine = node.proxyEngine }
+            let executable = engine.defaultExecutableURL
+            if !FileManager.default.isExecutableFile(atPath: executable.path) {
+                report("无法启动「\(profile.name)」", SingboxProcessError.executableNotFound(executable))
+                return
+            }
         }
         let logURL = workspace.runnerLogURL(for: profile.id)
         let logOffset = (try? FileManager.default.attributesOfItem(atPath: logURL.path)[.size] as? UInt64) ?? 0
@@ -177,7 +243,15 @@ final class ManagerModel: ObservableObject {
             }
         }
         do {
+            #if SAFARIER_BOUND_LOCAL_CANDIDATE
+            if let launch = ManagerAutomationHooks.launchRegisteredInteractive {
+                try launch(profile, spawner)
+            } else {
+                try workspace.launch(profile, launcher: RunnerLauncher(spawner: spawner, logDirectory: workspace.logsDirectory))
+            }
+            #else
             try workspace.launch(profile, launcher: RunnerLauncher(spawner: spawner, logDirectory: workspace.logsDirectory))
+            #endif
             starting.insert(profile.id)
             // 进程活着却一直没拿到锁（卡住）时，别让按钮永远停在"正在启动"。
             Task { [weak self] in
@@ -230,6 +304,9 @@ final class ManagerModel: ObservableObject {
         } else {
             try workspace.profiles.update(profile)
         }
+        // Re-read persisted permissions before a later reload can fail on unrelated data.
+        let persisted = try? workspace.profiles.all()
+        ManagerAutomationHooks.profilePermissionsChanged?(Set((persisted ?? []).filter(\.allowsAgentAccess).map(\.id)))
         reload()
         selection = .profile(profile.id)
     }
@@ -260,9 +337,15 @@ final class ManagerModel: ObservableObject {
                     defer { purging.remove(profile.id) }
                     try await DataStoreManager().removePersistentData(for: profile.id)
                 }
-                try workspace.profiles.delete(id: profile.id)
+                _ = try BookmarkStore(workspace: workspace, profileID: profile.id).deleteProfile {
+                    try workspace.profiles.delete(id: profile.id)
+                }
                 workspace.removeRunnerArtifacts(for: profile.id)
                 reload()
+            } catch BookmarkStore.Error.profileDeletedCleanupFailed {
+                workspace.removeRunnerArtifacts(for: profile.id)
+                reload()
+                message = Message(title: "环境已删除，收藏清理未完成", detail: BookmarkStore.Error.profileDeletedCleanupFailed.localizedDescription)
             } catch {
                 report("删除「\(profile.name)」失败", error)
             }
@@ -308,7 +391,7 @@ final class ManagerModel: ObservableObject {
         }
         reload()
         selection = .subscription(subscription.id)
-        if result.skippedCount > 0 {
+        if result.hasNotices {
             message = Message(title: "已添加「\(name)」", detail: DisplayText.importSummary(result))
         }
     }
@@ -324,7 +407,8 @@ final class ManagerModel: ObservableObject {
         Task {
             defer { refreshing.remove(subscription.id) }
             do {
-                let nodes = try await SubscriptionFetcher().fetch(from: subscription.url)
+                let result = try await SubscriptionFetcher().fetchResult(from: subscription.url)
+                let nodes = result.nodes
                 // 拉取期间记录可能在别处被改动或删除：以文件里的最新记录为准，只换节点。
                 guard var latest = try workspace.subscriptions.record(id: subscription.id) else { return }
                 // 订阅这次返回的内容里没有节点（服务器偶尔返回空内容）：不拿空列表覆盖已有节点，否则绑定它们的环境全部失效。
@@ -336,6 +420,9 @@ final class ManagerModel: ObservableObject {
                 latest.updatedAt = Date()
                 try workspace.subscriptions.update(latest)
                 reload()
+                if result.hasNotices {
+                    message = Message(title: "已刷新「\(subscription.name)」", detail: DisplayText.importSummary(result))
+                }
             } catch {
                 report("刷新「\(subscription.name)」失败", error)
             }
@@ -344,6 +431,65 @@ final class ManagerModel: ObservableObject {
 
     func refreshAllSubscriptions() {
         subscriptions.forEach(refresh)
+    }
+
+    // MARK: - 节点测速
+
+    /// 单个节点测速
+    func testSpeed(node: SubscriptionNode) {
+        let nodeID = node.id
+        guard !testingNodeIDs.contains(nodeID) else { return }
+        testingNodeIDs.insert(nodeID)
+        Task {
+            let result = await NodeSpeedTester.test(node: node)
+            self.nodeSpeeds[nodeID] = result
+            self.testingNodeIDs.remove(nodeID)
+        }
+    }
+
+    /// 一键测速订阅内的所有节点（受控并发）
+    func testAllSpeed(subscription: Subscription) {
+        let subID = subscription.id
+        guard !batchTestingSubscriptionIDs.contains(subID) else { return }
+        batchTestingSubscriptionIDs.insert(subID)
+
+        let nodes = subscription.nodes
+        for node in nodes {
+            testingNodeIDs.insert(node.id)
+        }
+
+        let task = Task { [weak self] in
+            _ = await NodeSpeedTester.testBatch(nodes: nodes, maxConcurrent: 12) { [weak self] nodeID, result in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.nodeSpeeds[nodeID] = result
+                    self.testingNodeIDs.remove(nodeID)
+                }
+            }
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.batchTestingSubscriptionIDs.remove(subID)
+                self.batchTestTasks.removeValue(forKey: subID)
+                for node in nodes {
+                    self.testingNodeIDs.remove(node.id)
+                }
+            }
+        }
+        batchTestTasks[subID] = task
+    }
+
+    /// 取消某订阅的批量测速
+    func cancelBatchSpeedTest(subscriptionID: UUID) {
+        if let task = batchTestTasks.removeValue(forKey: subscriptionID) {
+            task.cancel()
+        }
+        batchTestingSubscriptionIDs.remove(subscriptionID)
+        if let sub = subscriptions.first(where: { $0.id == subscriptionID }) {
+            for node in sub.nodes {
+                testingNodeIDs.remove(node.id)
+            }
+        }
     }
 
     func delete(_ subscription: Subscription) {
@@ -364,7 +510,7 @@ final class ManagerModel: ObservableObject {
         }
     }
 
-    private func report(_ title: String, _ error: Error) {
+    func report(_ title: String, _ error: Error) {
         message = Message(title: title, detail: DisplayText.describe(error))
     }
 }

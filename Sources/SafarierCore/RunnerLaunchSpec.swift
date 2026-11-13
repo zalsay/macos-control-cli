@@ -14,6 +14,13 @@ public struct RunnerLaunchSpec: Equatable, Sendable {
     public var timeZoneIdentifier: String?
     /// 探针模式：不显示窗口，加载页面后把能力报告和页面观测值以 JSON 打到 stdout 再退出。
     public var probe: Bool
+    public var backgroundAutomation: Bool
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+    /// Requests only the private registration transport, never control authority.
+    public var registeredInteractive = false
+    /// Presentation hint only; does not grant registration or control authority.
+    public var nonActivatingPresentation = false
+    #endif
     /// 只对这一次运行覆盖 profile.spi（例如探针做开/关对比）；nil 表示沿用 profile 的设置。
     public var spiOverride: SPIFeatures?
 
@@ -23,13 +30,15 @@ public struct RunnerLaunchSpec: Equatable, Sendable {
         languages: [String] = [],
         timeZoneIdentifier: String? = nil,
         probe: Bool = false,
-        spiOverride: SPIFeatures? = nil
+        spiOverride: SPIFeatures? = nil,
+        backgroundAutomation: Bool = false
     ) {
         self.profileID = profileID
         self.startURL = startURL
         self.languages = languages
         self.timeZoneIdentifier = timeZoneIdentifier
         self.probe = probe
+        self.backgroundAutomation = backgroundAutomation
         self.spiOverride = spiOverride
     }
 
@@ -42,6 +51,11 @@ public struct RunnerLaunchSpec: Equatable, Sendable {
         if probe {
             args.append("--probe")
         }
+        if backgroundAutomation { args.append("--background-automation") }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredInteractive { args.append("--registered-interactive") }
+        if nonActivatingPresentation { args.append("--non-activating-presentation") }
+        #endif
         if let spiOverride {
             args += ["--spi", spiOverride.description]
         }
@@ -71,6 +85,11 @@ public struct RunnerLaunchSpec: Equatable, Sendable {
         var startURL: URL?
         var languages: [String] = []
         var probe = false
+        var backgroundAutomation = false
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        var registeredInteractive = false
+        var nonActivatingPresentation = false
+        #endif
         var spiOverride: SPIFeatures?
 
         var index = 1
@@ -91,6 +110,16 @@ public struct RunnerLaunchSpec: Equatable, Sendable {
                 let raw = try value(after: arg)
                 guard let url = URL(string: raw), url.scheme != nil else { throw RunnerLaunchSpecError.invalidURL(raw) }
                 startURL = url
+            case "--background-automation":
+                backgroundAutomation = true
+            #if SAFARIER_BOUND_LOCAL_CANDIDATE
+            case "--registered-interactive":
+                guard !registeredInteractive else { throw RunnerLaunchSpecError.incompatibleModes }
+                registeredInteractive = true
+            case "--non-activating-presentation":
+                guard !nonActivatingPresentation else { throw RunnerLaunchSpecError.incompatibleModes }
+                nonActivatingPresentation = true
+            #endif
             case "--probe":
                 probe = true
             case "--spi":
@@ -113,15 +142,26 @@ public struct RunnerLaunchSpec: Equatable, Sendable {
         }
 
         guard let profileID else { throw RunnerLaunchSpecError.missingProfileID }
+        guard !(probe && backgroundAutomation) else { throw RunnerLaunchSpecError.incompatibleModes }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        guard !registeredInteractive || (!probe && !backgroundAutomation) else { throw RunnerLaunchSpecError.incompatibleModes }
+        guard !nonActivatingPresentation || (registeredInteractive && !probe && !backgroundAutomation) else { throw RunnerLaunchSpecError.incompatibleModes }
+        #endif
         let tz = environment["TZ"].flatMap { $0.isEmpty ? nil : $0 }
-        return RunnerLaunchSpec(
+        var spec = RunnerLaunchSpec(
             profileID: profileID,
             startURL: startURL,
             languages: languages,
             timeZoneIdentifier: tz,
             probe: probe,
-            spiOverride: spiOverride
+            spiOverride: spiOverride,
+            backgroundAutomation: backgroundAutomation
         )
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        spec.registeredInteractive = registeredInteractive
+        spec.nonActivatingPresentation = nonActivatingPresentation
+        #endif
+        return spec
     }
 
     /// 去掉已有的 `-AppleLanguages <值>`，换成新的语言。语言跟随代理时 Runner 用它重新启动自己。
@@ -153,6 +193,7 @@ public struct RunnerLaunchSpec: Equatable, Sendable {
 }
 
 public enum RunnerLaunchSpecError: Error, Equatable {
+    case incompatibleModes
     case missingSubcommand
     case missingProfileID
     case invalidProfileID(String)

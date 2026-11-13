@@ -70,6 +70,7 @@ final class ProfileTests: XCTestCase {
         XCTAssertEqual(profile.spi, [], "旧记录没有 spi 字段时保持关闭，不因默认值变化而改变已有环境")
         XCTAssertFalse(profile.followProxyLanguages)
         XCTAssertFalse(profile.followProxyTimeZone)
+        XCTAssertTrue(profile.allowsAgentAccess)
     }
 
     func testFollowProxyFieldsRoundTrip() throws {
@@ -145,4 +146,21 @@ final class ProfileTests: XCTestCase {
         let decoded = try JSONDecoder().decode(Profile.self, from: data)
         XCTAssertEqual(decoded, profile)
     }
+    func testAutomationPermissionLegacyRoundTripAndDuplicate() throws {
+        let legacy = Data(#"{"id":"11111111-2222-3333-4444-555555555555","name":"legacy","mode":"persistent","createdAt":0}"#.utf8)
+        var profile = try JSONDecoder().decode(Profile.self, from: legacy)
+        XCTAssertFalse(profile.allowsBackgroundAutomation)
+        profile.allowsBackgroundAutomation = true
+        XCTAssertTrue(try JSONDecoder().decode(Profile.self, from: JSONEncoder().encode(profile)).allowsBackgroundAutomation)
+        XCTAssertFalse(profile.duplicated(name: "copy").allowsBackgroundAutomation)
+    }
+
+    func testAgentPermissionRoundTripAndDuplicate() throws {
+        var profile = Profile(name: "fixture", mode: .persistent, allowsBackgroundAutomation: false)
+        XCTAssertTrue(profile.allowsAgentAccess)
+        profile.allowsAgentAccess = false
+        XCTAssertFalse(try JSONDecoder().decode(Profile.self, from: JSONEncoder().encode(profile)).allowsAgentAccess)
+        XCTAssertFalse(profile.duplicated(name: "copy").allowsAgentAccess)
+    }
+
 }

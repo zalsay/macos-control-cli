@@ -97,3 +97,15 @@ final class WorkspaceLaunchTests: XCTestCase {
         XCTAssertEqual(result, ProcessExit(pid: pid, status: 3, uncaughtSignal: false))
     }
 }
+
+extension WorkspaceLaunchTests {
+    func testBackgroundIgnoresLegacyFlagButStillRequiresOwnedTransport() throws {
+        let profile = Profile(name: "fixture", mode: .persistent, startURL: URL(string: "https://example.com"))
+        let spawner = RecordingSpawner()
+        let pair = try AutomationChannel.makePair()
+        defer { pair.parent.close(); try? pair.child.close() }
+        XCTAssertEqual(workspace.runnerSpec(for: profile, backgroundAutomation: true).startURL, URL(string: "about:blank"))
+        XCTAssertThrowsError(try workspace.launch(profile, launcher: launcher(spawner), backgroundAutomation: true, controlInput: pair.child)) { XCTAssertEqual($0 as? ControlledLaunchError, .unsupportedControlledInput) }
+        XCTAssertTrue(spawner.calls.isEmpty)
+    }
+}

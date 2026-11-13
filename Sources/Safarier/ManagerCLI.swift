@@ -8,6 +8,7 @@ import SafarierWebKit
 enum ManagerCLI {
     static let usage = """
     用法：
+      safarier authorize [--request]
       safarier profile list
       safarier profile create --name NAME [--mode persistent|ephemeral] [--lang proxy|system|en-US,en] [--tz proxy|system|America/Los_Angeles] [--url https://example.com] [--proxy PROXY_ID | --sub SUBSCRIPTION_ID --node NODE_NAME] [--device MODEL] [--notes TEXT] [--spi default|none|all|afp,tz,webrtc,safari,webgpu,fontlist]
       safarier profile update PROFILE_ID [--name NAME] [--lang proxy|system|en-US,en] [--tz proxy|system|ZONE] [--url URL|none] [--proxy PROXY_ID|none | --sub SUBSCRIPTION_ID --node NODE_NAME | --node none] [--device MODEL|none] [--notes TEXT] [--spi default|none|all|afp,tz,webrtc,safari,webgpu,fontlist]
@@ -23,6 +24,7 @@ enum ManagerCLI {
       safarier device list
       safarier launch PROFILE_ID [--url URL] [--spi LIST]
       safarier probe PROFILE_ID [--url URL] [--spi LIST]
+    authorize：默认仅查询 AppleEvents 权限；--request 才允许系统询问。不启动 App 或发送业务事件。
     --sub/--node：出站走订阅里的节点（按节点名匹配，名字带空格时加引号）；启动时自动起 sing-box 转成本地 SOCKS5。
            和 --proxy 二选一：设了一个就清掉另一个。
     --lang/--tz：proxy（或 auto）= 跟随代理，每次启动按代理出口 IP 的国家自动设置；system（或 none）= 跟随系统；
@@ -41,6 +43,24 @@ enum ManagerCLI {
     """
 
     static func run(_ arguments: [String]) -> Int32 {
+        if arguments.first == "authorize" { return authorize(Array(arguments.dropFirst())) }
+        if arguments.first == "control" { return ControlCLI.run(arguments) }
+        #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
+        if arguments.first == "workspace" {
+            guard arguments == ["workspace", "migrate", "--confirm-old-versions-stopped-and-will-not-reopen"] else {
+                printError("请先退出所有旧版 Manager、Runner、CLI，并确保以后不再打开旧版；确认后运行 workspace migrate --confirm-old-versions-stopped-and-will-not-reopen。")
+                return 64
+            }
+            do {
+                try FileManager.migrateDefaultInternalTestWorkspace(confirmed: true)
+                print("工作区已迁移到 Safarier AI。请勿再次打开旧版。")
+                return 0
+            } catch {
+                printError("迁移失败：\(error)")
+                return 1
+            }
+        }
+        #endif
         do {
             let workspace = try SafarierWorkspace.default()
             switch (arguments.first, arguments.dropFirst().first) {
@@ -66,6 +86,9 @@ enum ManagerCLI {
                 printError("未知命令：\(arguments.joined(separator: " "))\n\(usage)")
                 return 64
             }
+        } catch BookmarkStore.Error.profileDeletedCleanupFailed {
+            printError(BookmarkStore.Error.profileDeletedCleanupFailed.localizedDescription)
+            return 1
         } catch let error as CLIError {
             printError(error.message)
             return 64
@@ -73,6 +96,25 @@ enum ManagerCLI {
             printError("失败：\(error)")
             return 1
         }
+    }
+
+    private static func authorize(_ arguments: [String]) -> Int32 {
+        let request: Bool
+        do { request = try ControlAuthorization.parse(arguments) }
+        catch { printError("用法：sfa authorize [--request]"); return 64 }
+        var reply = ControlAuthorization.Reply(status: "unavailable", osStatus: nil)
+        do {
+            try waitForMainActorTask {
+                // The launcher execs this real bundle; never select a different app here.
+                let client = try ControlAppleEventClient(applicationPath: Bundle.main.bundleURL.path)
+                reply = await client.authorization(request: request)
+            }
+        } catch {
+            // Identity capture failed before the permission API; do not invent an OSStatus.
+        }
+        do { print(String(decoding: try reply.jsonData(), as: UTF8.self)) }
+        catch { return 1 }
+        return reply.status == "allowed" ? 0 : 1
     }
 
     // MARK: - profile
@@ -258,7 +300,9 @@ enum ManagerCLI {
                 try await DataStoreManager().removePersistentData(for: id)
             }
         }
-        try workspace.profiles.delete(id: id)
+        _ = try BookmarkStore(workspace: workspace, profileID: id).deleteProfile {
+            try workspace.profiles.delete(id: id)
+        }
         workspace.removeRunnerArtifacts(for: id)
         print(purge ? "已删除 \(profile.name)，并清除了它的网站数据" : "已删除 \(profile.name)")
         return 0
@@ -369,7 +413,7 @@ enum ManagerCLI {
             throw error
         }
         print("\(subscription.id.uuidString) (\(result.nodes.count) nodes)")
-        if result.skippedCount > 0 { print(DisplayText.importSummary(result)) }
+        if result.hasNotices { print(DisplayText.importSummary(result)) }
         return 0
     }
 
@@ -399,7 +443,7 @@ enum ManagerCLI {
             subscription.updatedAt = Date()
             try workspace.subscriptions.update(subscription)
             updated += 1
-            print("已更新 \(subscription.name)：\(result.nodes.count) nodes" + (result.skippedCount > 0 ? "（\(DisplayText.importSummary(result))）" : ""))
+            print("已更新 \(subscription.name)：\(result.nodes.count) nodes" + (result.hasNotices ? "（\(DisplayText.importSummary(result))）" : ""))
         }
         if subscriptions.isEmpty { print("（空）") }
         return updated == 0 && !subscriptions.isEmpty ? 1 : 0
@@ -439,9 +483,26 @@ enum ManagerCLI {
         if probe {
             return try runProbe(workspace.runnerSpec(for: profile, url: url, probe: true, spiOverride: spiOverride))
         }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        let request = AutomationRequest(version: 1, requestID: UUID(), sessionID: nil,
+                                        action: .launchInteractive(profileID: id, url: url, spi: spiOverride?.description))
+        try waitForMainActorTask {
+            let manager = try ControlAppleEventClient(applicationPath: Bundle.main.bundleURL.path)
+            let reply = try await manager.send(request)
+            guard reply.requestID == request.requestID else { throw CLIError("Manager 启动结果无法确认") }
+            switch reply.outcome {
+            case .success(.interactiveLaunched(let returned)) where returned == id:
+                print("已请求 Manager 启动 \(profile.name)，日志 \(workspace.runnerLogURL(for: id).path)")
+            case .failure(let error): throw CLIError("Manager 启动失败：\(error.code.rawValue)")
+            default: throw CLIError("Manager 启动结果无法确认")
+            }
+        }
+        return 0
+        #else
         let pid = try workspace.launch(profile, url: url, spiOverride: spiOverride)
         print("已启动 \(profile.name)，pid \(pid)，日志 \(workspace.runnerLogURL(for: profile.id).path)")
         return 0
+        #endif
     }
 
     /// 探针要等结果，所以直接起子进程并转发它的 stdout/stderr。

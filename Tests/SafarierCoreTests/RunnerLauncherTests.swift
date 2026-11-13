@@ -35,3 +35,49 @@ final class RunnerLauncherTests: XCTestCase {
         XCTAssertEqual(call.logURL?.lastPathComponent, "\(spec.profileID.uuidString).log")
     }
 }
+
+extension RunnerLauncherTests {
+    func testOldSpawnerDoesNotDiscardControlledInput() throws {
+        let spawner = RecordingSpawner()
+        let launcher = RunnerLauncher(spawner: spawner)
+        let pair = try AutomationChannel.makePair()
+        defer { pair.parent.close(); try? pair.child.close() }
+        let spec = RunnerLaunchSpec(profileID: UUID(), startURL: URL(string: "about:blank"), backgroundAutomation: true)
+        XCTAssertThrowsError(try launcher.launch(spec, controlInput: pair.child)) { XCTAssertEqual($0 as? ControlledLaunchError, .unsupportedControlledInput) }
+        XCTAssertTrue(spawner.calls.isEmpty)
+    }
+}
+
+#if SAFARIER_BOUND_LOCAL_CANDIDATE
+extension RunnerLauncherTests {
+    func testRegisteredInteractiveLaunchFailsClosedWithoutOwnedTransport() throws {
+        let spawner = RecordingSpawner()
+        let launcher = RunnerLauncher(spawner: spawner)
+        let pair = try AutomationChannel.makePair()
+        defer { pair.parent.close(); try? pair.child.close() }
+        let normal = RunnerLaunchSpec(profileID: UUID())
+        XCTAssertThrowsError(try launcher.launchOwnedInteractive(normal, registrationInput: pair.child)) {
+            XCTAssertEqual($0 as? ControlledLaunchError, .unsupportedOwnedProcess)
+        }
+        var probe = normal
+        probe.probe = true
+        XCTAssertThrowsError(try launcher.launchOwnedInteractive(probe, registrationInput: pair.child)) {
+            XCTAssertEqual($0 as? ControlledLaunchError, .incompatibleMode)
+        }
+        XCTAssertThrowsError(try launcher.launchOwnedInteractive(normal, registrationInput: .nullDevice))
+        XCTAssertTrue(spawner.calls.isEmpty)
+    }
+
+    func testRegisteredLaunchMarkerSurvivesLanguageRelaunch() throws {
+        var spec = RunnerLaunchSpec(profileID: UUID(), startURL: URL(string: "https://example.com"))
+        spec.registeredInteractive = true
+        XCTAssertEqual(try RunnerLaunchSpec.parse(spec.arguments()), spec)
+        let relaunched = RunnerLaunchSpec.replacingAppleLanguages(["en-US"], in: spec.arguments())
+        let parsed = try RunnerLaunchSpec.parse(relaunched)
+        XCTAssertTrue(parsed.registeredInteractive)
+        XCTAssertEqual(parsed.languages, ["en-US"])
+        XCTAssertThrowsError(try RunnerLaunchSpec.parse(spec.arguments() + ["--probe"]))
+        XCTAssertThrowsError(try RunnerLaunchSpec.parse(spec.arguments() + ["--registered-interactive"]))
+    }
+}
+#endif

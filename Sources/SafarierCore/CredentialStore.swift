@@ -1,12 +1,20 @@
 import Foundation
 import Security
+import LocalAuthentication
 
 /// 凭据（代理密码等）存储抽象。绝不把密码写进元数据文件。
 public protocol CredentialStore: Sendable {
     func password(forKey key: String) throws -> String?
+    func passwordWithoutInteraction(forKey key: String) throws -> String?
     func setPassword(_ password: String, forKey key: String) throws
     /// key 不存在时不报错。
     func removePassword(forKey key: String) throws
+}
+
+public extension CredentialStore {
+    func passwordWithoutInteraction(forKey key: String) throws -> String? {
+        throw CredentialStoreError.interactionRequired
+    }
 }
 
 /// 仅用于测试：内存字典，不接触系统 Keychain。
@@ -20,6 +28,10 @@ public final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable
         lock.lock()
         defer { lock.unlock() }
         return storage[key]
+    }
+
+    public func passwordWithoutInteraction(forKey key: String) throws -> String? {
+        try password(forKey: key)
     }
 
     public func setPassword(_ password: String, forKey key: String) throws {
@@ -38,9 +50,28 @@ public final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable
 /// 基于 macOS Keychain 的 generic password 实现。
 public struct KeychainCredentialStore: CredentialStore {
     private let service: String
+    private let nonInteractiveRead: @Sendable (CFDictionary) -> (OSStatus, CFTypeRef?)
 
-    public init(service: String = "app.safarier.proxy") {
+    public static var defaultService: String {
+        #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
+        return "app.safarier.testing.proxy"
+        #else
+        return "app.safarier.proxy"
+        #endif
+    }
+
+    public init(service: String = KeychainCredentialStore.defaultService) {
         self.service = service
+        self.nonInteractiveRead = { query in
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query, &item)
+            return (status, item)
+        }
+    }
+
+    internal init(service: String = "app.safarier.proxy", nonInteractiveRead: @escaping @Sendable (CFDictionary) -> (OSStatus, CFTypeRef?)) {
+        self.service = service
+        self.nonInteractiveRead = nonInteractiveRead
     }
 
     public func password(forKey key: String) throws -> String? {
@@ -56,6 +87,29 @@ public struct KeychainCredentialStore: CredentialStore {
         guard status == errSecSuccess else {
             throw CredentialStoreError.keychain(status)
         }
+        guard let data = item as? Data, let password = String(data: data, encoding: .utf8) else {
+            throw CredentialStoreError.keychain(errSecDecode)
+        }
+        return password
+    }
+
+    /// 仅查询 Data Protection Keychain；不回退、复制或自动迁移 legacy 项。
+    public func passwordWithoutInteraction(forKey key: String) throws -> String? {
+        var query = baseQuery(forKey: key)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseDataProtectionKeychain as String] = true
+        let context = LAContext()
+        defer { context.invalidate() }
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+
+        let (status, item) = nonInteractiveRead(query as CFDictionary)
+        if status == errSecItemNotFound { return nil }
+        if status == errSecInteractionNotAllowed || status == errSecAuthFailed || status == errSecUserCanceled {
+            throw CredentialStoreError.interactionRequired
+        }
+        guard status == errSecSuccess else { throw CredentialStoreError.keychain(status) }
         guard let data = item as? Data, let password = String(data: data, encoding: .utf8) else {
             throw CredentialStoreError.keychain(errSecDecode)
         }
@@ -98,5 +152,6 @@ public struct KeychainCredentialStore: CredentialStore {
 }
 
 public enum CredentialStoreError: Error, Equatable {
+    case interactionRequired
     case keychain(OSStatus)
 }

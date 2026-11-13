@@ -1,5 +1,6 @@
 import SwiftUI
 import SafarierCore
+import SafarierNetwork
 
 /// 新建 / 编辑环境。字段与命令行 `profile create/update` 一致；模式创建后不能改（数据目录跟着 id 走）。
 struct ProfileEditorView: View {
@@ -21,6 +22,7 @@ struct ProfileEditorView: View {
     let original: Profile?
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @State private var name: String
     @State private var mode: ProfileMode
     @State private var languageSource: RegionSource
@@ -36,9 +38,32 @@ struct ProfileEditorView: View {
     @State private var deviceModel: String?
     @State private var spi: SPIFeatures
     @State private var notes: String
+    @State private var allowsAgentAccess: Bool
     @State private var errorText: String?
 
-    private static let languagePresets: [(title: String, value: String)] = [
+    private var chromeBackground: Color {
+        MetallicTheme.chromeBackground(for: colorScheme)
+    }
+
+    private var chromeOpacity: Double {
+        MetallicTheme.chromeOpacity(for: colorScheme)
+    }
+
+    private var contentBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0x07 / 255.0, green: 0x0A / 255.0, blue: 0x10 / 255.0).opacity(0.95)
+            : Color(red: 0xFA / 255.0, green: 0xFB / 255.0, blue: 0xFD / 255.0).opacity(0.95)
+    }
+
+    private var inputBackground: Color {
+        Color.black.opacity(colorScheme == .dark ? 0.25 : 0.05)
+    }
+
+    private var inputBorderColor: Color {
+        Color.white.opacity(colorScheme == .dark ? 0.12 : 0.18)
+    }
+
+    static let languagePresets: [(title: String, value: String)] = [
         ("英语（美国）", "en-US, en"),
         ("英语（英国）", "en-GB, en"),
         ("日语", "ja-JP, ja"),
@@ -73,189 +98,55 @@ struct ProfileEditorView: View {
         _deviceModel = State(initialValue: original?.deviceModel)
         _spi = State(initialValue: original?.spi ?? Self.defaultSPI(for: .persistent))
         _notes = State(initialValue: original?.notes ?? "")
+        _allowsAgentAccess = State(initialValue: original?.allowsAgentAccess ?? true)
+    }
+
+    private func inputContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(inputBackground)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(inputBorderColor, lineWidth: 0.8)
+                    )
+            )
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                Section {
-                    TextField("名称", text: $name, prompt: Text("例如：美国-工作"))
-                    Picker("沙盒模式", selection: $mode) {
-                        Text("持久").tag(ProfileMode.persistent)
-                        Text("临时").tag(ProfileMode.ephemeral)
+        ZStack {
+            // 背景磨砂与深邃外壳
+            VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
+            contentBackground
+
+            VStack(spacing: 0) {
+                // 顶部横幅
+                headerBar
+
+                Divider().opacity(0.2)
+
+                // 核心表单区域（卡片化滚动列表）
+                ScrollView {
+                    VStack(spacing: 16) {
+                        basicInfoCard
+                        networkCard
+                        regionCard
+                        deviceModelCard
+                        privacyCard
+                        otherParamsCard
                     }
-                    .pickerStyle(.segmented)
-                    .disabled(original != nil)
-                } footer: {
-                    Text(DisplayText.modeDetail(mode) + (original == nil ? "。" : "。模式创建后不能更改。"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .padding(20)
                 }
 
-                Section {
-                    Picker("出站", selection: $outboundKind) {
-                        Text("直连").tag(OutboundKind.direct)
-                        Text("独立代理").tag(OutboundKind.proxy)
-                        Text("订阅节点").tag(OutboundKind.node)
-                    }
-                    .pickerStyle(.segmented)
-                    switch outboundKind {
-                    case .direct:
-                        EmptyView()
-                    case .proxy:
-                        Picker("代理", selection: $proxyID) {
-                            Text("选择代理").tag(UUID?.none)
-                            ForEach(model.proxies) { proxy in
-                                Text(verbatim: "\(proxy.name) — \(DisplayText.proxyKind(proxy.kind)) \(proxy.host):\(proxy.port)")
-                                    .tag(UUID?.some(proxy.id))
-                            }
-                            if let proxyID, !model.proxies.contains(where: { $0.id == proxyID }) {
-                                Text("已被删除的代理（\(proxyID.uuidString.prefix(8))）").tag(UUID?.some(proxyID))
-                            }
-                        }
-                    case .node:
-                        Picker("订阅", selection: $subscriptionID) {
-                            Text("选择订阅").tag(UUID?.none)
-                            ForEach(model.subscriptions) { subscription in
-                                Text(verbatim: "\(subscription.name)（\(subscription.nodes.count) 个节点）").tag(UUID?.some(subscription.id))
-                            }
-                        }
-                        LabeledContent("节点") {
-                            Button { showNodePicker = true } label: {
-                                HStack(spacing: 6) {
-                                    if let node = selectedNode {
-                                        Text(node.name).lineLimit(1)
-                                        ProtocolBadge(type: node.type)
-                                    } else {
-                                        Text(nodeName.map { "「\($0)」已不在订阅里" } ?? "选择节点…")
-                                    }
-                                    Image(systemName: "chevron.up.chevron.down").font(.caption)
-                                }
-                            }
-                            .disabled(selectedSubscription == nil)
-                            .popover(isPresented: $showNodePicker, arrowEdge: .trailing) {
-                                NodePickerView(nodes: selectedSubscription?.nodes ?? [], selection: nodeName) { name in
-                                    nodeName = name
-                                    showNodePicker = false
-                                }
-                            }
-                        }
-                    }
-                } header: {
-                    Text("网络")
-                } footer: {
-                    Text(outboundFooter)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Divider().opacity(0.2)
 
-                Section {
-                    Picker("模拟机型", selection: $deviceModel) {
-                        Text("跟随系统（默认）").tag(String?.none)
-                        ForEach(MacDeviceModel.categories, id: \.self) { category in
-                            Section(category) {
-                                ForEach(MacDeviceModel.presets.filter { $0.category == category }) { preset in
-                                    Text(preset.name).tag(String?.some(preset.id))
-                                }
-                            }
-                        }
-                    }
-                    if let preset = deviceModel.flatMap(MacDeviceModel.preset) {
-                        LabeledContent("芯片规格", value: DisplayText.hardware(preset))
-                        LabeledContent("屏幕", value: DisplayText.screen(preset))
-                        LabeledContent("网页看到的", value: DisplayText.webVisible(preset))
-                        LabeledContent("推荐视口", value: DisplayText.viewport(preset))
-                    }
-                } header: {
-                    Text("机型模拟")
-                } footer: {
-                    Text(DisplayText.deviceModelNote)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section {
-                    regionSourcePicker("语言", selection: $languageSource)
-                    if languageSource == .custom {
-                        LabeledContent("语言标签") {
-                            HStack(spacing: 6) {
-                                TextField("语言标签", text: $languages, prompt: Text("例如 en-US, en"))
-                                    .labelsHidden()
-                                Menu {
-                                    ForEach(Self.languagePresets, id: \.value) { preset in
-                                        Button("\(preset.title)  \(preset.value)") { languages = preset.value }
-                                    }
-                                } label: {
-                                    Image(systemName: "character.bubble")
-                                }
-                                .menuStyle(.borderlessButton)
-                                .fixedSize()
-                                .help("常用语言")
-                            }
-                        }
-                    }
-                    regionSourcePicker("时区", selection: $timeZoneSource)
-                    if timeZoneSource == .custom {
-                        LabeledContent("时区标识") {
-                            HStack(spacing: 6) {
-                                TextField("时区标识", text: $timeZone, prompt: Text("例如 America/Los_Angeles"))
-                                    .labelsHidden()
-                                TimeZoneMenu(selection: $timeZone)
-                            }
-                        }
-                    }
-                } header: {
-                    Text("区域与语言")
-                } footer: {
-                    Text(regionFooter)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section {
-                    ForEach(SPIFeatures.tokens, id: \.name) { token in
-                        let text = DisplayText.spi(token.feature)
-                        Toggle(isOn: binding(for: token.feature)) {
-                            Text(text.title)
-                            Text(text.detail)
-                        }
-                    }
-                } header: {
-                    Text("隐私与指纹保护")
-                } footer: {
-                    Text("基于系统 WebKit 原生能力实现，不向网页注入任何篡改脚本。高级隐私保护、Safari 专有接口与字体、按语言收窄字体已默认开启。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("其他") {
-                    TextField("起始网址", text: $startURL, prompt: Text("https://example.com"))
-                    TextField("备注", text: $notes, prompt: Text("可选"), axis: .vertical)
-                        .lineLimit(2...4)
-                }
+                // 底部操作条
+                bottomBar
             }
-            .formStyle(.grouped)
-
-            Divider()
-            HStack(spacing: 10) {
-                if let errorText {
-                    Label(errorText, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
-                } else if let original, model.runState(original.id) != .stopped {
-                    Label("这个环境正在运行，修改在下次启动时生效", systemImage: "info.circle")
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-                Button("取消", role: .cancel) { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button(original == nil ? "创建" : "保存") { save() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            .padding(16)
         }
-        .frame(width: 580, height: 600)
+        .frame(width: 640, height: 700)
         .onChange(of: [name, languages, timeZone, startURL]) { errorText = nil }
         .onChange(of: subscriptionID) {
             // 单节点订阅直接选中；多节点订阅保留仍然有效的原选择。
@@ -282,6 +173,430 @@ struct ProfileEditorView: View {
             // 选了机型就一起打开高级隐私保护，网页里的 screen 尺寸才会跟着模拟的视口走（可以再手动关掉）。
             if deviceModel != nil { spi.insert(.fingerprintingProtections) }
         }
+    }
+
+    // MARK: - 顶部横幅
+    private var headerBar: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(MetallicTheme.prominentGradient)
+                    .frame(width: 42, height: 42)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(MetallicTheme.chromeBorder(for: colorScheme), lineWidth: 0.8)
+                    )
+                Image(systemName: original == nil ? "plus.rectangle.on.rectangle" : "pencil")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(MetallicTheme.darkText)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(original == nil ? "新建环境" : "编辑环境「\(original?.name ?? "")」")
+                    .font(.system(size: 16, weight: .bold))
+                Text("配置独立数据沙盒、代理网络与系统指纹")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(
+            chromeBackground.opacity(chromeOpacity)
+        )
+    }
+
+    // MARK: - 基础信息
+    private var basicInfoCard: some View {
+        LiquidGlassCard(title: "基础信息", systemImage: "info.circle") {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("环境名称")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    inputContainer {
+                        TextField("例如：美国-跨境", text: $name)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                    }
+                }
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("允许 Agent 使用")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("允许本地或远程 AI 智能体通过自动化端口调度此环境")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $allowsAgentAccess)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+
+                Divider().opacity(0.15)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("沙盒模式")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if original != nil {
+                            Text("模式创建后不可更改")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    Picker("沙盒模式", selection: $mode) {
+                        Text("持久沙盒").tag(ProfileMode.persistent)
+                        Text("临时沙盒").tag(ProfileMode.ephemeral)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(original != nil)
+
+                    Text(DisplayText.modeDetail(mode) + (original == nil ? "。" : "。模式创建后不可更改。"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // MARK: - 网络代理
+    private var networkCard: some View {
+        LiquidGlassCard(title: "网络代理", systemImage: "network") {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("出站模式")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Picker("出站模式", selection: $outboundKind) {
+                        Text("直连出站").tag(OutboundKind.direct)
+                        Text("独立代理").tag(OutboundKind.proxy)
+                        Text("订阅节点").tag(OutboundKind.node)
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                switch outboundKind {
+                case .direct:
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.up.right")
+                            .foregroundStyle(MetallicTheme.accent)
+                        Text("通过本地网络直接访问，不经过任何代理服务器。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.white.opacity(0.04))
+                    )
+
+                case .proxy:
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("代理配置")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Picker("", selection: $proxyID) {
+                            Text("请选择代理").tag(UUID?.none)
+                            ForEach(model.proxies) { proxy in
+                                Text(verbatim: "\(proxy.name) — \(DisplayText.proxyKind(proxy.kind)) \(proxy.host):\(proxy.port)")
+                                    .tag(UUID?.some(proxy.id))
+                            }
+                            if let proxyID, !model.proxies.contains(where: { $0.id == proxyID }) {
+                                Text("已被删除的代理（\(proxyID.uuidString.prefix(8))）").tag(UUID?.some(proxyID))
+                            }
+                        }
+                        .labelsHidden()
+
+                        Text(outboundFooter)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                case .node:
+                    VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("所属订阅")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Picker("", selection: $subscriptionID) {
+                                Text("请选择订阅").tag(UUID?.none)
+                                ForEach(model.subscriptions) { subscription in
+                                    Text(verbatim: "\(subscription.name)（\(subscription.nodes.count) 个节点）")
+                                        .tag(UUID?.some(subscription.id))
+                                }
+                            }
+                            .labelsHidden()
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("节点选择")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Button { showNodePicker = true } label: {
+                                HStack(spacing: 8) {
+                                    if let node = selectedNode {
+                                        Text(node.name).lineLimit(1)
+                                        ProtocolBadge(type: node.type)
+                                    } else {
+                                        Text(nodeName.map { "「\($0)」已不在订阅里" } ?? "选择节点…")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.up.chevron.down")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(inputBackground)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .strokeBorder(inputBorderColor, lineWidth: 0.8)
+                                        )
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(selectedSubscription == nil)
+                            .popover(isPresented: $showNodePicker, arrowEdge: .trailing) {
+                                NodePickerView(nodes: selectedSubscription?.nodes ?? [], selection: nodeName, nodeSpeeds: model.nodeSpeeds) { name in
+                                    nodeName = name
+                                    showNodePicker = false
+                                }
+                            }
+                        }
+
+                        Text(outboundFooter)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - 语言与时区
+    private var regionCard: some View {
+        LiquidGlassCard(title: "语言与时区", systemImage: "globe") {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("语言来源")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    regionSourcePicker("语言来源", selection: $languageSource)
+                        .labelsHidden()
+
+                    if languageSource == .custom {
+                        HStack(spacing: 6) {
+                            inputContainer {
+                                TextField("例如 en-US, en", text: $languages)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 13))
+                            }
+
+                            Menu {
+                                ForEach(Self.languagePresets, id: \.value) { preset in
+                                    Button("\(preset.title)  \(preset.value)") { languages = preset.value }
+                                }
+                            } label: {
+                                Image(systemName: "character.bubble")
+                                    .frame(width: 28, height: 28)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("常用语言预设")
+                        }
+                    }
+                }
+
+                Divider().opacity(0.15)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("时区来源")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    regionSourcePicker("时区来源", selection: $timeZoneSource)
+                        .labelsHidden()
+
+                    if timeZoneSource == .custom {
+                        HStack(spacing: 6) {
+                            inputContainer {
+                                TextField("例如 America/Los_Angeles", text: $timeZone)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 13, design: .monospaced))
+                            }
+
+                            TimeZoneMenu(selection: $timeZone)
+                        }
+                    }
+
+                    Text(regionFooter)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // MARK: - Mac 机型模拟
+    private var deviceModelCard: some View {
+        LiquidGlassCard(title: "Mac 机型模拟", systemImage: "laptopcomputer") {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("模拟机型")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: $deviceModel) {
+                        Text("跟随本机硬件").tag(String?.none)
+                        ForEach(MacDeviceModel.categories, id: \.self) { category in
+                            Section(category) {
+                                ForEach(MacDeviceModel.presets.filter { $0.category == category }) { preset in
+                                    Text(preset.name).tag(String?.some(preset.id))
+                                }
+                            }
+                        }
+                    }
+                    .labelsHidden()
+                }
+
+                if let preset = deviceModel.flatMap(MacDeviceModel.preset) {
+                    VStack(spacing: 6) {
+                        specRow(title: "芯片规格", value: DisplayText.hardware(preset))
+                        specRow(title: "屏幕色彩", value: DisplayText.screen(preset))
+                        specRow(title: "网页探测值", value: DisplayText.webVisible(preset))
+                        specRow(title: "推荐视口", value: DisplayText.viewport(preset))
+                    }
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.white.opacity(0.04))
+                    )
+                }
+
+                Text(DisplayText.deviceModelNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func specRow(title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 11.5, design: .monospaced))
+                .foregroundStyle(.primary)
+        }
+    }
+
+    // MARK: - Safari 原生隐私保护
+    private var privacyCard: some View {
+        LiquidGlassCard(title: "Safari 原生隐私保护", systemImage: "lock.shield") {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(SPIFeatures.tokens, id: \.name) { token in
+                    let text = DisplayText.spi(token.feature)
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(text.title)
+                                .font(.system(size: 13, weight: .medium))
+                            if !text.detail.isEmpty {
+                                Text(text.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer(minLength: 12)
+                        Toggle("", isOn: binding(for: token.feature))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                    if token.name != SPIFeatures.tokens.last?.name {
+                        Divider().opacity(0.15)
+                    }
+                }
+
+                Text("直接启用 Safari 原生内核保护机制，零脚本篡改，默认推荐开启防护项。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - 其他参数
+    private var otherParamsCard: some View {
+        LiquidGlassCard(title: "其他参数", systemImage: "ellipsis.circle") {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("起始网址")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    inputContainer {
+                        TextField("https://example.com", text: $startURL)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13, design: .monospaced))
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("环境备注")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    inputContainer {
+                        TextField("可选备注信息", text: $notes, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                            .lineLimit(2...4)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - 底部操作条
+    private var bottomBar: some View {
+        HStack(spacing: 12) {
+            if let errorText {
+                Label(errorText, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .font(.caption)
+                    .lineLimit(2)
+            } else if let original, model.runState(original.id) != .stopped {
+                Label("环境正在运行，配置将在下次启动时生效", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+
+            Button("取消", role: .cancel) { dismiss() }
+                .keyboardShortcut(.cancelAction)
+
+            LiquidGlassButton(
+                title: original == nil ? "创建环境" : "保存修改",
+                systemImage: original == nil ? "plus" : "checkmark",
+                variant: .prominent,
+                size: .regular
+            ) {
+                save()
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(
+            chromeBackground.opacity(chromeOpacity)
+        )
     }
 
     private var selectedSubscription: Subscription? {
@@ -398,6 +713,7 @@ struct ProfileEditorView: View {
         profile.deviceModel = deviceModel
         profile.spi = spi
         profile.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.allowsAgentAccess = allowsAgentAccess
 
         do {
             try model.save(profile, isNew: original == nil)
@@ -454,6 +770,7 @@ struct TimeZoneMenu: View {
 struct NodePickerView: View {
     let nodes: [SubscriptionNode]
     let selection: String?
+    var nodeSpeeds: [UUID: NodeSpeedResult] = [:]
     let onSelect: (String) -> Void
 
     @State private var query = ""
@@ -486,6 +803,17 @@ struct NodePickerView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 8)
+                        if let speed = nodeSpeeds[node.id], case .success(let ms) = speed {
+                            Text("\(ms) ms")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(ms < 200 ? Color.green : (ms < 500 ? Color.orange : Color.red))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(
+                                    Capsule()
+                                        .fill((ms < 200 ? Color.green : (ms < 500 ? Color.orange : Color.red)).opacity(0.12))
+                                )
+                        }
                         ProtocolBadge(type: node.type)
                     }
                     .contentShape(Rectangle())

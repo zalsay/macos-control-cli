@@ -47,10 +47,10 @@ Choose the package for your Mac from [GitHub Releases](https://github.com/Cd1s/s
 | **Intel** | Intel-based Mac | [**`Safarier-v1.0.1-macOS-x86_64.zip`**](https://github.com/Cd1s/safarier/releases/latest) |
 | **Universal** | Works on both Apple Silicon & Intel Macs | [**`Safarier-v1.0.1-macOS-universal.zip`**](https://github.com/Cd1s/safarier/releases/latest) |
 
-1. Unzip the downloaded file and drag **`Safarier.app`** into your **`Applications`** folder.
+1. Unzip the downloaded file and drag **`Safarier AI.app`** into your **`Applications`** folder.
 2. If macOS prompts that the app cannot be verified on first launch, run this single command in Terminal:
    ```bash
-   xattr -dr com.apple.quarantine /Applications/Safarier.app
+   xattr -dr com.apple.quarantine "/Applications/Safarier AI.app"
    ```
 
 ---
@@ -102,7 +102,9 @@ Bug reports, feature requests and pull requests are welcome — please use the i
 
 ## License & Acknowledgments
 
-Safarier is built natively with Swift and Apple WebKit for macOS. `Safarier.app` bundles an unmodified Universal helper build of [SagerNet/sing-box](https://github.com/SagerNet/sing-box) (GPL-3.0-or-later) for multi-protocol proxy routing; full license notices are included inside the application bundle under `Contents/Resources/ThirdParty/sing-box/`.
+Safarier is built natively with Swift and Apple WebKit for macOS. `Safarier.app` bundles an unmodified Universal helper build of [SagerNet/sing-box](https://github.com/SagerNet/sing-box) (GPL-3.0-or-later) for multi-protocol proxy routing; full license notices are included inside the application bundle under `Contents/Resources/ThirdParty/sing-box/`. Clash subscriptions run on an unmodified Universal build of [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) (GPL-3.0), whose notices are under `Contents/Resources/ThirdParty/mihomo/`.
 
 - Community & Links: [LINUX DO](https://linux.do)
 
+
+For the internal testing build's default workspace migration, see [workspace migration](docs/workspace-migration.md).

@@ -1,8 +1,10 @@
 #import "SafarierObjCSupport.h"
 #import <AppKit/AppKit.h>
+#import <WebKit/WebKit.h>
 #import <dlfcn.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#include <stdatomic.h>
 
 #if !__has_feature(objc_arc)
 #error "SFRRuntime.m 的引用计数写法依赖 ARC（-fobjc-arc）"
@@ -57,6 +59,121 @@ static BOOL SFRTypeIs(const char *actual, const char *expected) {
         return actual[0] == '@' && actual[1] != '?';
     }
     return strcmp(actual, expected) == 0;
+}
+
+
+// One fixed target and one historical permission gate for all supported entry points.
+typedef void (*SFRLegacyDragIMP)(id, SEL, id, NSPoint, NSSize, id, id, id, BOOL);
+typedef id (*SFRModernDragIMP)(id, SEL, id, id, id);
+typedef BOOL (*SFRLegacyPermissionIMP)(id, SEL);
+static Class sLegacyDragClass;
+static SFRLegacyPermissionIMP sLegacyDragPermission;
+static BOOL sDragInstallComplete;
+static IMP sDragOriginals[3];
+static BOOL sDragPresent[3];
+
+static Method SFROwnInstanceMethod(Class cls, SEL selector) {
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    Method found = NULL;
+    for (unsigned int i = 0; i < count; i++) {
+        if (method_getName(methods[i]) == selector) { found = methods[i]; break; }
+    }
+    free(methods);
+    return found;
+}
+
+static SEL SFRDragSelector(NSUInteger slot) {
+    static NSString * const names[] = {@"dragImage:at:offset:event:pasteboard:source:slideBack:",
+        @"beginDraggingSessionWithItems:event:source:", @"beginDraggingSessionWithItems:gesture:source:"};
+    return NSSelectorFromString(names[slot]);
+}
+static BOOL SFRDragSignatureMatches(Method method, NSUInteger slot) {
+    if (!method) return NO;
+    NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(method)];
+    const char *legacy[] = { @encode(id), @encode(SEL), @encode(id), @encode(NSPoint), @encode(NSSize), @encode(id), @encode(id), @encode(id), @encode(BOOL) };
+    const char *modern[] = { @encode(id), @encode(SEL), @encode(id), @encode(id), @encode(id) };
+    NSUInteger count = slot == 0 ? 9 : 5;
+    const char **types = slot == 0 ? legacy : modern;
+    if (!sig || sig.numberOfArguments != count || !SFRTypeIs(sig.methodReturnType, slot == 0 ? @encode(void) : @encode(id))) return NO;
+    for (NSUInteger i = 0; i < count; i++) if (!SFRTypeIs([sig getArgumentTypeAtIndex:i], types[i])) return NO;
+    return YES;
+}
+static BOOL SFRLegacyPermissionSignatureMatches(Method method) {
+    if (!method) return NO;
+    NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(method)];
+    return sig && sig.numberOfArguments == 2 && SFRTypeIs(sig.methodReturnType, @encode(BOOL)) &&
+        SFRTypeIs([sig getArgumentTypeAtIndex:0], @encode(id)) && SFRTypeIs([sig getArgumentTypeAtIndex:1], @encode(SEL));
+}
+static void SFRLegacyDragBoundary(id, SEL, id, NSPoint, NSSize, id, id, id, BOOL);
+static id SFRModernDragBoundary(id, SEL, id, id, id);
+static IMP SFRDragBoundaryIMP(NSUInteger slot) { return slot == 0 ? (IMP)SFRLegacyDragBoundary : (IMP)SFRModernDragBoundary; }
+
+// Check the complete fixed set even when only one entry is invoked: any drift closes the gate.
+static BOOL SFRDragOwnershipValid(void) {
+    if (!sLegacyDragClass || !sDragInstallComplete) return NO;
+    SEL permission = NSSelectorFromString(@"canBeginLegacySystemDrag");
+    Method gate = SFROwnInstanceMethod(sLegacyDragClass, permission);
+    if (!SFRLegacyPermissionSignatureMatches(gate) || method_getImplementation(gate) != (IMP)sLegacyDragPermission) return NO;
+    for (NSUInteger i = 0; i < 3; i++) {
+        SEL selector = SFRDragSelector(i);
+        Method own = SFROwnInstanceMethod(sLegacyDragClass, selector);
+        Method inherited = class_getInstanceMethod(class_getSuperclass(sLegacyDragClass), selector);
+        if (!sDragPresent[i]) { if (own || inherited) return NO; continue; }
+        if (!SFRDragSignatureMatches(own, i) || !SFRDragSignatureMatches(inherited, i) ||
+            method_getImplementation(own) != SFRDragBoundaryIMP(i) || method_getImplementation(inherited) != sDragOriginals[i]) return NO;
+    }
+    return YES;
+}
+static BOOL SFRDragAllowed(id receiver) {
+    if (![NSThread isMainThread] || !SFRDragOwnershipValid()) return NO;
+    return sLegacyDragPermission(receiver, NSSelectorFromString(@"canBeginLegacySystemDrag"));
+}
+static void SFRLegacyDragBoundary(id receiver, SEL selector, id image, NSPoint point, NSSize offset,
+                                  id event, id pasteboard, id source, BOOL slideBack) {
+    if (!SFRDragAllowed(receiver)) return;
+    ((SFRLegacyDragIMP)sDragOriginals[0])(receiver, selector, image, point, offset, event, pasteboard, source, slideBack);
+}
+static id SFRModernDragBoundary(id receiver, SEL selector, id items, id eventOrGesture, id source) {
+    NSUInteger slot = selector == SFRDragSelector(1) ? 1 : selector == SFRDragSelector(2) ? 2 : 3;
+    if (slot == 3 || !SFRDragAllowed(receiver) || !sDragPresent[slot]) return nil;
+    return ((SFRModernDragIMP)sDragOriginals[slot])(receiver, selector, items, eventOrGesture, source);
+}
+SFRCallStatus SFRInstallLegacySystemDragBoundary(Class targetClass, NSString **detail) {
+    if (![NSThread isMainThread]) { SFRSetDetail(detail, @"main thread required"); return SFRCallStatusException; }
+    if (!targetClass || targetClass == WKWebView.class || ![targetClass isSubclassOfClass:WKWebView.class]) {
+        SFRSetDetail(detail, @"target must be a WKWebView subclass"); return SFRCallStatusMissingClass;
+    }
+    if (sLegacyDragClass) {
+        if (targetClass != sLegacyDragClass || !SFRDragOwnershipValid()) {
+            SFRSetDetail(detail, @"boundary target, ownership or implementation changed"); return SFRCallStatusException;
+        }
+        SFRSetDetail(detail, sDragPresent[2] ? @"installed; gesture present" : @"installed; gesture unavailable"); return SFRCallStatusOK;
+    }
+    Method gate = SFROwnInstanceMethod(targetClass, NSSelectorFromString(@"canBeginLegacySystemDrag"));
+    if (!SFRLegacyPermissionSignatureMatches(gate)) { SFRSetDetail(detail, @"permission ABI mismatch"); return SFRCallStatusSignatureMismatch; }
+    Method inherited[3] = {NULL, NULL, NULL};
+    for (NSUInteger i = 0; i < 3; i++) {
+        SEL selector = SFRDragSelector(i);
+        inherited[i] = class_getInstanceMethod(class_getSuperclass(targetClass), selector);
+        if (SFROwnInstanceMethod(targetClass, selector)) { SFRSetDetail(detail, @"target already owns drag method"); return SFRCallStatusException; }
+        if (!inherited[i] && i == 2) continue;
+        if (!SFRDragSignatureMatches(inherited[i], i)) { SFRSetDetail(detail, @"drag ABI mismatch or required entry unavailable"); return SFRCallStatusSignatureMismatch; }
+    }
+    sLegacyDragClass = targetClass;
+    sLegacyDragPermission = (SFRLegacyPermissionIMP)method_getImplementation(gate);
+    for (NSUInteger i = 0; i < 3; i++) {
+        sDragPresent[i] = inherited[i] != NULL;
+        if (inherited[i]) sDragOriginals[i] = method_getImplementation(inherited[i]);
+    }
+    for (NSUInteger i = 0; i < 3; i++) {
+        if (inherited[i] && !class_addMethod(targetClass, SFRDragSelector(i), SFRDragBoundaryIMP(i), method_getTypeEncoding(inherited[i]))) {
+            SFRSetDetail(detail, @"class_addMethod failed; boundary incomplete"); return SFRCallStatusException;
+        }
+    }
+    sDragInstallComplete = YES;
+    if (!SFRDragOwnershipValid()) { sDragInstallComplete = NO; SFRSetDetail(detail, @"boundary changed during installation"); return SFRCallStatusException; }
+    SFRSetDetail(detail, sDragPresent[2] ? @"installed; gesture present" : @"installed; gesture unavailable"); return SFRCallStatusOK;
 }
 
 /// returnType/argumentType 为 NULL 表示不检查；argumentType 非 NULL 时要求恰好一个参数。
@@ -261,6 +378,18 @@ SFRCallStatus SFRCallWithDataCompletion(id target, NSString *selectorName, void 
     return SFRCallStatusOK;
 }
 
+SFRCallStatus SFRCallWithObjectCompletion(id target, NSString *selectorName, id argument, void (^completion)(id), NSString **detail) {
+    SEL sel = NULL;
+    SFRCallStatus status = SFRPrepareTwo(target, selectorName, @encode(void), "@", "@?", &sel, detail);
+    if (status != SFRCallStatusOK) return status;
+    @try {
+        ((void (*)(id, SEL, id, void (^)(id)))objc_msgSend)(target, sel, argument, [completion copy]);
+    } @catch (NSException *exception) {
+        return SFRException(exception, detail);
+    }
+    return SFRCallStatusOK;
+}
+
 SFRCallStatus SFRNewInstance(NSString *className, id __autoreleasing *instance, NSString **detail) {
     Class cls = NSClassFromString(className);
     if (!cls) {
@@ -347,6 +476,361 @@ static void SFRRestore(SFRSwizzle *slot) {
     }
     slot->method = NULL;
     slot->original = NULL;
+}
+
+static _Atomic(IMP) sPhysicalMouseButtons;
+static _Thread_local BOOL sHasLogicalMouseButtons;
+static _Thread_local NSUInteger sLogicalMouseButtons;
+
+static NSUInteger SFRReadMouseButtons(id receiver, SEL selector) {
+    if (sHasLogicalMouseButtons) return sLogicalMouseButtons;
+    IMP original = atomic_load_explicit(&sPhysicalMouseButtons, memory_order_acquire);
+    return ((NSUInteger (*)(id, SEL))original)(receiver, selector);
+}
+
+SFRCallStatus SFRWithScopedMouseButtons(NSUInteger buttons, void (^operation)(void), NSString **detail) {
+    if (![NSThread isMainThread] || !operation) {
+        SFRSetDetail(detail, @"scoped mouse state requires a synchronous main-thread operation");
+        return SFRCallStatusException;
+    }
+    SEL selector = @selector(pressedMouseButtons);
+    Method method = class_getClassMethod(NSEvent.class, selector);
+    if (!method) return SFRCallStatusMissingSelector;
+    SFRCallStatus status = SFRCheckSignature([NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(method)], @encode(NSUInteger), NULL, detail);
+    if (status != SFRCallStatusOK) return status;
+    IMP current = method_getImplementation(method);
+    IMP original = atomic_load_explicit(&sPhysicalMouseButtons, memory_order_acquire);
+    if (!original) {
+        original = current;
+        atomic_store_explicit(&sPhysicalMouseButtons, original, memory_order_release);
+    }
+    IMP shim = (IMP)SFRReadMouseButtons;
+    if (current != original && current != shim) {
+        SFRSetDetail(detail, @"mouse button query changed owner");
+        return SFRCallStatusException;
+    }
+    BOOL enclosingScope = sHasLogicalMouseButtons;
+    NSUInteger previous = sLogicalMouseButtons;
+    if (!enclosingScope) method_setImplementation(method, shim);
+    sHasLogicalMouseButtons = YES;
+    sLogicalMouseButtons = buttons;
+    @try {
+        operation();
+    } @catch (NSException *exception) {
+        status = SFRException(exception, detail);
+    } @finally {
+        sLogicalMouseButtons = previous;
+        sHasLogicalMouseButtons = enclosingScope;
+        if (!enclosingScope) {
+            if (method_getImplementation(method) == shim) method_setImplementation(method, original);
+            else {
+                status = SFRCallStatusException;
+                SFRSetDetail(detail, @"mouse state implementation changed during scope");
+            }
+        }
+    }
+    // Static C IMPs remain valid for concurrent readers even after restoration.
+    if (status == SFRCallStatusOK) SFRSetDetail(detail, @"NSUInteger getter verified; main-thread scope restored");
+    return status;
+}
+
+SFRCallStatus SFRDispatchScopedMouseEvent(id target, id object, NSUInteger buttons, NSString **detail) {
+    if (![NSThread isMainThread]) {
+        SFRSetDetail(detail, @"page mouse delivery requires main thread");
+        return SFRCallStatusException;
+    }
+    if (![object isKindOfClass:NSEvent.class] || buttons > 1) {
+        SFRSetDetail(detail, @"unsupported page mouse event or button mask");
+        return SFRCallStatusSignatureMismatch;
+    }
+    NSEvent *event = object;
+    NSString *name;
+    switch (event.type) {
+        case NSEventTypeMouseMoved: name = @"mouseMoved:"; break;
+        case NSEventTypeLeftMouseDown: name = @"mouseDown:"; break;
+        case NSEventTypeLeftMouseUp: name = @"mouseUp:"; break;
+        case NSEventTypeLeftMouseDragged: name = @"mouseDragged:"; break;
+        case NSEventTypeScrollWheel: name = @"scrollWheel:"; break;
+        default:
+            SFRSetDetail(detail, @"unsupported page mouse event type");
+            return SFRCallStatusSignatureMismatch;
+    }
+    if (((event.type == NSEventTypeLeftMouseDown || event.type == NSEventTypeLeftMouseDragged) && buttons != 1)
+        || (event.type == NSEventTypeLeftMouseUp && buttons != 0)) {
+        SFRSetDetail(detail, @"mouse event type and logical pressed state disagree");
+        return SFRCallStatusSignatureMismatch;
+    }
+    SEL selector;
+    SFRCallStatus status = SFRPrepare(target, name, @encode(void), @encode(id), &selector, detail);
+    if (status != SFRCallStatusOK) return status;
+    __block SFRCallStatus delivery = SFRCallStatusOK;
+    __block NSString *deliveryDetail = nil;
+    status = SFRWithScopedMouseButtons(buttons, ^{
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(target, selector, event);
+        } @catch (NSException *exception) {
+            delivery = SFRException(exception, &deliveryDetail);
+        }
+    }, detail);
+    if (status != SFRCallStatusOK) return status;
+    if (delivery != SFRCallStatusOK) SFRSetDetail(detail, deliveryDetail);
+    return delivery;
+}
+
+SFRCallStatus SFRCallWithVoidCompletion(id target, NSString *selectorName, void (^completion)(void), NSString **detail) {
+    SEL selector;
+    SFRCallStatus status = SFRPrepare(target, selectorName, @encode(void), "@?", &selector, detail);
+    if (status != SFRCallStatusOK) return status;
+    @try {
+        ((void (*)(id, SEL, void (^)(void)))objc_msgSend)(target, selector, completion);
+    } @catch (NSException *exception) {
+        return SFRException(exception, detail);
+    }
+    return SFRCallStatusOK;
+}
+
+static _Atomic(IMP) sCursorSetOriginal, sCursorHideUntilMoveOriginal, sCursorHideUntilChangeOriginal;
+static Method sCursorSetMethod, sCursorHideUntilMoveMethod, sCursorHideUntilChangeMethod;
+static __weak NSApplication *sCursorProtectedApplication;
+static _Atomic(NSUInteger) sSuppressedCursorWrites;
+static BOOL sCursorProtectionInstalled;
+
+static BOOL SFRShouldSuppressCursorWrite(void) {
+    // AppKit cursor writes from this Runner are never allowed off-main or while
+    // inactive. Other applications have different runtimes and are untouched.
+    return ![NSThread isMainThread] || !sCursorProtectedApplication.isActive;
+}
+static void SFRSetCursor(id receiver, SEL selector) {
+    if (SFRShouldSuppressCursorWrite()) { atomic_fetch_add(&sSuppressedCursorWrites, 1); return; }
+    ((void (*)(id, SEL))atomic_load(&sCursorSetOriginal))(receiver, selector);
+}
+static void SFRHideCursorUntilMove(id receiver, SEL selector, BOOL value) {
+    if (SFRShouldSuppressCursorWrite()) { atomic_fetch_add(&sSuppressedCursorWrites, 1); return; }
+    ((void (*)(id, SEL, BOOL))atomic_load(&sCursorHideUntilMoveOriginal))(receiver, selector, value);
+}
+static void SFRHideCursorUntilChange(id receiver, SEL selector) {
+    if (SFRShouldSuppressCursorWrite()) { atomic_fetch_add(&sSuppressedCursorWrites, 1); return; }
+    ((void (*)(id, SEL))atomic_load(&sCursorHideUntilChangeOriginal))(receiver, selector);
+}
+
+BOOL SFRBackgroundCursorProtectionIsInstalled(void) {
+    return sCursorProtectionInstalled
+        && method_getImplementation(sCursorSetMethod) == (IMP)SFRSetCursor
+        && method_getImplementation(sCursorHideUntilMoveMethod) == (IMP)SFRHideCursorUntilMove
+        && (!sCursorHideUntilChangeMethod || method_getImplementation(sCursorHideUntilChangeMethod) == (IMP)SFRHideCursorUntilChange);
+}
+NSUInteger SFRBackgroundCursorWritesSuppressed(void) { return atomic_load(&sSuppressedCursorWrites); }
+
+static SFRCallStatus SFRInstallBackgroundCursorProtection(NSApplication *app, NSString **detail) {
+    if (sCursorProtectionInstalled) {
+        if (SFRBackgroundCursorProtectionIsInstalled()) return SFRCallStatusOK;
+        SFRSetDetail(detail, @"background cursor protection changed owner");
+        return SFRCallStatusException;
+    }
+    Method set = class_getInstanceMethod(NSCursor.class, @selector(set));
+    Method hideMove = class_getClassMethod(NSCursor.class, @selector(setHiddenUntilMouseMoves:));
+    Method hideChange = class_getClassMethod(NSCursor.class, NSSelectorFromString(@"hideUntilChanged"));
+    if (!set || !hideMove) return SFRCallStatusMissingSelector;
+    SFRCallStatus status = SFRCheckSignature([NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(set)], @encode(void), NULL, detail);
+    if (status != SFRCallStatusOK) return status;
+    status = SFRCheckSignature([NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(hideMove)], @encode(void), @encode(BOOL), detail);
+    if (status != SFRCallStatusOK) return status;
+    if (hideChange) {
+        status = SFRCheckSignature([NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(hideChange)], @encode(void), NULL, detail);
+        if (status != SFRCallStatusOK) return status;
+    }
+    NSCursor *custom = [[NSCursor alloc] initWithImage:[[NSImage alloc] initWithSize:NSMakeSize(8, 8)] hotSpot:NSZeroPoint];
+    NSCursor *arrow = NSCursor.arrowCursor, *beam = NSCursor.IBeamCursor, *hand = NSCursor.pointingHandCursor;
+    if (!arrow || !beam || !hand || !custom) {
+        SFRSetDetail(detail, @"native cursor factory is unavailable");
+        return SFRCallStatusMissingClass;
+    }
+    for (NSCursor *cursor in @[arrow, beam, hand, custom]) {
+        if (class_getInstanceMethod(cursor.class, @selector(set)) != set) {
+            SFRSetDetail(detail, @"unverified native cursor subclass bypasses protection");
+            return SFRCallStatusSignatureMismatch;
+        }
+    }
+    sCursorProtectedApplication = app;
+    sCursorSetMethod = set; sCursorHideUntilMoveMethod = hideMove; sCursorHideUntilChangeMethod = hideChange;
+    atomic_store(&sCursorSetOriginal, method_getImplementation(set));
+    atomic_store(&sCursorHideUntilMoveOriginal, method_getImplementation(hideMove));
+    if (hideChange) atomic_store(&sCursorHideUntilChangeOriginal, method_getImplementation(hideChange));
+    method_setImplementation(set, (IMP)SFRSetCursor);
+    method_setImplementation(hideMove, (IMP)SFRHideCursorUntilMove);
+    if (hideChange) method_setImplementation(hideChange, (IMP)SFRHideCursorUntilChange);
+    // Keep static safety IMPs for this Runner's lifetime, including late key-event
+    // replies. Foreground calls still go to the original implementations.
+    sCursorProtectionInstalled = YES;
+    return SFRCallStatusOK;
+}
+
+@interface SFRBackgroundPageActivityToken : NSObject {
+@public
+    SFRSwizzle keySlot;
+    IMP installedKey;
+}
+@property(nonatomic, strong) id webView;
+@property(nonatomic, strong) NSWindow *window;
+@property(nonatomic, strong) NSApplication *application;
+@property(atomic) BOOL closed;
+@property(nonatomic) BOOL notifiedActive;
+- (SFRCallStatus)closeWithCompletion:(void (^)(void))ready detail:(NSString **)detail;
+@end
+
+static __weak SFRBackgroundPageActivityToken *sBackgroundPageActivity;
+static NSString * const SFRActivityCompletion = @"_doAfterActivityStateUpdate:";
+static _Atomic(IMP) sApplicationKeyOriginal;
+static _Atomic(void *) sBackgroundWebKitImage;
+static __attribute__((noinline)) id SFRLogicalKeyWindow(id receiver, SEL selector) {
+    void *caller = __builtin_extract_return_addr(__builtin_return_address(0));
+    if ([NSThread isMainThread]) {
+        SFRBackgroundPageActivityToken *context = sBackgroundPageActivity;
+        if (context && !context.closed && receiver == context.application && !context.application.isActive) {
+            Dl_info image = {0};
+            // AppKit, input methods and application code must always see the real
+            // key window. Only WebKit's page-activity query receives the logical one.
+            if (caller && dladdr(caller, &image) && image.dli_fbase == atomic_load(&sBackgroundWebKitImage))
+                return context.window;
+        }
+    }
+    return ((id (*)(id, SEL))atomic_load(&sApplicationKeyOriginal))(receiver, selector);
+}
+
+@implementation SFRBackgroundPageActivityToken
+- (SFRCallStatus)closeWithCompletion:(void (^)(void))ready detail:(NSString **)detail {
+    if (_closed) { ready(); return SFRCallStatusOK; }
+    _closed = YES;
+    if (keySlot.method) {
+        if (method_getImplementation(keySlot.method) != installedKey) {
+            SFRSetDetail(detail, @"background key-window query changed owner");
+            return SFRCallStatusException;
+        }
+        Method method = keySlot.method;
+        IMP original = keySlot.original;
+        method_setImplementation(method, original);
+        keySlot.method = NULL; keySlot.original = NULL;
+        if (method_getImplementation(method) != original) {
+            SFRSetDetail(detail, @"background key-window query restoration failed");
+            return SFRCallStatusException;
+        }
+    }
+    if (sBackgroundPageActivity == self) sBackgroundPageActivity = nil;
+    id view = _webView;
+    NSWindow *window = _window;
+    if (!view || !window || !_notifiedActive) { ready(); return SFRCallStatusOK; }
+    if (![NSThread isMainThread]) {
+        // No AppKit work off-main: only the owned IMP restoration above is synchronous.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                [NSNotificationCenter.defaultCenter postNotificationName:NSWindowDidResignKeyNotification object:window];
+                SFRCallWithVoidCompletion(view, SFRActivityCompletion, ready, NULL);
+            } @catch (NSException *exception) { (void)exception; }
+        });
+        return SFRCallStatusOK;
+    }
+    @try {
+        [NSNotificationCenter.defaultCenter postNotificationName:NSWindowDidResignKeyNotification object:window];
+        return SFRCallWithVoidCompletion(view, SFRActivityCompletion, ready, detail);
+    } @catch (NSException *exception) { return SFRException(exception, detail); }
+}
+- (void)dealloc {
+    [self closeWithCompletion:^{} detail:NULL];
+}
+@end
+
+SFRCallStatus SFRBeginBackgroundPageActivity(id webView, id __autoreleasing *lease, void (^ready)(void), NSString **detail) {
+    *lease = nil;
+    if (![NSThread isMainThread] || !ready) {
+        SFRSetDetail(detail, @"background page activity requires main thread and completion");
+        return SFRCallStatusException;
+    }
+    if (sBackgroundPageActivity) {
+        SFRSetDetail(detail, @"another background page activity lease is active");
+        return SFRCallStatusException;
+    }
+    SFRBackgroundPageActivityToken *token = nil;
+    @try {
+        Class webViewClass = NSClassFromString(@"WKWebView");
+        if (!webViewClass || ![webView isKindOfClass:webViewClass]) {
+            SFRSetDetail(detail, @"background input target is not a WKWebView");
+            return SFRCallStatusMissingClass;
+        }
+        NSString *version = [[NSBundle bundleForClass:webViewClass] objectForInfoDictionaryKey:@"CFBundleVersion"];
+        if (![version isEqualToString:@"21624.5.1.11.3"]) {
+            SFRSetDetail(detail, @"background activity is unavailable on this unverified WebKit version");
+            return SFRCallStatusMissingSymbol;
+        }
+        SEL completionSelector;
+        SFRCallStatus status = SFRPrepare(webView, SFRActivityCompletion, @encode(void), "@?", &completionSelector, detail);
+        if (status != SFRCallStatusOK) return status;
+        id pageURL = nil;
+        status = SFRGetObject(webView, @"URL", &pageURL, detail);
+        if (status != SFRCallStatusOK || ![pageURL isKindOfClass:NSURL.class]) {
+            SFRSetDetail(detail, @"background page must be loaded before input");
+            return SFRCallStatusException;
+        }
+        NSApplication *app = NSApplication.sharedApplication;
+        NSWindow *window = [webView window];
+        if (!window || window.isKeyWindow || app.isActive) {
+            SFRSetDetail(detail, @"background input requires an inactive application and non-key target");
+            return SFRCallStatusException;
+        }
+        Method keyMethod = class_getInstanceMethod(object_getClass(app), @selector(keyWindow));
+        if (!keyMethod) return SFRCallStatusMissingSelector;
+        status = SFRCheckSignature([NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(keyMethod)], "@", NULL, detail);
+        if (status != SFRCallStatusOK) return status;
+        IMP original = method_getImplementation(keyMethod);
+        IMP previousOwner = atomic_load(&sApplicationKeyOriginal);
+        if (previousOwner && original != previousOwner) {
+            SFRSetDetail(detail, @"application key-window query changed owner");
+            return SFRCallStatusException;
+        }
+        Dl_info webKitImage = {0};
+        void *typeExport = dlsym(RTLD_DEFAULT, "WKPageGetTypeID");
+        if (!typeExport || !dladdr(typeExport, &webKitImage) || !webKitImage.dli_fbase || !webKitImage.dli_fname
+            || !strstr(webKitImage.dli_fname, "/System/Library/Frameworks/WebKit.framework/")) {
+            SFRSetDetail(detail, @"cannot verify native WebKit query origin");
+            return SFRCallStatusMissingSymbol;
+        }
+        atomic_store(&sBackgroundWebKitImage, webKitImage.dli_fbase);
+        status = SFRInstallBackgroundCursorProtection(app, detail);
+        if (status != SFRCallStatusOK) return status;
+        atomic_store(&sApplicationKeyOriginal, original);
+        token = [SFRBackgroundPageActivityToken new];
+        token.webView = webView;
+        token.window = window;
+        token.application = app;
+        token->keySlot.method = keyMethod;
+        token->keySlot.original = original;
+        token->installedKey = (IMP)SFRLogicalKeyWindow;
+        method_setImplementation(keyMethod, token->installedKey);
+        sBackgroundPageActivity = token;
+        *lease = token;
+        // A local notification schedules a genuine WindowIsActive update. Merely
+        // recalculating cached UI activity does not send the change to WebContent.
+        // No NSWindow key state or WindowServer activation method is invoked.
+        token.notifiedActive = YES;
+        [NSNotificationCenter.defaultCenter postNotificationName:NSWindowDidBecomeKeyNotification object:window];
+        status = SFRCallWithVoidCompletion(webView, SFRActivityCompletion, ready, detail);
+        if (status != SFRCallStatusOK) {
+            [token closeWithCompletion:^{} detail:NULL];
+            *lease = nil;
+        }
+        return status;
+    } @catch (NSException *exception) {
+        if (token) [token closeWithCompletion:^{} detail:NULL];
+        *lease = nil;
+        return SFRException(exception, detail);
+    }
+}
+
+SFRCallStatus SFRFinishBackgroundPageActivity(id lease, void (^ready)(void), NSString **detail) {
+    if (![NSThread isMainThread] || ![lease isKindOfClass:SFRBackgroundPageActivityToken.class] || !ready) {
+        SFRSetDetail(detail, @"invalid background activity lease or thread");
+        return SFRCallStatusSignatureMismatch;
+    }
+    return [(SFRBackgroundPageActivityToken *)lease closeWithCompletion:ready detail:detail];
 }
 
 void SFRRemoveDisplayOverride(void) {

@@ -133,7 +133,12 @@ final class StartPageView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        if dark {
+            NSColor(red: 0x07 / 255.0, green: 0x0A / 255.0, blue: 0x10 / 255.0, alpha: 1.0).setFill()
+        } else {
+            NSColor(red: 0xFA / 255.0, green: 0xFB / 255.0, blue: 0xFD / 255.0, alpha: 1.0).setFill()
+        }
         dirtyRect.fill()
     }
 }
@@ -141,6 +146,19 @@ final class StartPageView: NSView {
 /// 浏览窗口里的 WKWebView：右键菜单照 Safari 改（见 BrowserContextMenu），记下下一次网页打开新视图时要开成窗口还是后台标签。
 @MainActor
 final class BrowserWebView: WKWebView {
+    // Unbound views retain the existing interactive behavior.
+    var legacySystemDragPermission: (() -> Bool)?
+    // Result at controller initialization; the bridge separately checks ownership on use.
+    private(set) var legacySystemDragBoundaryInstalled = false
+
+    func setLegacySystemDragBoundaryInstalled(_ installed: Bool) {
+        legacySystemDragBoundaryInstalled = installed
+    }
+
+    @objc func canBeginLegacySystemDrag() -> Bool {
+        legacySystemDragPermission?() ?? true
+    }
+
     /// 下一个由网页请求打开的视图开成独立窗口（而不是标签页）。
     var openNextAsWindow = false
     /// 下一个由网页请求打开的视图开成后台标签页（不切过去）。
@@ -149,6 +167,50 @@ final class BrowserWebView: WKWebView {
     var onSearchWeb: ((URL) -> Void)?
     /// 每次右键「在新窗口 / 后台标签页中打开」加一；两秒后的复位只对同一次生效。
     private var openModeGeneration = 0
+
+    private var browserController: BrowserWindowController? {
+        window?.delegate as? BrowserWindowController
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        if event.buttonNumber == 3 || event.buttonNumber == 4 {
+            // 吞掉按下的瞬间，防止网页内选区或意外拖拽
+            return
+        }
+        super.otherMouseDown(with: event)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        if event.buttonNumber == 3 {
+            // 鼠标后退侧键 (XButton1)
+            if let controller = browserController, controller.canGoBack {
+                controller.goBack(nil)
+                return
+            }
+        } else if event.buttonNumber == 4 {
+            // 鼠标前进侧键 (XButton2)
+            if let controller = browserController, controller.canGoForward {
+                controller.goForward(nil)
+                return
+            }
+        }
+        super.otherMouseUp(with: event)
+    }
+
+    override func swipe(with event: NSEvent) {
+        if event.deltaX > 0 {
+            if let controller = browserController, controller.canGoBack {
+                controller.goBack(nil)
+                return
+            }
+        } else if event.deltaX < 0 {
+            if let controller = browserController, controller.canGoForward {
+                controller.goForward(nil)
+                return
+            }
+        }
+        super.swipe(with: event)
+    }
 
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)

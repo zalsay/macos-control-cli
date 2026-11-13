@@ -33,7 +33,7 @@
 
 ### 代理严格 Fail-Closed 与凭据安全
 
-- 每个环境走自己的 `sing-box` 进程（订阅节点），或 `WKWebsiteDataStore.proxyConfigurations`（独立 SOCKS5 / HTTP CONNECT 代理）。代理断了页面就加载失败，**绝不退回直连**。
+- 每个环境走自己的代理内核进程：URI 节点用 `sing-box`，Clash 订阅用 `mihomo`（保留链式代理、证书指纹、XUDP 等设置），或 `WKWebsiteDataStore.proxyConfigurations`（独立 SOCKS5 / HTTP CONNECT 代理）。代理断了页面就加载失败，**绝不退回直连**。
 - 密码存在钥匙串里。辅助进程拿凭据只经标准输入（curl 的 `-K -`，管道设 `F_SETNOSIGPIPE`）或权限 `0600` 的配置文件，绝不出现在命令行参数、日志或错误信息里。
 - 测试和文档只用 `example.com` / `.invalid` 域名和 RFC 5737 / 3849 的示例地址，不用真实节点。
 
@@ -66,7 +66,7 @@
 
 ## 3. 本地构建与验证流程
 
-需要 macOS 14 及以上和较新的 Xcode（Swift 5.10+）。只有重新编译自带的 `sing-box` 才需要 Go。
+需要 macOS 14 及以上和较新的 Xcode（Swift 5.10+）。只有重新编译自带的 `sing-box` 和 `mihomo` 才需要 Go。
 
 ### 单元测试
 
@@ -101,10 +101,11 @@ swift run Safarier probe <PROFILE_ID> [--url https://example.com] [--spi afp,tz,
 
 ```sh
 scripts/build-singbox.sh                        # 交叉编译 darwin/arm64 + amd64 的 sing-box（需要 Go）
-SAFARIER_ARCH=universal scripts/build-app.sh    # universal | arm64 | x86_64 → dist/Safarier.app
+scripts/build-mihomo.sh                         # 交叉编译 darwin/arm64 + amd64 的 mihomo（需要 Go）
+SAFARIER_ARCH=universal scripts/build-app.sh    # universal | arm64 | x86_64 → dist/Safarier AI.app & dist/Safarier AI Browser.app
 ```
 
-`SAFARIER_VERSION` 覆盖版本号，`SAFARIER_ICON_STYLE` 选图标（`meridian`、`prism`、`titanium`、`shield`）。应用是 ad-hoc 签名，可以用 `codesign --verify --deep --strict dist/Safarier.app` 和 `lipo -archs` 检查。
+`SAFARIER_VERSION` 覆盖版本号，`SAFARIER_ICON_STYLE` 选图标（`meridian`、`prism`、`titanium`、`shield`）。应用是 ad-hoc 签名，可以用 `codesign --verify --deep --strict "dist/Safarier AI.app"` 和 `lipo -archs` 检查。
 
 ## 4. 提交 Issue 与 PR 指南
 
@@ -118,4 +119,4 @@ SAFARIER_ARCH=universal scripts/build-app.sh    # universal | arm64 | x86_64 →
 4. 照周围代码的风格写：注释用平实的话说明为什么这样做，界面文案和其它界面一样用中文。
 5. 原生引擎桥接层的改动，先开 Issue 附上运行时方法签名与能力核验结果，再写代码。
 
-自带的 `sing-box` 是未修改的上游代码，许可证为 GPL-3.0-or-later。`scripts/build-singbox.sh` 会把确切的源码 commit 和编译参数写进 `SOURCE`，随应用放在 `Contents/Resources/ThirdParty/sing-box/`。如果改了编译方式，请同步更新这份说明。
+自带的 `sing-box` 是未修改的上游代码，许可证为 GPL-3.0-or-later。`scripts/build-singbox.sh` 会把确切的源码 commit 和编译参数写进 `SOURCE`，随应用放在 `Contents/Resources/ThirdParty/sing-box/`。自带的 `mihomo` 同样处理（`scripts/build-mihomo.sh`，放在 `Contents/Resources/ThirdParty/mihomo/`）。如果改了编译方式，请同步更新这份说明。`Sources/SafarierNetwork/MihomoProxyFields.swift` 里的字段表是从固定版本的 mihomo 源码提取的，版本变了要重新提取。

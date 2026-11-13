@@ -22,7 +22,7 @@ final class AddressBar: NSView, NSTextFieldDelegate {
 
     init(isPrivate: Bool) {
         self.isPrivate = isPrivate
-        super.init(frame: NSRect(x: 0, y: 0, width: 480, height: 30))
+        super.init(frame: NSRect(x: 0, y: 0, width: 480, height: 28))
         wantsLayer = true
         layer?.cornerRadius = 8
         layer?.cornerCurve = .continuous
@@ -65,7 +65,7 @@ final class AddressBar: NSView, NSTextFieldDelegate {
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 30),
+            heightAnchor.constraint(equalToConstant: 28),
             widthAnchor.constraint(greaterThanOrEqualToConstant: 260),
             widthAnchor.constraint(lessThanOrEqualToConstant: 640),
             securityIcon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
@@ -89,10 +89,20 @@ final class AddressBar: NSView, NSTextFieldDelegate {
 
     override func updateLayer() {
         if isPrivate {
-            layer?.backgroundColor = NSColor(white: 0.08, alpha: 1).cgColor
+            layer?.backgroundColor = NSColor(red: 0x07 / 255.0, green: 0x0A / 255.0, blue: 0x10 / 255.0, alpha: 0.85).cgColor
+            layer?.borderColor = NSColor(red: 0xB8 / 255.0, green: 0xC6 / 255.0, blue: 0xDA / 255.0, alpha: 0.16).cgColor
+            layer?.borderWidth = 0.8
         } else {
             let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            layer?.backgroundColor = (dark ? NSColor(white: 1, alpha: 0.08) : NSColor(white: 0, alpha: 0.055)).cgColor
+            if dark {
+                layer?.backgroundColor = NSColor(red: 0x12 / 255.0, green: 0x18 / 255.0, blue: 0x24 / 255.0, alpha: 0.55).cgColor
+                layer?.borderColor = NSColor(red: 0xB8 / 255.0, green: 0xC6 / 255.0, blue: 0xDA / 255.0, alpha: 0.15).cgColor
+                layer?.borderWidth = 0.8
+            } else {
+                layer?.backgroundColor = NSColor(red: 0xEA / 255.0, green: 0xEE / 255.0, blue: 0xF5 / 255.0, alpha: 0.55).cgColor
+                layer?.borderColor = NSColor(red: 0x7A / 255.0, green: 0x8C / 255.0, blue: 0xA5 / 255.0, alpha: 0.18).cgColor
+                layer?.borderWidth = 0.8
+            }
         }
     }
 

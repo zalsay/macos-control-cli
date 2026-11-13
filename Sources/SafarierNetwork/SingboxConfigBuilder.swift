@@ -62,6 +62,10 @@ public struct SingboxConfiguration: Codable, Equatable, Sendable {
 public enum SingboxConfigError: Error, Equatable {
     case invalidInboundPort(Int)
     case invalidNode(SubscriptionNodeValidationError)
+    /// Clash 订阅的节点（带 mihomo 条目）只能交给 mihomo：翻译成 sing-box 会丢字段，不能悄悄这样做。
+    case requiresMihomo
+    /// sing-box 这边没有映射这个协议（只有 Clash 订阅里才有）。
+    case unsupportedType(SubscriptionNodeType)
 }
 
 /// 最小的 sing-box 配置：一个本地 SOCKS5 入站，一个节点出站；路由全部走节点（`direct` 只是保留的出站，没有规则用它，
@@ -82,6 +86,8 @@ public struct SingboxConfigBuilder: Sendable {
         do { try node.validate() } catch let error as SubscriptionNodeValidationError {
             throw SingboxConfigError.invalidNode(error)
         }
+        guard node.mihomoProxies == nil else { throw SingboxConfigError.requiresMihomo }
+        guard node.type != .hysteria2 else { throw SingboxConfigError.unsupportedType(node.type) }
 
         let inbound: [String: SingboxJSONValue] = [
             "type": .string("socks"),
@@ -151,6 +157,9 @@ public struct SingboxConfigBuilder: Sendable {
             if let password = node.password, !password.isEmpty { result["password"] = .string(password) }
         case .anytls:
             if let password = node.password { result["password"] = .string(password) }
+        case .hysteria2:
+            // makeConfiguration 已经拦下这个类型，走不到这里。
+            break
         }
 
         // AnyTLS 没有不带 TLS 的形式。
@@ -242,6 +251,7 @@ private extension SubscriptionNodeType {
         case .shadowsocks: return "shadowsocks"
         case .socks: return "socks"
         case .anytls: return "anytls"
+        case .hysteria2: return "hysteria2"
         }
     }
 }

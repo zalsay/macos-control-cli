@@ -14,8 +14,8 @@ enum DisplayText {
 
     static func modeDetail(_ mode: ProfileMode) -> String {
         switch mode {
-        case .persistent: return "Cookie、登录状态和缓存保存在磁盘，下次启动还在"
-        case .ephemeral: return "数据只在内存里，关闭窗口即清空"
+        case .persistent: return "保存登录状态与浏览数据，下次启动自动恢复"
+        case .ephemeral: return "无痕模式，关闭窗口自动清除所有数据"
         }
     }
 
@@ -44,34 +44,33 @@ enum DisplayText {
         case .shadowsocks: return "SS"
         case .socks: return "SOCKS"
         case .anytls: return "AnyTLS"
+        case .hysteria2: return "Hysteria2"
         }
     }
 
     static func nodeColor(_ type: SubscriptionNodeType) -> Color {
         switch type {
-        case .vless: return .purple
-        case .vmess: return .blue
-        case .trojan: return .red
-        case .shadowsocks: return .teal
-        case .socks: return .green
-        case .anytls: return .orange
+        case .vless, .vmess, .trojan, .hysteria2:
+            return MetallicTheme.accent
+        case .shadowsocks, .socks, .anytls:
+            return Color(red: 0x98 / 255.0, green: 0xA2 / 255.0, blue: 0xB4 / 255.0)
         }
     }
 
     static func spi(_ feature: SPIFeatures) -> (title: String, detail: String) {
         switch feature {
         case .fingerprintingProtections:
-            return ("高级隐私保护", "开启 Safari 原生反指纹保护，对 Canvas、WebGL、Audio 采样按会话加噪，并隐藏真实窗口外框尺寸")
+            return ("高级隐私保护", "启用 Safari 原生反指纹机制，防范 Canvas、WebGL 与音频特征追踪")
         case .engineTimeZone:
-            return ("引擎层时区同步", "将网页与 Worker 内的 JavaScript 时区同步为当前环境的时区设置")
+            return ("时区深度同步", "让网页脚本与后台 Worker 严格使用环境设定时区")
         case .disableWebRTC:
-            return ("关闭 WebRTC", "禁用网页 RTCPeerConnection，防止绕过代理泄露真实 IP")
+            return ("禁用 WebRTC", "防止网页通过 P2P 穿透泄露真实局域网与公网 IP")
         case .safariAPIs:
-            return ("Safari 专有接口与字体", "开启真 Safari 具备的 Apple Pay、推送、媒体设备接口，并像真 Safari 一样屏蔽用户自行安装的字体")
+            return ("原生 Safari 特性对齐", "支持 Apple Pay 与系统接口，并自动屏蔽非系统字体")
         case .webGPU:
-            return ("WebGPU 硬件加速", "开启 navigator.gpu 接口（macOS 15 真 Safari 默认未开启，仅在网页需要时打开）")
+            return ("WebGPU 加速", "为前沿 3D 和 AI 网页提供新一代图形计算接口")
         case .fontAllowlist:
-            return ("按语言收窄字体", "按环境语言只向网页暴露对应系统的原生字体（已实测对齐真英文 Mac，英文、泰语等环境下自动隐藏宿主机下载的中日韩字体包）")
+            return ("语言系统字体隔离", "根据环境语言仅暴露原生匹配字体，隐藏宿主自定义字体")
         default:
             return (feature.description, "")
         }
@@ -101,10 +100,10 @@ enum DisplayText {
         "\(MacDeviceModel.webVisibleCPUCores()) 核 · \(MacDeviceModel.webVisibleGPU) · devicePixelRatio \(model.scale)"
     }
 
-    /// 机型模拟实际做了什么（2026-10-24 本机与真 Safari 对比实测）。
-    static let deviceModelNote = "视口尺寸和纵横比、devicePixelRatio、屏幕的 P3 色域和 HDR（网页的 color-gamut / dynamic-range 媒体查询）按机型设置，屏幕放不下时等比缩小；开启高级隐私保护时，网页里的 screen 和 outer 尺寸都等于视口，和真 Safari 无痕窗口一样。CPU 核数和 GPU 名称按真 Safari 的规则给：WebKit 只报 4 或 8 核、GPU 一律写「Apple GPU」，所以这几款机型在真 Safari 里都是 8 核 · Apple GPU，写成芯片规格反而露馅。"
+    /// 机型模拟说明。
+    static let deviceModelNote = "全面还原真实 Mac 的屏幕分辨率、P3 广色域、HDR 与硬件指纹，使网页端识别与原生设备完全一致。"
 
-    static let followProxy = "跟随代理（按出口 IP 自动匹配）"
+    static let followProxy = "跟随代理出口自动匹配"
 
     static func languages(_ languages: [String]) -> String {
         languages.isEmpty ? "跟随系统" : languages.joined(separator: ", ")
@@ -159,6 +158,10 @@ enum DisplayText {
             let detail = result.skippedSchemes.sorted { $0.key < $1.key }.map { "\($0.key) ×\($0.value)" }.joined(separator: "、")
             text += "；跳过 \(result.skippedCount) 个暂不支持的节点（\(detail)）"
         }
+        if !result.ignoredFields.isEmpty {
+            let detail = result.ignoredFields.sorted { $0.key < $1.key }.map { "\($0.key) ×\($0.value)" }.joined(separator: "、")
+            text += "；以下字段 mihomo 不认识，已忽略（\(detail)）"
+        }
         return text + "。"
     }
 
@@ -192,6 +195,10 @@ enum DisplayText {
                 return "订阅里有一行无法解析（\(scheme)://…）。"
             case .invalidBase64: return "订阅内容既不是 UTF-8 文本，也不是合法的 Base64。"
             case .invalidJSON: return "VMess 节点的 JSON 无法解析。"
+            case .invalidClashYAML: return "Clash YAML 格式无效或节点字段不完整。"
+            case .unsupportedClash(let counts):
+                let detail = counts.sorted { $0.key < $1.key }.map { "\($0.key) ×\($0.value)" }.joined(separator: "、")
+                return "Clash 订阅没有可导入的节点；不支持：\(detail)。"
             case .unsupportedScheme(let scheme): return "不支持的节点协议：\(scheme)。"
             }
         case let error as SubscriptionFetchError:

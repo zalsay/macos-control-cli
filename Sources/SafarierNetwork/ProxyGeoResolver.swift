@@ -164,6 +164,11 @@ public struct ProxyGeoResult: Equatable, Sendable {
     }
 }
 
+/// Failures in the budget-aware resolver; legacy resolution remains nonthrowing.
+public enum ProxyGeoResolutionError: Error, Equatable, Sendable {
+    case invalidBudget, timeout, cancelled, invalidClock
+}
+
 /// 按代理的出口 IP 推断国家，再给出语言和时区。
 ///
 /// 探测一律经代理（socks5h 让 DNS 也在代理那端解析），不会走直连；没有代理就不探测。
@@ -188,20 +193,78 @@ public enum ProxyGeoResolver {
         timeout: TimeInterval = 4,
         fetch: Fetch = curlFetch
     ) -> ProxyGeoResult? {
+        // The shared kernel can only throw when a budget is provided.
+        try? resolveCore(proxy: proxy, password: password, nodeHint: nodeHint, timeout: timeout, fetch: fetch, budget: nil)
+    }
+
+    /// Budget accounting and late-result rejection, not forced interruption:
+    /// a synchronous fetch that ignores its timeout can block beyond the deadline.
+    /// `deadline` and `now` use the same absolute monotonic seconds. The caller
+    /// must explicitly choose a fetch; `curlFetch` is not a strict wall-clock bound.
+    public static func resolve(
+        proxy: ProxySettings?,
+        password: String?,
+        nodeHint: String?,
+        timeout: TimeInterval = 4,
+        deadline: Double,
+        now: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime },
+        fetch: Fetch
+    ) throws -> ProxyGeoResult? {
+        guard timeout.isFinite, timeout > 0, deadline.isFinite, deadline >= 0 else {
+            throw ProxyGeoResolutionError.invalidBudget
+        }
+        let budget = Budget(deadline: deadline, now: now)
+        return try resolveCore(proxy: proxy, password: password, nodeHint: nodeHint, timeout: timeout, fetch: fetch, budget: budget)
+    }
+
+    private final class Budget {
+        let deadline: Double
+        let now: @Sendable () -> Double
+        var previous: Double?
+        init(deadline: Double, now: @escaping @Sendable () -> Double) {
+            self.deadline = deadline
+            self.now = now
+        }
+        func remaining() throws -> Double {
+            guard !Task<Never, Never>.isCancelled else { throw ProxyGeoResolutionError.cancelled }
+            let instant = now()
+            guard instant.isFinite, instant >= 0, previous.map({ instant >= $0 }) ?? true else {
+                throw ProxyGeoResolutionError.invalidClock
+            }
+            previous = instant
+            guard instant < deadline else { throw ProxyGeoResolutionError.timeout }
+            let remaining = deadline - instant
+            guard remaining.isFinite, remaining > 0 else { throw ProxyGeoResolutionError.invalidBudget }
+            return remaining
+        }
+    }
+
+    private static func resolveCore(
+        proxy: ProxySettings?, password: String?, nodeHint: String?, timeout: TimeInterval,
+        fetch: Fetch, budget: Budget?
+    ) throws -> ProxyGeoResult? {
+        _ = try budget?.remaining()
         if let proxy {
             for endpoint in endpoints {
-                guard let body = fetch(endpoint.url, proxy, password, timeout),
+                let remaining = try budget?.remaining()
+                let body = fetch(endpoint.url, proxy, password, remaining.map { min(timeout, $0) } ?? timeout)
+                _ = try budget?.remaining()
+                guard let body,
                       let parsed = parse(body, kind: endpoint.kind),
                       let result = result(country: parsed.country, timeZone: parsed.timeZone, source: .lookup(endpoint.url))
                 else { continue }
+                _ = try budget?.remaining()
                 return result
             }
         }
         for hint in [nodeHint, proxy?.name].compactMap({ $0 }) {
+            _ = try budget?.remaining()
             if let code = inferCountry(from: hint), let result = result(country: code, timeZone: nil, source: .nameHint) {
+                _ = try budget?.remaining()
                 return result
             }
         }
+        _ = try budget?.remaining()
         return nil
     }
 

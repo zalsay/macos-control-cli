@@ -1,8 +1,32 @@
 import AppKit
+import CoreFoundation
 import WebKit
 import SafarierCore
+import Darwin
 import SafarierNetwork
 import SafarierWebKit
+
+#if SAFARIER_BOUND_LOCAL_CANDIDATE
+private func runnerTrace(_ phase: String, _ start: UInt64, _ result: String = "ok") {
+    let now = DispatchTime.now().uptimeNanoseconds
+    let ms = now >= start ? (now - start) / 1_000_000 : 0
+    fputs("BOUND_DIAG phase=\(phase) elapsed_ms=\(ms) result=\(result)\n", stderr)
+}
+private func runnerError(_ error: Error) -> String {
+    if let error = error as? AutomationError { return error.code.rawValue }
+    if error is CancellationError { return "cancelled" }
+    if let error = error as? RunnerPreparationError {
+        switch error {
+        case .profileMismatch: return "profileMismatch"
+        case .invalidBackgroundLaunch: return "invalidBackgroundLaunch"
+        case .boundNodeMismatch: return "boundNodeMismatch"
+        case .proxyNotFound: return "proxyNotFound"
+        case .proxyMismatch: return "proxyMismatch"
+        }
+    }
+    return "unknown"
+}
+#endif
 
 /// Runner 进程入口：一个进程只服务一个 profile。
 @MainActor
@@ -10,8 +34,32 @@ enum RunnerMain {
     /// 进程存活期间一直持有，退出（含崩溃）时内核自动释放。
     private static var lock: ProfileLock?
     private static var controller: AnyObject?
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+    final class RetainedBrowserOwner {
+        let session: BrowserSession
+        let window: NSWindow
+        let webView: BrowserWebView
+        let resources: RunnerPreparation.OwnedResources
+        fileprivate init(session: BrowserSession, window: NSWindow, webView: BrowserWebView, resources: RunnerPreparation.OwnedResources) {
+            self.session = session; self.window = window; self.webView = webView; self.resources = resources
+        }
+    }
+    private static var retainedBrowserOwner: RetainedBrowserOwner?
+    static func prepareRetainedBrowser(resources: RunnerPreparation.OwnedResources, receipt: ControlReleaseReceipt) -> RetainedBrowserOwner? {
+        guard retainedBrowserOwner == nil, let session = controller as? BrowserSession,
+              session.profile.id == receipt.target.profileID, session.executionPolicy == .interactive,
+              session.openControllers.count == 1, let browser = session.openControllers.first,
+              browser.session === session, browser.webView.window === browser.window,
+              receipt.inputReleased, receipt.artifactsCleaned, receipt.browserRetained,
+              receipt.manualInteractionEnabled, NSApp.isRunning else { return nil }
+        return RetainedBrowserOwner(session: session, window: browser.window, webView: browser.webView, resources: resources)
+    }
+    static func retainReleasedBrowser(_ owner: RetainedBrowserOwner) {
+        retainedBrowserOwner = owner
+    }
+    #endif
     private static var signalSources: [DispatchSourceSignal] = []
-    /// 绑定订阅节点时由这个 Runner 拉起的 sing-box。atexit 和信号处理里要用，所以不隔离到主线程。
+    /// 绑定订阅节点时由这个 Runner 拉起的代理内核（sing-box 或 mihomo）。atexit 和信号处理里要用，所以不隔离到主线程。
     nonisolated(unsafe) private static var singbox: (manager: SingboxProcessManager, profileID: UUID)?
 
     static func start(arguments: [String]) -> Never {
@@ -23,74 +71,53 @@ enum RunnerMain {
             guard let profile = try workspace.profiles.record(id: spec.profileID) else {
                 fail("找不到 profile \(spec.profileID.uuidString)")
             }
-            lock = try ProfileLock.acquire(profileID: profile.id, in: workspace.locksDirectory)
-            installTerminationCleanup()
-            let diagnostics = SPIDiagnostics.standardError()
-
-            // 屏幕能力是进程级的，要赶在 WebKit 第一次收集屏幕属性（第一个 WKWebView 创建）之前装好。
-            let displayState = profile.deviceModel.flatMap(MacDeviceModel.preset)
-                .map { DeviceSimulation.installDisplayOverride(for: $0, diagnostics: diagnostics) }
-
-            // 出站：独立代理直接交给 WebKit；订阅节点先起 sing-box，把它的本地 SOCKS5 入站当成代理交给 WebKit。
-            // 后者在工厂看来就是"绑定了一个代理"，所以 sing-box 断了时页面加载失败，不会退回直连。
-            var effectiveProfile = profile
-            var proxy = try profile.proxyID.flatMap { try workspace.proxies.record(id: $0) }
-            var outbound: [String: Any] = proxy.map { ["kind": "proxy", "name": $0.name] } ?? ["kind": "direct"]
-            var outboundDescription = proxy.map { "代理「\($0.name)」（\($0.kind.rawValue) \($0.host):\($0.port)）" } ?? "直连"
-
-            let bound = try workspace.boundNode(for: profile)
-            if let bound {
-                let local = try startSingbox(profileID: profile.id, node: bound.node, workspace: workspace)
-                effectiveProfile.proxyID = local.proxy.id
-                proxy = local.proxy
-                outbound = [
-                    "kind": "subscriptionNode",
-                    "subscription": bound.subscription.name,
-                    "node": bound.node.name,
-                    "protocol": bound.node.type.rawValue,
-                    "singboxPID": local.pid,
-                    "localProxy": "\(local.proxy.host):\(local.proxy.port)",
-                ]
-                outboundDescription = "订阅「\(bound.subscription.name)」节点「\(bound.node.name)」（经 sing-box）"
-            }
-
-            // 原生引擎接口只在 profile（或本次 --spi）显式开启时才碰；公开适配器先写结论，SPI 适配器再覆盖。
-            var spiFeatures = spec.spiOverride ?? profile.spi
-
-            // 语言 / 时区跟随代理：按出口 IP 的国家定下语言和时区，再交给工厂。
-            if profile.followProxyLanguages || profile.followProxyTimeZone {
-                // 重新启动过的 Runner 带着上一次的结果：先记下是不是重启过，用完就把这些环境变量清掉，不再传给子进程。
-                let wasRelaunched = ProcessInfo.processInfo.environment[ProxyGeoResult.relaunchFlag] != nil
-                let resolved = resolveFollowProxy(proxy: proxy, nodeHint: bound?.node.name)
-                for key in ProcessInfo.processInfo.environment.keys where key.hasPrefix("SAFARIER_GEO_") { unsetenv(key) }
-                if let resolved {
-                    outbound["geo"] = [
-                        "country": resolved.countryCode, "languages": resolved.languages,
-                        "timeZone": resolved.timeZoneIdentifier, "source": "\(resolved.source)",
-                    ]
-                    if profile.followProxyLanguages {
-                        // -AppleLanguages 只能在进程启动时生效：语言不一样就带上新参数重新启动自己（只重启一次）。
-                        let current = UserDefaults.standard.stringArray(forKey: "AppleLanguages") ?? []
-                        if current != resolved.languages && !wasRelaunched {
-                            relaunch(arguments: arguments, resolved: resolved, followTimeZone: profile.followProxyTimeZone)
-                        }
-                        effectiveProfile.languages = resolved.languages
-                    }
-                    if profile.followProxyTimeZone {
-                        effectiveProfile.timeZoneIdentifier = resolved.timeZoneIdentifier
-                        spiFeatures.insert(.engineTimeZone)
-                    }
-                } else {
-                    FileHandle.standardError.write(Data("[geo] 跟随代理没能确定出口国家，语言和时区沿用系统\n".utf8))
+            let originalLock: ProfileLock
+            #if SAFARIER_BOUND_LOCAL_CANDIDATE
+            if spec.backgroundAutomation || spec.registeredInteractive {
+                if spec.registeredInteractive {
+                    try AutomationChannel.validateConnectedStream(fileDescriptor: STDIN_FILENO)
                 }
+                // Only the safely inspected original lock can be loaned to Core.
+                originalLock = try ProfileLock.acquireForBoundCandidate(profileID: profile.id, in: workspace.locksDirectory)
+            } else {
+                originalLock = try ProfileLock.acquire(profileID: profile.id, in: workspace.locksDirectory)
             }
-            let privacy = CompositePrivacyAdapter([
-                PublicAPIPrivacyAdapter(),
-                SPIPrivacyAdapter(features: spiFeatures, diagnostics: diagnostics),
-            ])
-            let factory = WebViewConfigurationFactory(credentials: KeychainCredentialStore(), privacy: privacy)
-            var output = try factory.make(profile: effectiveProfile, proxy: proxy)
-            if let displayState { output.report.set(displayState, for: .displayCapabilities) }
+            #else
+            originalLock = try ProfileLock.acquire(profileID: profile.id, in: workspace.locksDirectory)
+            #endif
+            lock = originalLock
+            if spec.backgroundAutomation {
+                guard spec.startURL == URL(string: "about:blank"), spec.spiOverride == nil, !spec.probe else {
+                    fail("后台自动化未授权或参数不合规")
+                }
+                let rawInput = FileHandle(fileDescriptor: STDIN_FILENO, closeOnDealloc: false)
+                try AutomationChannel.validateConnectedStream(fileDescriptor: rawInput.fileDescriptor)
+                let app = NSApplication.shared
+                guard app.setActivationPolicy(.prohibited), !app.isActive else {
+                    fail("后台自动化应用策略不可用")
+                }
+                Task { @MainActor in
+                    let status = await RunnerAutomationEntry.serve(profile: profile, spec: spec, workspace: workspace, arguments: arguments, rawInput: rawInput, originalLock: originalLock)
+                    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+                    if let owner = retainedBrowserOwner {
+                        fputs("CONTROL_RELEASE_DIAG phase=serve_return status=\(status) retainedOwner=true\n", stderr)
+                        owner.session.confirmRetainedControlFinished()
+                        return
+                    }
+                    #endif
+                    exit(status)
+                }
+                app.run()
+                #if SAFARIER_BOUND_LOCAL_CANDIDATE
+                if retainedBrowserOwner != nil { exit(0) }
+                #endif
+                fail("后台自动化主运行循环意外返回")
+            }
+            installTerminationCleanup()
+            let prepared = try RunnerPreparation.prepare(profile: profile, spec: spec, workspace: workspace, arguments: arguments, executionPolicy: .interactive)
+            let effectiveProfile = prepared.effectiveProfile
+            let output = prepared.output
+            let diagnostics = prepared.diagnostics
 
             let app = NSApplication.shared
             if spec.probe {
@@ -99,20 +126,47 @@ enum RunnerMain {
                     profile: effectiveProfile,
                     spec: spec,
                     output: output,
-                    adapter: factory.privacy.identifier,
-                    spiFeatures: spiFeatures,
+                    adapter: prepared.adapter,
+                    spiFeatures: prepared.spiFeatures,
                     diagnostics: diagnostics,
-                    outbound: outbound
+                    outbound: prepared.outbound
                 )
                 controller = probe
                 probe.start()
             } else {
+                #if SAFARIER_BOUND_LOCAL_CANDIDATE
+                app.setActivationPolicy(spec.nonActivatingPresentation ? .accessory : .regular)
+                #else
                 app.setActivationPolicy(.regular)
+                #endif
                 app.mainMenu = BrowserMenu.make()
-                let session = BrowserSession(profile: effectiveProfile, output: output, outboundDescription: outboundDescription, diagnostics: diagnostics)
+                #if SAFARIER_BOUND_LOCAL_CANDIDATE
+                let session = BrowserSession(profile: effectiveProfile, output: output, outboundDescription: prepared.outboundDescription, diagnostics: diagnostics, promoteOnActivation: spec.nonActivatingPresentation, workspace: workspace)
+                #else
+                let session = BrowserSession(profile: effectiveProfile, output: output, outboundDescription: prepared.outboundDescription, diagnostics: diagnostics, workspace: workspace)
+                #endif
                 controller = session
                 app.delegate = session
+                #if SAFARIER_BOUND_LOCAL_CANDIDATE
+                if spec.registeredInteractive {
+                    session.startRegisteredInteractive(url: spec.startURL)
+                    let root = try AutomationChannel(adopting: FileHandle(fileDescriptor: STDIN_FILENO, closeOnDealloc: false))
+                    let instance = UUID()
+                    Task { @MainActor in
+                        let ok = await RegisteredRunnerServer.serve(channel: root, profileID: profile.id,
+                            runnerInstanceID: instance, originalLock: originalLock, workspace: workspace) { epoch, channel in
+                            await serveRegisteredGeneration(epoch: epoch, channel: channel, profile: profile,
+                                spec: spec, workspace: workspace, arguments: arguments, originalLock: originalLock,
+                                runnerInstanceID: instance, session: session, launchPlan: prepared.launchPlan)
+                        }
+                        if !ok { fputs("REGISTERED_DIAG phase=root_closed result=unconfirmed\n", stderr) }
+                    }
+                } else {
+                    session.start(url: spec.startURL)
+                }
+                #else
                 session.start(url: spec.startURL)
+                #endif
             }
             app.run()
             exit(0)
@@ -121,8 +175,85 @@ enum RunnerMain {
         }
     }
 
+    /// Defend this composition boundary even when called independently of the entry.
+    static func makeAutomationService(prepared: RunnerPreparation.Result, workspace: SafarierWorkspace) throws -> RunnerAutomationService {
+        try NativePageInput.requireShippingAdmission()
+        guard prepared.output.executionPolicy == .automationBackground else {
+            throw AutomationError(code: .backgroundLaunchUnverified)
+        }
+        let app = NSApplication.shared
+        app.setActivationPolicy(.prohibited)
+        let session = BrowserSession(profile: prepared.effectiveProfile, output: prepared.output, outboundDescription: prepared.outboundDescription, diagnostics: prepared.diagnostics, workspace: workspace)
+        controller = session
+        app.delegate = session
+        return try session.makeAutomationService(workspace: workspace, runnerInstanceID: UUID())
+    }
+
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+    private static func serveRegisteredGeneration(epoch: UUID, channel: AutomationChannel, profile: Profile,
+        spec: RunnerLaunchSpec, workspace: SafarierWorkspace, arguments: [String], originalLock: ProfileLock,
+        runnerInstanceID: UUID, session: BrowserSession, launchPlan: RunnerPreparationPlan) async -> Bool {
+        enum Stage: String { case installContext, slotInstall, serveAppBound, closeSlot, drain, finish }
+        var stage = Stage.installContext
+        let slot = BoundRunnerServiceSlot(registeredSession: session, registeredLaunchPlan: launchPlan)
+        let server = AutomationRunnerServer(profileID: profile.id, runnerInstanceID: runnerInstanceID,
+            channel: channel, handler: { request in await slot.handle(request) },
+            shutdown: { Task { @MainActor in slot.beginClosing() } })
+        do {
+            stage = .installContext
+            let context = try await server.installAppContext(workspace: workspace, spec: spec,
+                originalLock: originalLock, arguments: arguments,
+                environment: ProcessInfo.processInfo.environment, registrationEpoch: epoch)
+            stage = .slotInstall
+            try slot.install(context)
+            stage = .serveAppBound
+            let status = await server.serveAppBound { bound in
+                try await slot.prepare(context: bound, profile: profile, spec: spec, workspace: workspace)
+            }
+            stage = .closeSlot
+            slot.beginClosing()
+            stage = .drain
+            guard await slot.drain() else { context.beginClosing(); return false }
+            stage = .finish
+            await context.finishAfterResourcesDrained()
+            return status == 0
+        } catch {
+            RootIdentityDiagnostic.emit("REGISTERED_GENERATION_DIAG side=runner stage=\(stage.rawValue) error=\(RootIdentityDiagnostic.classification(error))")
+            slot.beginClosing()
+            _ = await slot.drain()
+            return false
+        }
+    }
+
+    static func makeBoundAutomationService(prepared: RunnerPreparation.Result, workspace: SafarierWorkspace, context: RunnerBinderContext) async throws -> RunnerAutomationService {
+        let started = DispatchTime.now().uptimeNanoseconds
+        var phase = "service.validate.before"
+        do {
+            runnerTrace(phase, started)
+            try await context.validate()
+            guard prepared.output.executionPolicy == .automationBackground,
+                  prepared.effectiveProfile.id == context.profileID else { throw AutomationError(code: .targetChanged) }
+            try context.checkLive()
+            phase = "service.application.before"; runnerTrace(phase, started)
+            let app = NSApplication.shared
+            phase = "service.application.after"; runnerTrace(phase, started)
+            app.setActivationPolicy(.prohibited)
+            let session = BrowserSession(profile: prepared.effectiveProfile, output: prepared.output,
+                outboundDescription: prepared.outboundDescription, diagnostics: prepared.diagnostics, workspace: workspace)
+            controller = session
+            app.delegate = session
+            phase = "service.final_validate.before"; runnerTrace(phase, started)
+            try await context.validate()
+            phase = "service.create.before"; runnerTrace(phase, started)
+            let service = try session.makeBoundAutomationService(workspace: workspace, context: context)
+            runnerTrace("service.create.after", started)
+            return service
+        } catch { runnerTrace(phase, started, runnerError(error)); throw error }
+    }
+    #endif
+
     /// 跟随代理：重新启动过的 Runner 直接用带过来的结果；否则经代理探测出口国家（失败时按节点名推断）。
-    private static func resolveFollowProxy(proxy: ProxySettings?, nodeHint: String?) -> ProxyGeoResult? {
+    static func resolveFollowProxy(proxy: ProxySettings?, nodeHint: String?) -> ProxyGeoResult? {
         let environment = ProcessInfo.processInfo.environment
         if let carried = ProxyGeoResult(relaunchedFrom: environment) { return carried }
         let password = proxy.flatMap { proxy -> String? in
@@ -138,7 +269,7 @@ enum RunnerMain {
 
     /// 带上新的 `-AppleLanguages`（和跟随代理的 TZ）重新执行自己：先停 sing-box、释放 profile 锁，
     /// 进程号不变，管理器的进程跟踪不受影响。重新启动后的进程从头开始，再起 sing-box、再拿锁。
-    private static func relaunch(arguments: [String], resolved: ProxyGeoResult, followTimeZone: Bool) -> Never {
+    static func relaunch(arguments: [String], resolved: ProxyGeoResult, followTimeZone: Bool) -> Never {
         stopSingbox()
         lock?.release()
         lock = nil
@@ -152,19 +283,20 @@ enum RunnerMain {
         fail("重新启动 Runner 失败（errno \(errno)）")
     }
 
-    /// 起 sing-box 并等它的本地端口可用。stdout/stderr 进 Runner 自己的日志（级别 warn，不记访问的域名）。
-    private static func startSingbox(
+    /// 起节点对应的代理内核（sing-box 或 mihomo）并等它的本地端口可用。stdout/stderr 进 Runner 自己的日志（不记访问的域名）。
+    static func startProxyCore(
         profileID: UUID,
         node: SubscriptionNode,
         workspace: SafarierWorkspace
     ) throws -> (proxy: ProxySettings, pid: Int32) {
-        let manager = SingboxProcessManager(stateDirectory: workspace.singboxDirectory, logHandle: FileHandle.standardError)
+        let engine = node.proxyEngine
+        let manager = SingboxProcessManager(engine: engine, stateDirectory: workspace.singboxDirectory, logHandle: FileHandle.standardError)
         singbox = (manager, profileID)
         let pid = try manager.start(profileID: profileID, node: node)
         let port = try manager.waitUntilReady(profileID: profileID)
         // 写 stderr：探针模式下 stdout 只能有 JSON。
-        FileHandle.standardError.write(Data("[sing-box] \(manager.executableURL.path) pid \(pid)，节点「\(node.name)」（\(node.type.rawValue) \(node.server):\(node.serverPort)）→ 127.0.0.1:\(port)\n".utf8))
-        let proxy = ProxySettings(name: "sing-box", kind: .socks5, host: SingboxConfigBuilder.defaultInboundAddress, port: port)
+        FileHandle.standardError.write(Data("[\(engine.displayName)] \(manager.executableURL.path) pid \(pid)，节点「\(node.name)」（\(node.type.rawValue) \(node.server):\(node.serverPort)）→ 127.0.0.1:\(port)\n".utf8))
+        let proxy = ProxySettings(name: engine.displayName, kind: .socks5, host: SingboxConfigBuilder.defaultInboundAddress, port: port)
         return (proxy, pid)
     }
 
@@ -184,6 +316,9 @@ enum RunnerMain {
             signal(signalNumber, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
             source.setEventHandler {
+                if let session = controller as? BrowserSession {
+                    session.saveSessionState()
+                }
                 RunnerMain.stopSingbox()
                 signal(signalNumber, SIG_DFL)
                 raise(signalNumber)

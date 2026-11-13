@@ -29,13 +29,16 @@ enum WindowCycler {
         return all[(index + (forward ? 1 : all.count - 1)) % all.count]
     }
 
-    /// 本机其它正在运行、有界面的 Safarier 进程：同一个 bundle（.app）或同一个可执行文件（直接运行的二进制）。
+    /// 本机其它正在运行、有界面的 Safarier 进程：同一个 bundle（.app）、关联的 Browser/Manager bundle 或同一个可执行文件（直接运行的二进制）。
     static func otherSafarierApplications() -> [NSRunningApplication] {
         let current = NSRunningApplication.current
         let executable = Bundle.main.executableURL?.resolvingSymlinksInPath()
+        let knownFamilyIDs: Set<String> = ["sh.safarier.app", "sh.safarier.browser", "sh.safarier.app.browser"]
+        let currentInFamily = current.bundleIdentifier.map { knownFamilyIDs.contains($0) } ?? false
         return NSWorkspace.shared.runningApplications.filter { app in
             guard app.processIdentifier != current.processIdentifier, !app.isTerminated, app.activationPolicy == .regular else { return false }
             if let bundleID = current.bundleIdentifier, app.bundleIdentifier == bundleID { return true }
+            if currentInFamily, let id = app.bundleIdentifier, knownFamilyIDs.contains(id) { return true }
             return executable != nil && app.executableURL?.resolvingSymlinksInPath() == executable
         }
     }

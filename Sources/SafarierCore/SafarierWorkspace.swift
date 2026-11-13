@@ -19,6 +19,14 @@ public struct SafarierWorkspace: Sendable {
     public var logsDirectory: URL { root.appendingPathComponent("logs", isDirectory: true) }
     /// sing-box 的配置和 pid 文件（每个 profile 一份）。配置里有节点凭据，Runner 退出时删除。
     public var singboxDirectory: URL { root.appendingPathComponent("sing-box", isDirectory: true) }
+    /// 浏览器标签页会话保存目录（每个 profile 一份）。
+    public var sessionsDirectory: URL { root.appendingPathComponent("sessions", isDirectory: true) }
+    /// 网站密码与表单凭据保存目录（每个 profile 一份）。
+    public var credentialsDirectory: URL { root.appendingPathComponent("credentials", isDirectory: true) }
+
+    public func webCredentials(for profileID: UUID, isEphemeral: Bool = false) -> WebCredentialStore {
+        WebCredentialStore(workspace: self, profileID: profileID, isEphemeral: isEphemeral)
+    }
 
     public func isRunning(_ profileID: UUID) -> Bool {
         ProfileLock.isHeld(profileID: profileID, in: locksDirectory)
@@ -42,6 +50,10 @@ public struct SafarierWorkspace: Sendable {
             locksDirectory.appendingPathComponent("\(id).lock"),
             singboxDirectory.appendingPathComponent("\(id).json"),
             singboxDirectory.appendingPathComponent("\(id).pid"),
+            sessionsDirectory.appendingPathComponent("\(id).json"),
+            sessionsDirectory.appendingPathComponent("\(id).lock"),
+            credentialsDirectory.appendingPathComponent("\(id).json"),
+            credentialsDirectory.appendingPathComponent("\(id).lock"),
         ] {
             try? FileManager.default.removeItem(at: url)
         }
@@ -52,17 +64,56 @@ public struct SafarierWorkspace: Sendable {
         for profile: Profile,
         url: URL? = nil,
         probe: Bool = false,
-        spiOverride: SPIFeatures? = nil
+        spiOverride: SPIFeatures? = nil,
+        backgroundAutomation: Bool = false
     ) -> RunnerLaunchSpec {
         RunnerLaunchSpec(
             profileID: profile.id,
-            startURL: url ?? profile.startURL,
+            startURL: backgroundAutomation ? URL(string: "about:blank") : (url ?? profile.startURL),
             languages: profile.languages,
             timeZoneIdentifier: profile.timeZoneIdentifier,
             probe: probe,
-            spiOverride: spiOverride
+            spiOverride: spiOverride,
+            backgroundAutomation: backgroundAutomation
         )
     }
+
+    private func prepareLaunch(_ profile: Profile, url: URL?, spiOverride: SPIFeatures?, launcher: RunnerLauncher?, backgroundAutomation: Bool) throws -> (launcher: RunnerLauncher, spec: RunnerLaunchSpec, environment: [String: String]?) {
+        guard !isRunning(profile.id) else { throw WorkspaceError.alreadyRunning(profile.id) }
+        if backgroundAutomation {
+            guard url == nil, spiOverride == nil else { throw ControlledLaunchError.incompatibleMode }
+        }
+        let actualLauncher = launcher ?? RunnerLauncher(logDirectory: logsDirectory)
+        let spec = runnerSpec(for: profile, url: url, spiOverride: spiOverride, backgroundAutomation: backgroundAutomation)
+        if backgroundAutomation {
+            var environment = ProcessInfo.processInfo.environment
+            environment["SAFARIER_HOME"] = root.path
+            return (actualLauncher, spec, environment)
+        }
+        return (actualLauncher, spec, nil)
+    }
+
+    /// Owned background launch uses the same lock, permission, spec and environment path.
+    public func launchOwnedBackground(_ profile: Profile, launcher: RunnerLauncher? = nil, controlInput: FileHandle? = nil) throws -> OwnedRunnerProcess {
+        let prepared = try prepareLaunch(profile, url: nil, spiOverride: nil, launcher: launcher, backgroundAutomation: true)
+        guard let environment = prepared.environment else { throw ControlledLaunchError.incompatibleMode }
+        return try prepared.launcher.launchOwned(prepared.spec, baseEnvironment: environment, controlInput: controlInput)
+    }
+
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+    /// Start the normal interactive profile with a private registration transport.
+    /// This does not register or authorize the child; its owner must do so separately.
+    public func launchOwnedInteractive(_ profile: Profile, launcher: RunnerLauncher? = nil, registrationInput: FileHandle, initialBlank: Bool = false, url: URL? = nil, spiOverride: SPIFeatures? = nil, nonActivatingPresentation: Bool = false) throws -> OwnedRunnerProcess {
+        try AutomationRunnerClient.prepareLocksDirectory(workspace: self)
+        let initialURL = url ?? (initialBlank && profile.startURL == nil ? URL(string: "about:blank") : nil)
+        let prepared = try prepareLaunch(profile, url: initialURL, spiOverride: spiOverride, launcher: launcher, backgroundAutomation: false)
+        var environment = ProcessInfo.processInfo.environment
+        environment["SAFARIER_HOME"] = root.path
+        var spec = prepared.spec
+        spec.nonActivatingPresentation = nonActivatingPresentation
+        return try prepared.launcher.launchOwnedInteractive(spec, baseEnvironment: environment, registrationInput: registrationInput)
+    }
+    #endif
 
     /// 起一个独立的 Runner 窗口进程，返回 pid。命令行 `launch` 和图形管理器共用。
     /// `launcher` 为 nil 时用当前可执行文件，日志写到 `logsDirectory`。
@@ -71,11 +122,15 @@ public struct SafarierWorkspace: Sendable {
         _ profile: Profile,
         url: URL? = nil,
         spiOverride: SPIFeatures? = nil,
-        launcher: RunnerLauncher? = nil
+        launcher: RunnerLauncher? = nil,
+        backgroundAutomation: Bool = false,
+        controlInput: FileHandle? = nil
     ) throws -> Int32 {
-        guard !isRunning(profile.id) else { throw WorkspaceError.alreadyRunning(profile.id) }
-        let launcher = launcher ?? RunnerLauncher(logDirectory: logsDirectory)
-        return try launcher.launch(runnerSpec(for: profile, url: url, spiOverride: spiOverride))
+        let prepared = try prepareLaunch(profile, url: url, spiOverride: spiOverride, launcher: launcher, backgroundAutomation: backgroundAutomation)
+        if let environment = prepared.environment {
+            return try prepared.launcher.launch(prepared.spec, baseEnvironment: environment, controlInput: controlInput)
+        }
+        return try prepared.launcher.launch(prepared.spec, controlInput: controlInput)
     }
 }
 

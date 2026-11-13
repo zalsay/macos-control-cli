@@ -31,7 +31,7 @@ sha256() {
 rm -rf "$OUT"
 mkdir -p "$OUT"
 for arch in $ARCHS; do
-  echo "==> darwin/$arch（tags: ${TAGS:-无}）"
+  echo "==> darwin/${arch}（tags: ${TAGS:-无}）"
   (
     cd "$SRC"
     CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -tags "$TAGS" -ldflags "$LDFLAGS" -o "$OUT/sing-box-$arch" ./cmd/sing-box
@@ -49,12 +49,12 @@ cp "$SRC/LICENSE" "$OUT/LICENSE"
 curl -fsSL https://www.gnu.org/licenses/gpl-3.0.txt -o "$OUT/COPYING"
 grep -q 'GNU GENERAL PUBLIC LICENSE' "$OUT/COPYING"
 {
-  echo "sing-box $VERSION，GPL-3.0-or-later（版权声明见 LICENSE，许可证全文见 COPYING），未修改源码。"
-  echo "源码：https://github.com/SagerNet/sing-box/tree/v$VERSION（commit $(git -C "$SRC" rev-parse HEAD)）"
+  echo "sing-box ${VERSION}，GPL-3.0-or-later（版权声明见 LICENSE，许可证全文见 COPYING），未修改源码。"
+  echo "源码：https://github.com/SagerNet/sing-box/tree/v${VERSION}（commit $(git -C "$SRC" rev-parse HEAD)）"
   echo "工具链：$(go version)；build tags：${TAGS:-无}；CGO_ENABLED=0"
   echo "Safarier.app 里的 sing-box 是下面各切片用 lipo -create 合并的 Universal 文件："
   for arch in $ARCHS; do
-    echo "  darwin/$arch：CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -trimpath -tags \"$TAGS\" -ldflags \"$LDFLAGS\" ./cmd/sing-box"
+    echo "  darwin/${arch}：CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -trimpath -tags \"$TAGS\" -ldflags \"$LDFLAGS\" ./cmd/sing-box"
     echo "    sha256 $(sha256 "$OUT/sing-box-$arch")"
   done
 } > "$OUT/SOURCE"

@@ -100,3 +100,23 @@ final class RunnerLaunchSpecTests: XCTestCase {
         }
     }
 }
+
+extension RunnerLaunchSpecTests {
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+    func testRegisteredNonActivatingPresentationRoundTripAndInvalidModes() throws {
+        var spec = RunnerLaunchSpec(profileID: id)
+        spec.registeredInteractive = true
+        spec.nonActivatingPresentation = true
+        XCTAssertEqual(try RunnerLaunchSpec.parse(spec.arguments()), spec)
+        let prefix = ["run", "--profile", id.uuidString]
+        for suffix in [["--non-activating-presentation"], ["--registered-interactive", "--non-activating-presentation", "--probe"], ["--registered-interactive", "--non-activating-presentation", "--background-automation"], ["--registered-interactive", "--non-activating-presentation", "--non-activating-presentation"]] {
+            XCTAssertThrowsError(try RunnerLaunchSpec.parse(prefix + suffix))
+        }
+    }
+    #endif
+    func testBackgroundSpecAndProbeConflict() throws {
+        let spec = RunnerLaunchSpec(profileID: UUID(), startURL: URL(string: "about:blank"), backgroundAutomation: true)
+        XCTAssertEqual(try RunnerLaunchSpec.parse(spec.arguments()), spec)
+        XCTAssertThrowsError(try RunnerLaunchSpec.parse(spec.arguments() + ["--probe"]))
+    }
+}

@@ -2,6 +2,7 @@ import Foundation
 
 /// 同一个二进制的三种身份，由命令行参数决定。
 public enum ExecutableRole: Equatable, Sendable {
+    public static let nonActivatingManagerArgument = "--show-manager-without-activation"
     /// 没有子命令（双击 .app、从访达打开、终端里直接运行）：图形管理器。
     case manager
     /// `run ...`：一个 profile 的 Runner 进程。
@@ -17,7 +18,7 @@ public enum ExecutableRole: Equatable, Sendable {
         var index = 0
         while index < arguments.count {
             let arg = arguments[index]
-            if arg.hasPrefix("-psn_") {
+            if arg == nonActivatingManagerArgument || arg.hasPrefix("-psn_") {
                 index += 1
             } else if arg.hasPrefix("-NS") || arg.hasPrefix("-Apple") {
                 index += 2

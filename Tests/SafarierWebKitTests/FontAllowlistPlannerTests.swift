@@ -102,6 +102,20 @@ final class FontAllowlistPlannerTests: XCTestCase {
         XCTAssertEqual(plan.excludedFontCount, 0)
     }
 
+    func testMatchingAssetWithNoExcludedFontsIsNoOp() throws {
+        let fixture = try makeFixture()
+        let plan = FontAllowlistPlanner.plan(
+            languages: ["zh-CN"],
+            roots: [fixture.systemDir, fixture.assetRoot + "/cjk.asset"],
+            assetRoot: fixture.assetRoot
+        )
+        XCTAssertTrue(plan.isNoOp)
+        XCTAssertEqual(plan.names, [])
+        XCTAssertEqual(plan.excludedFamilies, [])
+        XCTAssertEqual(plan.excludedFontCount, 0)
+        XCTAssertEqual(plan.sharedNamesDropped, 0)
+    }
+
     func testEnglishKeepsSystemFontAndDropsBothAssets() throws {
         let fixture = try makeFixture()
         let plan = fixture.plan(["en-US"])
@@ -156,9 +170,19 @@ final class FontAllowlistPlannerTests: XCTestCase {
     /// 回归：用 CTFontCollection 生成白名单时漏掉了 Times、Courier 等能按名字解析的字体。
     func testHostEnglishPlanKeepsSystemFontsThatFontCollectionOmits() {
         let plan = hostPlan(["en-US"])
-        let names = Set(plan.names)
-        for expected in ["Times", "Courier", "Heiti SC", "Hiragino Sans GB", "HiraginoSansGB-W3", "冬青黑体简体中文", "Songti SC", "Thonburi"] {
-            XCTAssertTrue(names.contains(expected), "en-US 白名单缺少 \(expected)（共 \(plan.names.count) 个名字）")
+        if plan.excludedFontCount == 0 {
+            // 无排除字体时不设置白名单，空 names 表示不限制，而非字体缺失。
+            XCTAssertTrue(plan.isNoOp)
+            XCTAssertEqual(plan.names, [])
+            XCTAssertEqual(plan.excludedFamilies, [])
+            XCTAssertEqual(plan.excludedFontCount, 0)
+            XCTAssertEqual(plan.sharedNamesDropped, 0)
+        } else {
+            XCTAssertFalse(plan.isNoOp)
+            let names = Set(plan.names)
+            for expected in ["Times", "Courier", "Heiti SC", "Hiragino Sans GB", "HiraginoSansGB-W3", "冬青黑体简体中文", "Songti SC", "Thonburi"] {
+                XCTAssertTrue(names.contains(expected), "en-US 白名单缺少 \(expected)（共 \(plan.names.count) 个名字）")
+            }
         }
     }
 

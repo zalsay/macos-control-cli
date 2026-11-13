@@ -1,0 +1,34 @@
+<!doctype html><meta charset="utf-8"><title>Safarier isolated native input probe</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;background:#f3f5f7;font:16px system-ui}body{height:1100px}
+#button{position:absolute;left:40px;top:40px;width:140px;height:60px}
+#hover{position:absolute;left:220px;top:40px;width:180px;height:60px;background:#ddd;padding:15px}#hover:hover{background:rgb(40,180,100)}
+#checkbox{position:absolute;left:620px;top:55px;width:26px;height:26px}
+#text{position:absolute;left:40px;top:140px;width:320px;height:40px;font:20px monospace}
+#password{position:absolute;left:430px;top:100px;width:300px;height:30px}
+#selection{position:absolute;left:400px;top:140px;width:340px;height:65px;font:20px monospace;resize:none}
+#range{position:absolute;left:40px;top:240px;width:400px;height:40px}
+#scroll{position:absolute;left:40px;top:330px;width:520px;height:180px;overflow:auto;border:2px solid #777}#scroll div{height:1300px;background:linear-gradient(#cde,#987)}
+#customdrag{position:absolute;left:600px;top:240px;width:150px;height:55px;background:#acf;-webkit-user-select:none;user-select:none;padding:10px}
+#label{position:absolute;left:40px;top:550px;color:#345}
+</style>
+<button id="button">Native button</button><div id="hover">Hover target</div><input id="checkbox" type="checkbox">
+<input id="password" type="password" autocomplete="off"><input id="text" autocomplete="off" spellcheck="false"><textarea id="selection" spellcheck="false">Native selection fixture text</textarea>
+<div id="customdrag">Pointer drag</div><input id="range" type="range" min="0" max="100" value="0"><div id="scroll"><div>Native scrolling fixture</div></div>
+<div id="label">Isolated diagnostic page. No network or production account.</div>
+<script>
+// Diagnostic fixture only: records browser input; no automation calls DOM click/focus/dispatchEvent.
+const records=[]; const counts={}; let clicks=0,doubles=0,hovers=0,hoverLeaves=0,customDragMoves=0,dragArmed=false;
+for(const type of ['pointerover','pointerenter','pointerleave','pointerout','pointermove','pointerdown','pointerup','mousedown','mouseup','mousemove','click','dblclick','wheel','keydown','keyup','beforeinput','input','change','focus','blur']){
+ document.addEventListener(type,e=>{counts[type]=(counts[type]||0)+1;records.push({type,id:e.target.id||e.target.tagName,trusted:e.isTrusted,buttons:e.buttons??null,button:e.button??null,which:e.which??null,key:null,x:e.clientX??null,y:e.clientY??null,activation:navigator.userActivation?.isActive??null});},true);
+}
+document.querySelector('#button').addEventListener('click',()=>clicks++);
+document.querySelector('#button').addEventListener('dblclick',()=>doubles++);
+document.querySelector('#hover').addEventListener('mouseenter',()=>hovers++);
+document.querySelector('#hover').addEventListener('mouseleave',()=>hoverLeaves++);
+document.querySelector('#customdrag').addEventListener('pointerdown',e=>{dragArmed=e.buttons===1;});
+document.querySelector('#customdrag').addEventListener('pointermove',e=>{if(dragArmed && e.buttons===1)customDragMoves++;});
+document.querySelector('#customdrag').addEventListener('pointerup',()=>{dragArmed=false;});
+window.probeSnapshot=()=>({clicks,doubles,hovers,hoverLeaves,customDragMoves,customDragSelectedLength:(()=>{const selection=window.getSelection(),drag=document.querySelector('#customdrag');return selection && (drag.contains(selection.anchorNode) || drag.contains(selection.focusNode)) ? selection.toString().length : 0;})(),passwordLength:document.querySelector('#password').value.length,checkbox:document.querySelector('#checkbox').checked,text:['','native-123','native-12','native-12中文'].includes(document.querySelector('#text').value)?document.querySelector('#text').value:'[redacted-unexpected-input]',textLength:document.querySelector('#text').value.length,unexpectedInput:!['','native-123','native-12','native-12中文'].includes(document.querySelector('#text').value)||document.querySelector('#selection').value!=='Native selection fixture text',range:Number(document.querySelector('#range').value),scroll:document.querySelector('#scroll').scrollTop,selection:[document.querySelector('#selection').selectionStart,document.querySelector('#selection').selectionEnd],textSelection:[document.querySelector('#text').selectionStart,document.querySelector('#text').selectionEnd],active:document.activeElement?.id||'',hasFocus:document.hasFocus(),hoverColor:getComputedStyle(document.querySelector('#hover')).backgroundColor,counts,records:records.slice(-220),width:innerWidth,height:innerHeight,dpr:devicePixelRatio});
+window.__probeReady=true;
+</script>

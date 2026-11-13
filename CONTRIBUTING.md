@@ -33,7 +33,7 @@ Capabilities that require runtime lookup belong in the Native Engine Bridge (`Sa
 
 ### Proxy fail-closed and credential safety
 
-- Each environment routes through its own `sing-box` process (subscription nodes) or `WKWebsiteDataStore.proxyConfigurations` (standalone SOCKS5 / HTTP CONNECT). If the proxy is down, the page fails to load. **Never fall back to a direct connection.**
+- Each environment routes through its own proxy core process: `sing-box` for URI nodes, `mihomo` for Clash subscriptions (which keep chained proxies, certificate pins and XUDP), or `WKWebsiteDataStore.proxyConfigurations` (standalone SOCKS5 / HTTP CONNECT). If the proxy is down, the page fails to load. **Never fall back to a direct connection.**
 - Passwords live in the Keychain. Helper processes get credentials through stdin (curl's `-K -`, with `F_SETNOSIGPIPE` on the pipe) or a `0600` config file. They never go into command-line arguments, logs or error messages.
 - Tests and docs use `example.com` / `.invalid` hosts and RFC 5737 / 3849 addresses, never real nodes.
 
@@ -66,7 +66,7 @@ Common changes and where they go:
 
 ## 3. How to Build & Verify
 
-Requirements: macOS 14+ and a recent Xcode (Swift 5.10+). Go is only needed to rebuild the bundled `sing-box`.
+Requirements: macOS 14+ and a recent Xcode (Swift 5.10+). Go is only needed to rebuild the bundled `sing-box` and `mihomo`.
 
 ### Unit tests
 
@@ -101,10 +101,11 @@ Attach the relevant part of the probe output to any PR that changes simulation, 
 
 ```sh
 scripts/build-singbox.sh                        # cross-compiles darwin/arm64 + amd64 sing-box (needs Go)
-SAFARIER_ARCH=universal scripts/build-app.sh    # universal | arm64 | x86_64 → dist/Safarier.app
+scripts/build-mihomo.sh                         # cross-compiles darwin/arm64 + amd64 mihomo (needs Go)
+SAFARIER_ARCH=universal scripts/build-app.sh    # universal | arm64 | x86_64 → dist/Safarier AI.app & dist/Safarier AI Browser.app
 ```
 
-`SAFARIER_VERSION` overrides the version and `SAFARIER_ICON_STYLE` picks the icon (`meridian`, `prism`, `titanium`, `shield`). The app is ad-hoc signed. Check it with `codesign --verify --deep --strict dist/Safarier.app` and `lipo -archs`.
+`SAFARIER_VERSION` overrides the version and `SAFARIER_ICON_STYLE` picks the icon (`meridian`, `prism`, `titanium`, `shield`). The apps are ad-hoc signed. Check them with `codesign --verify --deep --strict "dist/Safarier AI.app"` and `lipo -archs`.
 
 ## 4. Submitting Issues & PRs
 
@@ -118,4 +119,4 @@ SAFARIER_ARCH=universal scripts/build-app.sh    # universal | arm64 | x86_64 →
 4. Follow the surrounding code style. Comments explain *why* in plain words, and user-facing strings stay in Chinese like the rest of the UI.
 5. Changes to the Native Engine Bridge need an issue with runtime signature and capability verification results first.
 
-The bundled `sing-box` is unmodified upstream code under GPL-3.0-or-later. `scripts/build-singbox.sh` writes the exact source commit and build flags to `SOURCE`, which ships in `Contents/Resources/ThirdParty/sing-box/`. Keep that notice accurate if you change how it is built.
+The bundled `sing-box` is unmodified upstream code under GPL-3.0-or-later. `scripts/build-singbox.sh` writes the exact source commit and build flags to `SOURCE`, which ships in `Contents/Resources/ThirdParty/sing-box/`. The bundled `mihomo` follows the same rules (`scripts/build-mihomo.sh`, `Contents/Resources/ThirdParty/mihomo/`). Keep those notices accurate if you change how they are built. The field table in `Sources/SafarierNetwork/MihomoProxyFields.swift` was extracted from the pinned mihomo source; regenerate it when the pinned version changes.

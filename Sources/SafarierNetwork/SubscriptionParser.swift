@@ -3,11 +3,14 @@ import Foundation
 import FoundationNetworking
 #endif
 import SafarierCore
+import Yams
 
 public enum SubscriptionParseError: Error, Equatable {
     case invalidLine(String)
     case invalidBase64
     case invalidJSON
+    case invalidClashYAML
+    case unsupportedClash([String: Int])
     case unsupportedScheme(String)
 }
 
@@ -15,13 +18,19 @@ public enum SubscriptionParseError: Error, Equatable {
 public struct SubscriptionParseResult: Equatable, Sendable {
     public var nodes: [SubscriptionNode]
     public var skippedSchemes: [String: Int]
+    /// mihomo 会静默忽略、导入时明确提示的字段，按「协议.字段」计数（如 `["hysteria2.udp": 2]`）。这些节点仍然导入。
+    public var ignoredFields: [String: Int]
 
-    public init(nodes: [SubscriptionNode], skippedSchemes: [String: Int] = [:]) {
+    public init(nodes: [SubscriptionNode], skippedSchemes: [String: Int] = [:], ignoredFields: [String: Int] = [:]) {
         self.nodes = nodes
         self.skippedSchemes = skippedSchemes
+        self.ignoredFields = ignoredFields
     }
 
     public var skippedCount: Int { skippedSchemes.values.reduce(0, +) }
+
+    /// 有跳过的节点或被忽略的字段，导入时需要提示。
+    public var hasNotices: Bool { skippedCount > 0 || !ignoredFields.isEmpty }
 }
 
 /// Parses common sing-box/Xray subscription formats into the shared node model.
@@ -41,6 +50,7 @@ public enum SubscriptionParser {
         // 有些订阅（和 Windows 记事本存的文件）开头带 UTF-8 BOM，它不算空白，要单独去掉。
         let raw = stripBOM(content).trimmingCharacters(in: .whitespacesAndNewlines)
         let decoded = decodeBase64IfNeeded(raw)
+        if looksLikeClash(decoded) { return try parseClash(decoded) }
         var lines: [String] = []
         for physicalLine in decoded.components(separatedBy: .newlines) {
             let line = physicalLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -71,6 +81,116 @@ public enum SubscriptionParser {
         }
         if nodes.isEmpty, let firstUnsupported { throw firstUnsupported }
         return SubscriptionParseResult(nodes: nodes, skippedSchemes: skipped)
+    }
+
+    private static func looksLikeClash(_ text: String) -> Bool {
+        text.components(separatedBy: .newlines).contains { line in
+            let value = line.trimmingCharacters(in: .whitespaces)
+            return value == "proxies:" || value.hasPrefix("proxies: ") || value == "---"
+        }
+    }
+
+    /// Clash 订阅：每个代理条目原样保留（mihomo 后端要整段写进配置），同时整理出列表用的节点。
+    /// 节点列表只是摘要，不再丢字段：证书指纹、XUDP、链式代理都留在保存的条目里。
+    private static func parseClash(_ text: String) throws -> SubscriptionParseResult {
+        let root: [String: Any]
+        do { guard let object = try Yams.load(yaml: text) as? [String: Any] else { throw SubscriptionParseError.invalidClashYAML }; root = object }
+        catch { throw SubscriptionParseError.invalidClashYAML }
+        guard let entries = root["proxies"] as? [Any] else { throw SubscriptionParseError.invalidClashYAML }
+
+        // 第一遍：按名字建索引（链式代理按 dialer-proxy 的名字找上游）。重名的后出现的条目不参与，名字在配置里保持唯一。
+        var objects: [String: [String: Any]] = [:]
+        var json: [String: JSONValue] = [:]
+        var candidates: [(object: [String: Any], duplicate: Bool)] = []
+        for entry in entries {
+            guard let object = entry as? [String: Any], object["type"] is String else { throw SubscriptionParseError.invalidClashYAML }
+            if let name = object["name"] as? String, !name.isEmpty {
+                let duplicate = objects[name] != nil
+                if !duplicate {
+                    objects[name] = object
+                    json[name] = try jsonValue(object)
+                }
+                candidates.append((object, duplicate))
+            } else {
+                candidates.append((object, false))
+            }
+        }
+
+        var result = SubscriptionParseResult(nodes: [])
+        let supported: [String: SubscriptionNodeType] = ["ss": .shadowsocks, "socks5": .socks, "vless": .vless, "vmess": .vmess, "trojan": .trojan, "anytls": .anytls, "hysteria2": .hysteria2]
+        for (object, duplicate) in candidates {
+            guard let rawType = object["type"] as? String else { throw SubscriptionParseError.invalidClashYAML }
+            let type = rawType.lowercased()
+            if duplicate { result.skippedSchemes["重名节点", default: 0] += 1; continue }
+            guard let kind = supported[type] else {
+                let safe = ["hysteria", "hy2", "tuic", "ssr", "http", "wireguard"].contains(type) ? type : "其他协议"
+                result.skippedSchemes[safe, default: 0] += 1; continue
+            }
+            // mihomo 会忽略的字段：节点照常导入，但按字段名明确列出来（字段名是配置键，不含值）。
+            for key in MihomoProxyFields.ignoredKeys(in: object, clashType: type) {
+                result.ignoredFields["\(type).\(key)", default: 0] += 1
+            }
+            guard let name = object["name"] as? String, let server = object["server"] as? String,
+                  let port = object["port"] as? Int, !(object["port"] is Bool) else { throw SubscriptionParseError.invalidClashYAML }
+            // 链式代理的上游必须是订阅里的条目；缺失或成环时这个节点连不上，明确计数跳过，不让它进入配置。
+            guard let chain = try proxyChain(from: name, objects: objects, json: json) else {
+                result.skippedSchemes["\(type)（链式代理上游无效）", default: 0] += 1; continue
+            }
+            func string(_ key: String) -> String? { object[key] as? String }
+            func bool(_ key: String) throws -> Bool {
+                guard let value = object[key] else { return false }
+                guard let value = value as? Bool else { throw SubscriptionParseError.invalidClashYAML }; return value
+            }
+            for key in ["uuid", "username", "password", "cipher", "servername", "sni", "flow", "network"] {
+                if let value = object[key], !(value is String) { throw SubscriptionParseError.invalidClashYAML }
+            }
+            if let value = object["alterId"], (!(value is Int) || value is Bool) { throw SubscriptionParseError.invalidClashYAML }
+            let insecure = try bool("skip-cert-verify")
+            var parameters: [String: String] = [:]
+            if insecure { parameters["allowInsecure"] = "true" }
+            // hysteria2 只走 QUIC，列表里显示它的传输层。
+            let transport = string("network") ?? (kind == .hysteria2 ? "quic" : nil)
+            let node = SubscriptionNode(name: name, type: kind, server: server, serverPort: port,
+                uuid: string("uuid"), username: string("username"), password: string("password"),
+                method: string("cipher"), tls: try bool("tls") || kind == .trojan || kind == .anytls || kind == .hysteria2,
+                serverName: string("servername") ?? string("sni"), transport: transport, flow: string("flow"),
+                alterID: object["alterId"] as? Int, parameters: parameters, mihomoProxies: chain)
+            do { try node.validate() } catch { throw SubscriptionParseError.invalidClashYAML }
+            result.nodes.append(node)
+        }
+        if result.nodes.isEmpty {
+            if !result.skippedSchemes.isEmpty { throw SubscriptionParseError.unsupportedClash(result.skippedSchemes) }
+            throw SubscriptionParseError.invalidClashYAML
+        }
+        return result
+    }
+
+    /// 节点连接需要的条目：自己在前，然后沿 `dialer-proxy` 逐级找到的上游。上游缺失、名字为空或成环时返回 nil。
+    private static func proxyChain(from name: String, objects: [String: [String: Any]], json: [String: JSONValue]) throws -> [JSONValue]? {
+        var chain: [JSONValue] = []
+        var visited: Set<String> = []
+        var current = name
+        while true {
+            guard visited.insert(current).inserted, let object = objects[current], let entry = json[current] else { return nil }
+            chain.append(entry)
+            guard let upstream = object["dialer-proxy"] else { return chain }
+            guard let upstreamName = upstream as? String else { throw SubscriptionParseError.invalidClashYAML }
+            current = upstreamName
+        }
+    }
+
+    /// Yams 解析出的值转成可保存的 JSON 值。遇到认不出的类型（日期、二进制）直接报错，不悄悄改写成字符串。
+    private static func jsonValue(_ value: Any) throws -> JSONValue {
+        switch value {
+        case is NSNull: return .null
+        case let value as Bool: return .bool(value)
+        case let value as Int: return .int(value)
+        case let value as Double: return .double(value)
+        case let value as String: return .string(value)
+        case let value as [Any]: return .array(try value.map { try jsonValue($0) })
+        case let value as [String: Any]: return .object(try value.mapValues { try jsonValue($0) })
+        default: throw SubscriptionParseError.invalidClashYAML
+        }
     }
 
     /// Shadowsocks 链接的前缀（小写比较）。
@@ -392,7 +512,7 @@ public enum SubscriptionParser {
     }
 
     private static func decodeBase64IfNeeded(_ value: String) -> String {
-        guard let data = decodeBase64(stripBOM(value)), let text = String(data: data, encoding: .utf8), text.contains("://") else {
+        guard let data = decodeBase64(stripBOM(value)), let text = String(data: data, encoding: .utf8), text.contains("://") || looksLikeClash(text) else {
             return value
         }
         return stripBOM(text)

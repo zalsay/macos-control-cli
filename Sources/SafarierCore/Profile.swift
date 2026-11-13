@@ -33,6 +33,10 @@ public struct Profile: Codable, Equatable, Identifiable, Sendable {
     public var nodeName: String?
     /// `MacDeviceModel.id`；nil 表示跟随系统。
     public var deviceModel: String?
+    /// 历史兼容字段；不作为控制准入位，旧记录无需批量迁移。
+    public var allowsBackgroundAutomation: Bool
+    /// 控制该环境是否允许 Agent 操作；旧记录默认允许。
+    public var allowsAgentAccess: Bool
 
     public init(
         id: UUID = UUID(),
@@ -49,7 +53,9 @@ public struct Profile: Codable, Equatable, Identifiable, Sendable {
         spi: SPIFeatures = .defaultFeatures,
         subscriptionID: UUID? = nil,
         nodeName: String? = nil,
-        deviceModel: String? = nil
+        deviceModel: String? = nil,
+        allowsBackgroundAutomation: Bool = false,
+        allowsAgentAccess: Bool = true
     ) {
         self.id = id
         self.name = name
@@ -66,12 +72,14 @@ public struct Profile: Codable, Equatable, Identifiable, Sendable {
         self.subscriptionID = subscriptionID
         self.nodeName = nodeName
         self.deviceModel = deviceModel
+        self.allowsBackgroundAutomation = allowsBackgroundAutomation
+        self.allowsAgentAccess = allowsAgentAccess
     }
 
     /// 旧版 JSON 只有 id/name/mode/createdAt（及可选 proxyID），新增字段（含 spi）缺失时使用默认值。
     private enum CodingKeys: String, CodingKey {
         case id, name, mode, proxyID, createdAt, languages, timeZoneIdentifier, startURL, notes, spi
-        case subscriptionID, nodeName, deviceModel, followProxyLanguages, followProxyTimeZone
+        case subscriptionID, nodeName, deviceModel, followProxyLanguages, followProxyTimeZone, allowsBackgroundAutomation, allowsAgentAccess
     }
 
     public init(from decoder: Decoder) throws {
@@ -89,6 +97,8 @@ public struct Profile: Codable, Equatable, Identifiable, Sendable {
         subscriptionID = try container.decodeIfPresent(UUID.self, forKey: .subscriptionID)
         nodeName = try container.decodeIfPresent(String.self, forKey: .nodeName)
         deviceModel = try container.decodeIfPresent(String.self, forKey: .deviceModel)
+        allowsBackgroundAutomation = try container.decodeIfPresent(Bool.self, forKey: .allowsBackgroundAutomation) ?? false
+        allowsAgentAccess = try container.decodeIfPresent(Bool.self, forKey: .allowsAgentAccess) ?? true
         followProxyLanguages = try container.decodeIfPresent(Bool.self, forKey: .followProxyLanguages) ?? false
         followProxyTimeZone = try container.decodeIfPresent(Bool.self, forKey: .followProxyTimeZone) ?? false
     }
@@ -111,14 +121,14 @@ public struct Profile: Codable, Equatable, Identifiable, Sendable {
         }
     }
 
-    /// 复制设置（出站、语言、时区、机型、原生引擎接口、备注……），用新的 id，所以有自己全新的网站数据目录，不带原环境的 Cookie。
+    /// 复制设置（出站、语言、时区、机型、原生引擎接口、备注……），用新的 id，所以有自己全新的网站数据目录，不带原环境的 Cookie；旧后台自动化字段作为历史数据保留兼容。
     public func duplicated(name newName: String, id newID: UUID = UUID(), createdAt: Date = Date()) -> Profile {
         Profile(
             id: newID, name: newName, mode: mode, proxyID: proxyID, createdAt: createdAt,
             languages: languages, timeZoneIdentifier: timeZoneIdentifier,
             followProxyLanguages: followProxyLanguages, followProxyTimeZone: followProxyTimeZone,
             startURL: startURL, notes: notes, spi: spi,
-            subscriptionID: subscriptionID, nodeName: nodeName, deviceModel: deviceModel
+            subscriptionID: subscriptionID, nodeName: nodeName, deviceModel: deviceModel, allowsBackgroundAutomation: false, allowsAgentAccess: allowsAgentAccess
         )
     }
 

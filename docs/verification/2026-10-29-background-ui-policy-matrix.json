@@ -1,0 +1,721 @@
+{
+  "date": "2026-10-29",
+  "rows": [
+    {
+      "controlID": "start",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "openWindow",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "openTab",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "reopen",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "cycleWindow",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "initialWindowOrderOut",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "windowCannotBecomeKey",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "windowCannotBecomeMain",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "physicalMousePassThrough",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "noSpaceSwitch",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "noForegroundOrdering",
+      "group": "windowLifecycle",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserSession.swift",
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/WindowCycler.swift"
+      ],
+      "sourceObservation": "Current interactive path constructs and fronts windows. No verified background window host.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "targetBlank",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "windowOpen",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "windowClose",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "alert",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "confirm",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "prompt",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "beforeUnload",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "fileSelection",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "directorySelection",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "camera",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "microphone",
+      "group": "webUIDelegates",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift"
+      ],
+      "sourceObservation": "Existing dialogs/media/open panel are interactive. Beforeunload pre-display coverage not verified.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "save",
+      "group": "appActionsDownloads",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/DownloadsController.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "Downloads choose filesystem destinations and dialogs belong to original interactive UI; no active background path.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "printPage",
+      "group": "appActionsDownloads",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/DownloadsController.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "Downloads choose filesystem destinations and dialogs belong to original interactive UI; no active background path.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "share",
+      "group": "appActionsDownloads",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/DownloadsController.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "Downloads choose filesystem destinations and dialogs belong to original interactive UI; no active background path.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "download",
+      "group": "appActionsDownloads",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/Safarier/Browser/DownloadsController.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "Downloads choose filesystem destinations and dialogs belong to original interactive UI; no active background path.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "geolocation",
+      "group": "sensitivePermissionAPIs",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/SPIPrivacyAdapter.swift"
+      ],
+      "sourceObservation": "Public media delegate is not coverage for all sensitive APIs. No complete pre-prompt proof.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "notification",
+      "group": "sensitivePermissionAPIs",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/SPIPrivacyAdapter.swift"
+      ],
+      "sourceObservation": "Public media delegate is not coverage for all sensitive APIs. No complete pre-prompt proof.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "screenCapture",
+      "group": "sensitivePermissionAPIs",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/SPIPrivacyAdapter.swift"
+      ],
+      "sourceObservation": "Public media delegate is not coverage for all sensitive APIs. No complete pre-prompt proof.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "clipboardRead",
+      "group": "sensitivePermissionAPIs",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/SPIPrivacyAdapter.swift"
+      ],
+      "sourceObservation": "Public media delegate is not coverage for all sensitive APIs. No complete pre-prompt proof.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "elementFullscreen",
+      "group": "fullscreenMedia",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/WebViewSPI.swift"
+      ],
+      "sourceObservation": "Current interactive configuration enables element fullscreen and gesture-gates audio, neither proves no post-gesture sound or complete media/pointer policy.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "videoFullscreen",
+      "group": "fullscreenMedia",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/WebViewSPI.swift"
+      ],
+      "sourceObservation": "Current interactive configuration enables element fullscreen and gesture-gates audio, neither proves no post-gesture sound or complete media/pointer policy.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "pictureInPicture",
+      "group": "fullscreenMedia",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/WebViewSPI.swift"
+      ],
+      "sourceObservation": "Current interactive configuration enables element fullscreen and gesture-gates audio, neither proves no post-gesture sound or complete media/pointer policy.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "pointerLock",
+      "group": "fullscreenMedia",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/WebViewSPI.swift"
+      ],
+      "sourceObservation": "Current interactive configuration enables element fullscreen and gesture-gates audio, neither proves no post-gesture sound or complete media/pointer policy.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "audiblePlayback",
+      "group": "fullscreenMedia",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/WebViewSPI.swift"
+      ],
+      "sourceObservation": "Current interactive configuration enables element fullscreen and gesture-gates audio, neither proves no post-gesture sound or complete media/pointer policy.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "notificationSound",
+      "group": "fullscreenMedia",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/WebViewSPI.swift"
+      ],
+      "sourceObservation": "Current interactive configuration enables element fullscreen and gesture-gates audio, neither proves no post-gesture sound or complete media/pointer policy.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "muteWebView",
+      "group": "fullscreenMedia",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/WebViewSPI.swift"
+      ],
+      "sourceObservation": "Current interactive configuration enables element fullscreen and gesture-gates audio, neither proves no post-gesture sound or complete media/pointer policy.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "disableAudibleAutoplay",
+      "group": "fullscreenMedia",
+      "existingOwners": [
+        "Sources/SafarierWebKit/WebViewConfigurationFactory.swift",
+        "Sources/SafarierWebKit/WebViewSPI.swift"
+      ],
+      "sourceObservation": "Current interactive configuration enables element fullscreen and gesture-gates audio, neither proves no post-gesture sound or complete media/pointer policy.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "selectPopup",
+      "group": "nativePopups",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserViews.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "willOpenMenu customizes existing menu, not proof of pre-display suppression for native popups.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "datePopup",
+      "group": "nativePopups",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserViews.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "willOpenMenu customizes existing menu, not proof of pre-display suppression for native popups.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "colorPopup",
+      "group": "nativePopups",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserViews.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "willOpenMenu customizes existing menu, not proof of pre-display suppression for native popups.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "autocompletePopup",
+      "group": "nativePopups",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserViews.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "willOpenMenu customizes existing menu, not proof of pre-display suppression for native popups.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "contextMenu",
+      "group": "nativePopups",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserViews.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "willOpenMenu customizes existing menu, not proof of pre-display suppression for native popups.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "longPress",
+      "group": "nativePopups",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserViews.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "willOpenMenu customizes existing menu, not proof of pre-display suppression for native popups.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "linkPreview",
+      "group": "nativePopups",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserViews.swift",
+        "Sources/Safarier/Browser/BrowserContextMenu.swift"
+      ],
+      "sourceObservation": "willOpenMenu customizes existing menu, not proof of pre-display suppression for native popups.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "htmlDrag",
+      "group": "systemDrag",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserViews.swift"
+      ],
+      "sourceObservation": "No verified prevention of OS drag initiation; native mouse movement proof alone is insufficient.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "systemDrag",
+      "group": "systemDrag",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserViews.swift"
+      ],
+      "sourceObservation": "No verified prevention of OS drag initiation; native mouse movement proof alone is insufficient.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "httpAuthentication",
+      "group": "authExternal",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/SafarierWebKit/ProxyConfigurationBuilder.swift"
+      ],
+      "sourceObservation": "Existing webpage auth can show a sheet/default handling. Bound proxy auth is separate; no blanket authorization derived from policy enum.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "clientCertificate",
+      "group": "authExternal",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/SafarierWebKit/ProxyConfigurationBuilder.swift"
+      ],
+      "sourceObservation": "Existing webpage auth can show a sheet/default handling. Bound proxy auth is separate; no blanket authorization derived from policy enum.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "webAuthn",
+      "group": "authExternal",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/SafarierWebKit/ProxyConfigurationBuilder.swift"
+      ],
+      "sourceObservation": "Existing webpage auth can show a sheet/default handling. Bound proxy auth is separate; no blanket authorization derived from policy enum.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "passkey",
+      "group": "authExternal",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/SafarierWebKit/ProxyConfigurationBuilder.swift"
+      ],
+      "sourceObservation": "Existing webpage auth can show a sheet/default handling. Bound proxy auth is separate; no blanket authorization derived from policy enum.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "applePay",
+      "group": "authExternal",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/SafarierWebKit/ProxyConfigurationBuilder.swift"
+      ],
+      "sourceObservation": "Existing webpage auth can show a sheet/default handling. Bound proxy auth is separate; no blanket authorization derived from policy enum.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    },
+    {
+      "controlID": "externalURL",
+      "group": "authExternal",
+      "existingOwners": [
+        "Sources/Safarier/Browser/BrowserWindowController.swift",
+        "Sources/SafarierWebKit/ProxyConfigurationBuilder.swift"
+      ],
+      "sourceObservation": "Existing webpage auth can show a sheet/default handling. Bound proxy auth is separate; no blanket authorization derived from policy enum.",
+      "runtimeSignature": null,
+      "readback": null,
+      "isolatedNegativeFixture": null,
+      "status": "unverified"
+    }
+  ],
+  "notG2Evidence": true,
+  "repository": "/Volumes/RC500/dev/safarier",
+  "observedEnvironment": {
+    "os": {
+      "exit": 0,
+      "value": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+      "error": ""
+    },
+    "swift": {
+      "exit": 0,
+      "value": "Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)\nTarget: arm64-apple-macosx26.0",
+      "error": "swift-driver version: 1.148.6"
+    },
+    "sdk": {
+      "exit": 0,
+      "value": "26.5",
+      "error": ""
+    },
+    "webkit": {
+      "exit": 0,
+      "value": "21624.5.1.11.3",
+      "error": ""
+    }
+  },
+  "gate": "G2 blocked; source ownership inventory only, no runtime hook/readback/negative fixture validation"
+}

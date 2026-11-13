@@ -1,9 +1,93 @@
 import XCTest
 import AppKit
 import WebKit
+import Darwin
 import SafarierCore
 import SafarierWebKit
 @testable import Safarier
+
+/// 本测试独占的回环监听器：每个连接由网络层真实重置，不访问 DNS 或远端。
+private final class ResettingLoopbackFixture {
+    private final class State {
+        var accepted = 0
+        var errors: [String] = []
+        var closeResult: Int32 = -1
+    }
+
+    let url: URL
+    private let queue = DispatchQueue(label: "BrowserFixesTests.resetting-loopback")
+    private let source: DispatchSourceRead
+    private let closed = DispatchSemaphore(value: 0)
+    private let state = State()
+
+    init() throws {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        var sourceOwnsFD = false
+        defer { if !sourceOwnsFD { close(fd) } }
+        guard fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr = in_addr(s_addr: in_addr_t(INADDR_LOOPBACK).bigEndian)
+        let bindResult = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard fcntl(fd, F_SETFL, O_NONBLOCK) == 0, listen(fd, SOMAXCONN) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let result = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+        }
+        guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard let url = URL(string: "http://127.0.0.1:\(UInt16(bigEndian: address.sin_port))/x") else {
+            throw URLError(.badURL)
+        }
+        self.url = url
+        source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        let state = self.state
+        let closed = self.closed
+        source.setEventHandler {
+            while true {
+                let client = accept(fd, nil, nil)
+                if client < 0 {
+                    if errno == EINTR { continue }
+                    if errno != EAGAIN && errno != EWOULDBLOCK { state.errors.append("accept: \(errno)") }
+                    break
+                }
+                state.accepted += 1
+                var reset = linger(l_onoff: 1, l_linger: 0)
+                if setsockopt(client, SOL_SOCKET, SO_LINGER, &reset, socklen_t(MemoryLayout<linger>.size)) != 0 {
+                    state.errors.append("setsockopt: \(errno)")
+                }
+                if close(client) != 0 { state.errors.append("close client: \(errno)") }
+            }
+        }
+        source.setCancelHandler {
+            state.closeResult = close(fd)
+            closed.signal()
+        }
+        sourceOwnsFD = true
+        source.resume()
+    }
+
+    var descriptorFlags: Int32 { queue.sync { fcntl(Int32(source.handle), F_GETFD) } }
+    var acceptedCount: Int { queue.sync { state.accepted } }
+    var errors: [String] { queue.sync { state.errors } }
+
+    /// 关闭仅由 cancel handler 执行，并等待其完成后再断言。
+    func stop() -> Bool {
+        source.cancel()
+        guard closed.wait(timeout: .now() + 5) == .success else { return false }
+        return queue.sync { state.closeResult == 0 }
+    }
+}
 
 /// Round 3 浏览窗口修复：网页打开的视图不抢地址栏、target=_blank 走 createWebViewWith、源代码窗口、标签选中、
 /// 出错页网址残留、⇧⌘H 历史、右键打开方式的定时器、菜单置灰、地址栏 Esc。
@@ -133,9 +217,53 @@ final class BrowserFixesTests: XCTestCase {
 
     // MARK: - 出错页网址、⇧⌘H
 
+    func testResettingLoopbackFixtureResetsRepeatedConnectionsAndCloses() throws {
+        let fixture = try ResettingLoopbackFixture()
+        defer {
+            XCTAssertTrue(fixture.stop(), "监听器必须关闭")
+            XCTAssertTrue(fixture.errors.isEmpty, "\(fixture.errors)")
+        }
+        let flags = fixture.descriptorFlags
+        XCTAssertGreaterThanOrEqual(flags, 0)
+        XCTAssertNotEqual(flags & FD_CLOEXEC, 0, "监听器不能被 exec 后的子进程继承")
+        let host = try XCTUnwrap(fixture.url.host)
+        let port = try XCTUnwrap(fixture.url.port)
+        for _ in 0..<3 {
+            let client = socket(AF_INET, SOCK_STREAM, 0)
+            guard client >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            defer { close(client) }
+            var timeout = timeval(tv_sec: 2, tv_usec: 0)
+            guard setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = UInt16(port).bigEndian
+            guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else { throw URLError(.badURL) }
+            let result = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    connect(client, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            XCTAssertEqual(result, 0)
+            var byte: UInt8 = 0
+            let received = recv(client, &byte, 1, 0)
+            let error = errno
+            XCTAssertEqual(received, -1)
+            XCTAssertEqual(error, ECONNRESET)
+        }
+        XCTAssertEqual(fixture.acceptedCount, 3)
+    }
+
     func testFailedURLIsClearedByBackAndByOtherNavigation() throws {
+        let fixture = try ResettingLoopbackFixture()
+        defer {
+            XCTAssertTrue(fixture.stop(), "监听器必须关闭")
+            XCTAssertTrue(fixture.errors.isEmpty, "\(fixture.errors)")
+        }
         let controller = session.openWindow(url: nil)
-        let failing = try XCTUnwrap(URL(string: "https://nonexistent.example.invalid/x"))
+        let failing = fixture.url
         controller.webView.load(URLRequest(url: failing))
         spin(until: { controller.failedURL != nil })
         XCTAssertEqual(controller.failedURL, failing, "出错页记下原本要打开的网址")
@@ -146,8 +274,11 @@ final class BrowserFixesTests: XCTestCase {
         spin(until: { controller.failedURL == nil })
         XCTAssertNil(controller.failedURL, "打开了别的网页，⌘R 不再重试旧网址")
 
+        let firstConnectionCount = fixture.acceptedCount
         controller.webView.load(URLRequest(url: failing))
         spin(until: { controller.failedURL != nil })
+        XCTAssertEqual(controller.failedURL, failing, "第二次失败后记下网址")
+        XCTAssertGreaterThan(fixture.acceptedCount, firstConnectionCount, "第二次导航必须到达回环监听器")
         controller.goBack(nil)
         XCTAssertNil(controller.failedURL, "后退时立即清掉")
     }

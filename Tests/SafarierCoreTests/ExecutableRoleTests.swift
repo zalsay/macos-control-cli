@@ -4,6 +4,8 @@ import XCTest
 final class ExecutableRoleTests: XCTestCase {
     func testNoArgumentsOpensManagerGUI() {
         XCTAssertEqual(ExecutableRole.resolve([]), .manager)
+        XCTAssertEqual(ExecutableRole.resolve(["--show-manager-without-activation", "-psn_0_1"]), .manager)
+        XCTAssertEqual(ExecutableRole.resolve(["--show-manager-without-activation", "profile", "list"]), .cli)
     }
 
     func testLaunchServicesAndUserDefaultsArgumentsStillOpenManagerGUI() {

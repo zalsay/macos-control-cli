@@ -47,10 +47,10 @@
 | **Intel 版** | 搭载 **Intel** 处理器的 Mac | [**`Safarier-v1.0.1-macOS-x86_64.zip`**](https://github.com/Cd1s/safarier/releases/latest) |
 | **Universal 通用版** | 双架构合一（Apple Silicon 与 Intel 通用） | [**`Safarier-v1.0.1-macOS-universal.zip`**](https://github.com/Cd1s/safarier/releases/latest) |
 
-1. 解压下载的压缩包，将 **`Safarier.app`** 拖入「**应用程序**」（`/Applications`）文件夹。
+1. 解压下载的压缩包，将 **`Safarier AI.app`** 拖入「**应用程序**」（`/Applications`）文件夹。
 2. 首次打开如果系统弹出安全提示，在「终端」粘贴运行这一行命令即可正常打开：
    ```bash
-   xattr -dr com.apple.quarantine /Applications/Safarier.app
+   xattr -dr com.apple.quarantine "/Applications/Safarier AI.app"
    ```
 
 ---
@@ -76,6 +76,7 @@
 
 Safarier 完整还原了你在 Mac 上最顺手的 Safari 操作习惯：
 
+- **环境独立收藏夹**：浏览器工具栏可收藏当前 HTTP(S) 页面并打开收藏；环境详情可新增、编辑和删除。临时环境的收藏作为配置保留，网站数据仍是临时的。
 - **统一工具栏与智能地址栏**：左侧显示当前环境标识，居中地址栏支持安全锁展示、加载进度条，右键支持一键「**粘贴并前往 / 粘贴并搜索**」。
 - **完整 Safari 右键菜单**：支持在新标签页、后台标签页或新窗口打开链接/图片/视频；选中文字点击「**用 Google 搜索**」会直接在**当前环境的代理与新标签页**中打开，绝不跳出到系统默认浏览器。
 - **多窗口与多标签丝滑切换**：支持 macOS 原生标签栏、标签拖拽合并、标签概览网格，以及按 **`⌘\`` / `⌘·`**（兼容中英文输入法）在多个窗口与不同环境之间一键切换。
@@ -102,7 +103,9 @@ Safarier 完整还原了你在 Mac 上最顺手的 Safari 操作习惯：
 
 ## 开源声明与友链
 
-Safarier 基于 Swift 与 Apple 原生 WebKit 构建。应用内附带未修改的 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)（GPL-3.0-or-later）Universal 辅助程序用于多协议节点路由，完整许可证位于应用包内 `Contents/Resources/ThirdParty/sing-box/`。
+Safarier 基于 Swift 与 Apple 原生 WebKit 构建。应用内附带未修改的 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)（GPL-3.0-or-later）Universal 辅助程序用于多协议节点路由，完整许可证位于应用包内 `Contents/Resources/ThirdParty/sing-box/`。Clash 订阅由未修改的 Universal 版 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo)（GPL-3.0）运行，许可证位于 `Contents/Resources/ThirdParty/mihomo/`。
 
 - 社区与友链：[LINUX DO](https://linux.do)
 
+
+内测构建的默认工作区迁移说明见 [工作区迁移](docs/workspace-migration.md)。

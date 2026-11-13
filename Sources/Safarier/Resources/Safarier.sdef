@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dictionary title="Safarier">
+  <suite name="Safarier Automation" code="SFAu" description="Background page automation">
+    <command name="automation request" code="SFAurequ" description="Submit a versioned JSON request">
+      <cocoa class="SFRAutomationRequestCommand"/>
+      <direct-parameter type="text" description="JSON request"/>
+      <result type="text" description="JSON reply"/>
+    </command>
+  </suite>
+</dictionary>
