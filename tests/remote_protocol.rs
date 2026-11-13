@@ -73,3 +73,16 @@ fn select_file_query_syntax_does_not_enable_dispatch_policy() {
     )
     .is_err());
 }
+
+#[test]
+fn public_wire_cannot_invoke_or_inject_host_auto_takeover_controls() {
+    use copis_chrome::protocol::Scope;
+    use copis_chrome::remote::protocol::validate_action;
+    for request in [
+        serde_json::json!({"action":"transport-auto-resume","expectedLease":1,"expectedInputEpoch":1}),
+        serde_json::json!({"action":"click","connectionId":"conn-a","frameId":"frame-a","x":1,"y":1,"takeover":{}}),
+        serde_json::json!({"action":"click","connectionId":"conn-a","frameId":"frame-a","x":1,"y":1,"hostAutoTakeoverVersion":1}),
+    ] {
+        assert!(validate_action(Scope::Desktop, &request).is_err());
+    }
+}

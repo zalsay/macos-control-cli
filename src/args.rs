@@ -10,6 +10,10 @@ pub enum Command {
     Config(Vec<String>),
     Daemon(String),
     Host(HostCommand),
+    FilePut {
+        connection: String,
+        local: PathBuf,
+    },
     Remote {
         options: ClientOptions,
         command: Box<Command>,
@@ -27,6 +31,7 @@ impl std::fmt::Debug for Command {
             Self::Version => f.write_str("Version"),
             Self::Config(_) => f.write_str("Config { payload: [REDACTED] }"),
             Self::Host(command) => f.debug_tuple("Host").field(command).finish(),
+            Self::FilePut { .. } => f.write_str("FilePut { payload: [REDACTED] }"),
             Self::Remote { options, command } => f
                 .debug_struct("Remote")
                 .field("options", options)
@@ -77,7 +82,17 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
         }
         return Ok(Command::Config(config));
     }
-    let command = if command == "chrome" {
+    let command = if command == "file" {
+        if args.next().as_deref() != Some("put") {
+            return Err(Error::invalid("file 需要 put"));
+        }
+        "file-put".to_owned()
+    } else if command == "firefox" && scope == Scope::Desktop {
+        if args.next().as_deref() != Some("start") {
+            return Err(Error::invalid("firefox 需要 start"));
+        }
+        "firefox-start".to_owned()
+    } else if command == "chrome" {
         if args.next().as_deref() != Some("start") {
             return Err(Error::invalid("chrome 需要 start"));
         }
@@ -97,7 +112,7 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
         return Ok(Command::Daemon(subcommand));
     }
     let allowed: &[&str] = match command.as_str() {
-        "chrome-start" => &["url", "profile"],
+        "chrome-start" | "firefox-start" => &["url", "profile"],
         "status" => &[],
         "apps" if scope == Scope::Desktop => &[],
         "windows" if scope == Scope::Desktop => &["app"],
@@ -106,12 +121,36 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
         "connect" => &["window"],
         "observe" => &["connection", "out"],
         "disconnect" => &["connection"],
+        "click" if scope == Scope::Desktop => &[
+            "connection",
+            "frame",
+            "x",
+            "y",
+            "count",
+            "button",
+            "modifiers",
+        ],
         "click" => &["connection", "frame", "x", "y", "count"],
+        "move" | "hover" if scope == Scope::Desktop => {
+            &["connection", "frame", "x", "y", "duration-ms"]
+        }
+        "drag" if scope == Scope::Desktop => &[
+            "connection",
+            "frame",
+            "from-x",
+            "from-y",
+            "to-x",
+            "to-y",
+            "duration-ms",
+        ],
+        "actions" if scope == Scope::Desktop => &["connection", "frame", "file"],
+        "control" if scope == Scope::Desktop => &["command"],
         "click-target" => &["connection", "target", "jev-key"],
         "scroll" => &["connection", "frame", "x", "y", "delta-y"],
         "type" => &["connection", "frame", "text"],
         "press" => &["connection", "frame", "key"],
-        "select-file" => &["connection", "path"],
+        "select-file" => &["connection", "path", "file-id"],
+        "file-put" => &["connection", "local"],
         _ => return Err(Error::invalid("未知命令；请运行 --help")),
     };
     let mut options = BTreeMap::new();
@@ -137,9 +176,22 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
         options.insert(key.to_owned(), value);
     }
     let mut request = Map::new();
+    if command == "file-put" {
+        let connection = options
+            .get("connection")
+            .filter(|s| crate::remote::protocol::valid_id(s))
+            .ok_or_else(|| Error::invalid("file put 需要 --connection"))?
+            .clone();
+        let local = absolute(
+            options
+                .get("local")
+                .ok_or_else(|| Error::invalid("file put 需要 --local"))?,
+        )?;
+        return Ok(Command::FilePut { connection, local });
+    }
     request.insert("action".into(), json!(command));
     for (key, value) in &options {
-        if key == "out" {
+        if key == "out" || key == "file" {
             continue;
         }
         let name = match key.as_str() {
@@ -149,10 +201,29 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
             "frame" => "frameId",
             "count" => "clickCount",
             "delta-y" => "deltaY",
+            "duration-ms" => "durationMs",
+            "from-x" => "fromX",
+            "from-y" => "fromY",
+            "to-x" => "toX",
+            "to-y" => "toY",
             "jev-key" => "jevKey",
+            "file-id" => "fileId",
             key => key,
         };
-        let value = if ["window", "x", "y", "count", "delta-y"].contains(&key.as_str()) {
+        let value = if [
+            "window",
+            "x",
+            "y",
+            "count",
+            "delta-y",
+            "duration-ms",
+            "from-x",
+            "from-y",
+            "to-x",
+            "to-y",
+        ]
+        .contains(&key.as_str())
+        {
             json!(value
                 .parse::<i64>()
                 .map_err(|_| Error::invalid("数字选项必须为整数"))?)
@@ -162,6 +233,32 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
             json!(value)
         };
         request.insert(name.into(), value);
+    }
+    if command == "actions" {
+        use std::io::Read;
+        let path = options
+            .get("file")
+            .ok_or_else(|| Error::invalid("actions 需要 --file"))?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|_| Error::invalid("无法读取动作文件"))?
+            .take(65537)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::invalid("无法读取动作文件"))?;
+        if bytes.len() > 65536 {
+            return Err(Error::invalid("动作文件超过 64KiB"));
+        }
+        let actions: Value =
+            serde_json::from_slice(&bytes).map_err(|_| Error::invalid("动作文件必须为 JSON"))?;
+        request.insert("actions".into(), actions);
+    }
+    if matches!(
+        command.as_str(),
+        "firefox-start" | "move" | "hover" | "drag" | "actions" | "control"
+    ) || request.contains_key("button")
+        || request.contains_key("modifiers")
+    {
+        validate_desktop_extension(&Value::Object(request.clone()))?;
     }
     if let Some(bundle_id) = options.get("app") {
         if bundle_id.trim().is_empty()
@@ -185,6 +282,11 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
         }
     }
     let required: &[&str] = match command.as_str() {
+        "firefox-start" => &["profile"],
+        "control" => &["command"],
+        "move" | "hover" => &["connectionId", "frameId", "x", "y"],
+        "drag" => &["connectionId", "frameId", "fromX", "fromY", "toX", "toY"],
+        "actions" => &["connectionId", "frameId", "actions"],
         "connect" => &["windowId"],
         "observe" | "disconnect" => &["connectionId"],
         "click" => &["connectionId", "frameId", "x", "y"],
@@ -192,16 +294,104 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
         "scroll" => &["connectionId", "frameId", "x", "y", "deltaY"],
         "type" => &["connectionId", "frameId", "text"],
         "press" => &["connectionId", "frameId", "key"],
-        "select-file" => &["connectionId", "path"],
+        "select-file" => &["connectionId"],
         _ => &[],
     };
     if required.iter().any(|key| !request.contains_key(*key)) {
         return Err(Error::invalid("缺少必需选项；请运行 --help"));
     }
+    if command == "select-file"
+        && (request.contains_key("path") == request.contains_key("fileId")
+            || request
+                .get("fileId")
+                .is_some_and(|v| !v.as_str().is_some_and(crate::remote::protocol::valid_id)))
+    {
+        return Err(Error::invalid(
+            "select-file 需要 --path 或 --file-id，不能同时指定",
+        ));
+    }
     Ok(Command::Request {
         request: Value::Object(request),
         output: options.get("out").map(PathBuf::from),
     })
+}
+
+/// Common validation for the desktop Firefox additions, before any native dispatch.
+pub(crate) fn validate_desktop_extension(request: &Value) -> Result<()> {
+    match request["action"].as_str().unwrap_or("") {
+        "firefox-start" => {
+            let profile = request["profile"]
+                .as_str()
+                .filter(|s| {
+                    !s.is_empty()
+                        && s.len() <= 64
+                        && s.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                })
+                .ok_or_else(|| {
+                    Error::invalid("Firefox profile 必须为 1–64 个字母、数字、下划线或短横线")
+                })?;
+            let _ = profile;
+            if let Some(url) = request.get("url") {
+                let raw = url
+                    .as_str()
+                    .ok_or_else(|| Error::invalid("URL 必须为字符串"))?;
+                let url = url::Url::parse(raw)
+                    .map_err(|_| Error::invalid("Firefox URL 必须为 HTTP(S) 地址"))?;
+                if raw.len() > 4096
+                    || raw.chars().any(char::is_control)
+                    || !matches!(url.scheme(), "http" | "https")
+                    || url.host_str().is_none()
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                {
+                    return Err(Error::invalid("Firefox URL 必须为无凭据的 HTTP(S) 地址"));
+                }
+            }
+        }
+        "move" | "hover" | "drag" | "actions" => {
+            // Real frame bounds are checked again by Service and the helper.
+            crate::firefox::actions::compile(request, 1600, 1600, (0, 0))?;
+        }
+        "control" => {
+            if !matches!(
+                request["command"].as_str(),
+                Some("state" | "pause" | "resume" | "cancel")
+            ) {
+                return Err(Error::invalid(
+                    "control command 必须为 state、pause、resume 或 cancel",
+                ));
+            }
+        }
+        "click" => {
+            if request
+                .get("button")
+                .is_some_and(|b| !matches!(b.as_str(), Some("left" | "middle" | "right")))
+            {
+                return Err(Error::invalid("button 必须为 left/middle/right"));
+            }
+            if let Some(modifiers) = request.get("modifiers") {
+                let raw = modifiers
+                    .as_str()
+                    .ok_or_else(|| Error::invalid("modifiers 必须为逗号分隔的修饰键"))?;
+                let mut seen = std::collections::HashSet::new();
+                for name in raw.split(',') {
+                    let key = match name {
+                        "shift" => "shift",
+                        "control" | "ctrl" => "control",
+                        "alt" => "alt",
+                        "meta" | "super" => "meta",
+                        _ => return Err(Error::invalid("修饰键无效")),
+                    };
+                    if !seen.insert(key) {
+                        return Err(Error::invalid("修饰键重复"));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn absolute(value: &str) -> Result<PathBuf> {
@@ -270,6 +460,7 @@ fn parse_remote(args: Vec<String>, scope: Scope) -> Result<Command> {
     }
     match &command {
         Command::Request { request, .. } if request.get("jevKey").is_none() => {}
+        Command::FilePut { .. } => {}
         Command::Request { .. } => return Err(Error::invalid("远程请求不允许 jevKey")),
         _ => return Err(Error::invalid("远程只允许请求命令")),
     }
@@ -314,6 +505,7 @@ fn parse_host(args: Vec<String>) -> Result<Command> {
                 "--token-file",
                 "--state-dir",
                 "--files-root",
+                "--upload-dir",
             ][..],
             _ => &["--state-dir"][..],
         };
@@ -382,6 +574,7 @@ fn parse_host(args: Vec<String>) -> Result<Command> {
             token_file: absolute(required("--token-file")?)?,
             state_dir: optional_path("--state-dir")?,
             allowed_file_roots: roots,
+            upload_dir: optional_path("--upload-dir")?,
         }),
     };
     Ok(Command::Host(host))
@@ -405,6 +598,12 @@ pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面�
   desktop-control disconnect --connection <id>
   desktop-control daemon start|stop|status|run
   desktop-control chrome start [--profile <Chrome display name>] [--url <http(s)://...>]
+  desktop-control firefox start --profile <NAME> [--url <http(s)://...>]
+  desktop-control move --connection <id> --frame <id> --x <n> --y <n> [--duration-ms <0..2000>]
+  desktop-control hover --connection <id> --frame <id> --x <n> --y <n> [--duration-ms <0..2000>]
+  desktop-control drag --connection <id> --frame <id> --from-x <n> --from-y <n> --to-x <n> --to-y <n> [--duration-ms <0..2000>]
+  desktop-control actions --connection <id> --frame <id> --file <actions.json>
+  desktop-control control --command state|pause|resume|cancel
   desktop-control --config [show <name> | set <name> --url <url> --model <model> --api-key-stdin | default <name> | enable <name> | disable <name>]
   desktop-control --config window --max-width <400..1600>
   desktop-control --config chrome --profile <Chrome display name> | --clear-profile
@@ -413,7 +612,7 @@ pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面�
 观察返回 connectionId、frameId、imagePath 和 OCR；点击坐标使用该窗口截图的原像素，不缩放或猜偏移。
 帧可重复使用且无时间硬过期；页面或窗口几何变化后重新 observe。输入串行，不重放失败动作。
 只读观察不切前台；首次输入等待 3 秒接管倒计时，会占用真实鼠标键盘。
-人工接管或失焦后停止输入；USER_PAUSED 须等用户通过控制条继续，不重建 runtime 绕过暂停。
+本机模式人工接管或失焦后停止输入；USER_PAUSED 须等用户通过控制条继续，不重建 runtime 绕过暂停。
 原生授权弹窗须单独枚举、连接和观察；不能复用 Chrome 的连接或坐标，不能自动点击未获授权的“允许”。
 禁用默认模型后 click-target 返回 MODEL_DISABLED；--jev-key 不绕过禁用，普通 OCR/坐标点击不受影响。
 click-target 通过 models.toml 中完整 Decisions URL 发送 target 与 ID/文字；--jev-key 只覆盖本次密钥，不隐式读取 .env 或环境 key。
@@ -421,6 +620,10 @@ click-target 通过 models.toml 中完整 Decisions URL 发送 target 与 ID/文
 chrome start 需要宿主控制Google Chrome的macOS自动化权限；权限缺失明确拒绝，不代替本人授权。
 chrome start --profile 指定 Chrome 的显示名称（仅匹配已有配置，不是路径）；省略时使用 [chrome].profile。它与 models.toml 中的模型 profile 无关，且不会创建 Chrome 配置。
 chrome start 仅创建并布局新窗口：主屏可用区域最左侧、全高，宽默认最多1600原像素；随后返回原connect凭据，不移动其他窗口。
+Firefox、move/hover/drag/actions 与 click --button left|middle|right / --modifiers shift,control,alt,meta 用于显式 MCC_DOCKER=1 的 Linux 容器桌面；新增输入选项要求 Firefox 系统输入连接。
+firefox start 必须显式指定 --profile NAME；NAME 为 1–64 个字母、数字、下划线或短横线，不是路径。
+actions 文件为 version:1 的受限步骤 JSON，最多 64KiB、256 步、总时长 10 秒，按键与按钮必须释放；文件内容内联发送，不把本地路径交给远端。
+control 只在本地控制当前桌面；已有远端 owner 时拒绝，不绕过 Host 的 owner 或恢复锁。
 点击投递不代表业务完成，不自动重试。
 原生文件选择 select-file 暂仅支持 Google Chrome；非 key 授权面板的键盘输入仍要求精确焦点。
 
@@ -462,6 +665,14 @@ pub fn help_text(scope: Scope, program: &str) -> String {
 已有窗口可先 windows，再 connect --window <windowId>；chrome start 返回本次新窗口的连接。
 本机任务完成先 disconnect；仅需结束本任务自建 daemon 时，执行 {program} daemon stop，再用 {program} daemon status 确认 running:false；勿停止常驻 Host 或他人的 daemon。
 
+滚动方向与回执：
+--delta-y 是 [-1200,1200] 内的非零整数，正数向下、负数向上；不是“负数向下”。
+x/y 必须取自本帧完整窗口截图，并位于要滚动的可滚动内容区域，不用网页 clientX/clientY 或全屏坐标。
+  {program} scroll --connection <connectionId> --frame <frameId> --x <x> --y <y> --delta-y 1200
+  {program} scroll --connection <connectionId> --frame <frameId> --x <x> --y <y> --delta-y -1200
+顶部向上或底部向下可无变化；sent:true 不等于页面已滚动，应 observe 核验，异常保留完整 error.code/message。
+PageDown 依赖键盘焦点，不是坐标滚轮的等价替代，不自动兜底或重放滚动。
+
 模型配置（在执行桌面操作的 Mac 上设置，远端模式只在 Host 设置）：
   {program} --config set jev --url https://openrouter.ai/api/alpha/decisions --model typesafe/jev-1.13 --api-key-stdin
   {program} --config default jev
@@ -484,7 +695,7 @@ SSH 单独启动 helper 可能使权限归属 SSH，而非已授权的 mcc；以
 将 /absolute 替换为自己的绝对路径；初始化凭据前，先创建权限 0700 的私有父目录。
   {program} host tls init [--ip <IP>]... [--dns <DNS>]... --output-dir <absolute-new-dir>
   {program} host token init --output <absolute-new-token-file>
-  {program} host start [--listen <ip:port>] --tls-cert <absolute-cert.pem> --tls-key <absolute-key.pem> --token-file <absolute-token-file> [--state-dir <absolute-dir>] [--files-root <absolute-dir>]...
+  {program} host start [--listen <ip:port>] --tls-cert <absolute-cert.pem> --tls-key <absolute-key.pem> --token-file <absolute-token-file> [--state-dir <absolute-dir>] [--upload-dir <absolute-private-dir>] [--files-root <absolute-dir>]...
 无公网证书时可生成私有 CA；--ip/--dns 必须覆盖客户端使用的 IP/域名，输出拒绝覆盖已有目标：
   {program} host tls init --dns host.example --output-dir /absolute/host-tls
   {program} host token init --output /absolute/access.token
@@ -492,13 +703,19 @@ SSH 单独启动 helper 可能使权限归属 SSH，而非已授权的 mcc；以
 host start 是前台服务；公网监听需显式 --listen 0.0.0.0:8765 并放通端口，默认 127.0.0.1:8765。
 只向客户端可信分发公共 host-ca.pem 和独立 access.token；host-key.pem、host-ca-key.pem 私钥不外传。
 证书/私钥/token 使用受保护普通文件；CA 365 天、服务证书 90 天，到期前人工重新配对，无自动续期。
-默认拒绝远端 select-file；Host 显式 --files-root 放行的路径属于远端，不会上传客户端文件。
+默认拒绝远端文件传输与 select-file。Host --upload-dir 启用私有接收目录后：
+  {program} --remote <wss-url> --token-file <absolute-token-file> file put --connection <connectionId> --local <absolute-client-file>
+  {program} --remote <wss-url> --token-file <absolute-token-file> select-file --connection <connectionId> --file-id <fileId>
+file put 返回 fileId/name/bytes/sha256，单文件最多 64MiB；先点击网页上传按钮打开原生选择框，再 select-file。
+fileId 仅限原 Host 会话及 connection，显式 disconnect 清理文件；选择文件不等于提交网页。
+Host 显式 --files-root 放行的 --path 属于远端，不会上传客户端文件。
 
 本地 client（在 Agent 所在 Mac 执行，必须与 Host 精确匹配版本和入口模式）：
   {program} --remote <wss-url> [--ca-cert <absolute-ca.pem>] --token-file <absolute-token-file> [--remote-state-dir <absolute-dir>] <command> [args...]
   {program} --remote wss://host.example:8765/mcc/v1 --ca-cert /absolute/host-ca.pem --token-file /absolute/access.token --remote-state-dir /absolute/client-state status
 --remote 必须紧跟命令名；连接参数在桌面命令之前。仅支持 wss://，固定路径 /mcc/v1，不支持明文 ws://。
 公共 CA 可省略 --ca-cert 使用系统信任；私有 CA 须指定客户端本地 host-ca.pem，不跳过证书校验。
+若握手返回 PROTOCOL_ERROR，先看版本/scope 错误并核对两端 --version；握手失败时换 scroll/PageDown 都不会执行。
 把 status 换为 chrome start、observe、click-target、type、press、disconnect 等桌面命令即可。
 客户端不读取本地模型配置、不在客户端启动 helper/Chrome/桌面 daemon；失败不回退本机、不自动重放输入。
 远端不支持 --config、--jev-key、daemon、host、permissions --request；这些管理操作只在 Host 本地执行。
@@ -506,8 +723,11 @@ host start 是前台服务；公网监听需显式 --listen 0.0.0.0:8765 并放�
 observe --out 指定客户端新图片路径，不覆盖已有文件；click-target 的截图/OCR/Jev 与坐标查询均在 Host。
 
 暂停、断线与恢复：
-USER_PAUSED/失焦/人工接管后停止输入，只能由远端本人通过控制条继续并等待原 3 秒倒计时。
-活动控制会话空闲 300 秒会暂停；已断开的非控制会话也会过期，新会话不解除原暂停或恢复锁。
+暂停回执保留 FOCUS_LOST / reason:USER_PAUSED 兼容字段；不代表可以重放旧动作。
+Host 默认自动接管：鼠标活动/普通失焦造成的软暂停，在同 owner、原连接及有效帧的新输入前自动恢复，无需用户点击继续。
+自动恢复保留原 lease、更新 epoch，仍经原窗口/焦点/几何/权限校验，控制条展示后等待原 3 秒倒计时；不重放旧动作。
+显式暂停/取消/关闭控制条、断线投递不确定或恢复锁保持停止，不能自动解除；本机非 Host 模式仍需本人点击继续。
+活动控制会话空闲 300 秒按传输硬暂停处理；已断开的非控制会话也会过期，新会话不解除原硬暂停或恢复锁。
 已断开会话过期可能返回 REMOTE_CLIENT_FAILED；确认无控制连接后，可保留旧缓存并显式选择新的私有 --remote-state-dir。
 Host 重启后旧客户端可能返回 RECOVERY_REQUIRED；不能靠清缓存/换 session/换 runtime 恢复输入。
 无可用控制条或 Host 留下恢复记录时，先停止 Host，再在远端核对原 daemon/helper 安全停止并执行：
@@ -545,7 +765,7 @@ pub const HELP: &str = r#"copis-chrome — 独立的 macOS Chrome 桌面自动�
 
 同一连接可跨命令复用；帧可多次输入，无时间硬过期，最多保留 32 帧。
 输入会激活目标 Chrome 并占用系统鼠标键盘；读取截图不会切前台。
-屏幕控制条可执行/暂停；用户接管鼠标后输入暂停，点击“继续”并等待 3 秒倒计时后才恢复新输入；暂停不会自动恢复，也不会重放旧输入。Observe 仍可用。
+屏幕控制条可执行/暂停；本机模式用户接管鼠标后输入暂停，点击“继续”并等待 3 秒倒计时后才恢复新输入；暂停不会自动恢复，也不会重放旧输入。Observe 仍可用。
 禁用默认模型后 click-target 返回 MODEL_DISABLED；--jev-key 不绕过禁用，普通 OCR/坐标点击不受影响。
 click-target 从 ~/.config/mcc/models.toml（或 MCC_CONFIG_DIR）读取 URL/key/model，发送 target 和 ID/文字；--jev-key 仅覆盖本次 key，不隐式读 .env。
 chrome start 需要宿主控制Google Chrome的macOS自动化权限；权限缺失明确拒绝。

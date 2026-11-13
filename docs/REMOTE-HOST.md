@@ -2,6 +2,10 @@
 
 本页适用于0.3.4及之后版本；客户端/Host仍须精确匹配版本。代码/构建、TLS回环模拟与真实双机/公网验收分别记录在[V034验证记录](V034-VERIFICATION.md)，不以本机模拟成功代替真实部署验收。
 
+Ubuntu 22.04 Docker 桌面可使用同一 WSS Host 和客户端控制普通 Firefox/X11；容器的初始化、进程托管、端口发布和持久化见 [Docker Host 模式](MCC-DOCKER.md#host-模式从容器外控制桌面)。下述 macOS 权限和物理桌面准备步骤适用于 Mac Host。
+
+Docker 的独立桌面不因普通 noVNC 键鼠、失焦或控制 owner 在命令之间空闲 300 秒而进入持续人工暂停，也不等待三秒倒计时；每条新输入先激活目标。下文的自动人工接管和空闲暂停描述适用于 macOS Host。Docker 仍保留明确暂停/取消、在途心跳和传输故障停止、输入释放及恢复锁。
+
 ## 运行方式和信任边界
 
 ```text
@@ -90,7 +94,7 @@ mcc host start \
 
 Host为前台常驻进程；默认bind为127.0.0.1:8765，公网必须显式指定可达地址并由操作者设置网络/防火墙/路由。所有监听地址都要求TLS和token，不能裸露ws://。
 
-Host启动入口固定scope：mcc和desktop-control为desktop，copis-chrome为chrome；客户端scope不匹配拒绝，不静默提升权限。一个Host同时一个控制会话，一个活动动作；其他会话不能接管既有connectionId或frameId。Host不会为了取得控制断开他人的本地连接、kill他人daemon或重建helper绕过暂停。
+Host启动入口固定scope：mcc和desktop-control为desktop，copis-chrome为chrome；客户端scope不匹配拒绝，不静默提升权限。一个Host同时一个控制会话，一个活动动作；默认其他会话不能接管既有connectionId或frameId。Docker 桌面例外：持同一 Host token 的客户端可用 status 取回 connectionId，并在没有活动请求、待关闭传输或后台动作时续用同一连接；原生 owner capability 和窗口保持，旧帧及原客户端上传文件失效，旧回执仅可只读查询、不能重放，需重新 observe/上传。明确暂停、取消不确定和恢复锁不因此解除。Host不会为了取得控制断开他人的本地连接、kill他人daemon或重建helper绕过暂停。
 
 可选 `--state-dir <绝对私有目录>` 指定Host状态位置；不提供时在MCC_CONFIG_DIR（默认~/.config/mcc）下使用scope隔离的remote-host目录。不要在Host运行时删除恢复记录或更换状态目录规避保护。
 
@@ -127,11 +131,15 @@ mcc --remote wss://<远端公网IP>:8765/mcc/v1 \
 
 正常命令在完整回执/图片后确认ACK，再关闭本次WS；保留桌面控制连接，下一条CLI可以继续。不同于disconnect，也不重启helper。
 
-原有人工接管、失焦、窗口变化、暂停、首次3秒倒计时和取消门禁保留。活动请求最多15秒无法确认心跳、超时、回执/ACK丢失或控制会话300秒空闲后，禁止新输入，并要求原生保持暂停ACK。取消未确认不能报告已安全停止。网络不是瞬间感知，只有ACK后才承诺旧请求不能继续投递。
+0.3.6 起，Host 默认对鼠标活动或普通失焦造成的**软暂停**自动接管：当前受中断动作仍失败，不重放；同一 owner 的下一条新输入须使用原连接及仍登记、几何匹配的帧，daemon 在原预留流程中请求 Native 原子恢复。Native 保留同一 lease、只推进一次 epoch，等待原窗口/身份/几何/焦点/权限检查和控制条实际展示后，再开始原 3 秒倒计时，无需点击“继续”。click-target 保持自己的单次观察/Jev/原点击链，没有增加 OCR 复核。观察或 status 本身不会恢复，也不替换连接/helper。
 
-投递结果不确定时返回对应错误和requestId，不自动重放。已有回执可通过只读query协议查询；查询不是重新执行。重连/清客户端缓存/换session/更换scope不能自动解除USER_PAUSED。
+明确点击暂停、取消或关闭控制条属于**硬停止**；传输中断、投递不确定、owner 死亡、未知状态或恢复锁也不会自动解除。软暂停期间再按明确停止，会升级为硬停止，不能被后续软事件降级。Native 能力缺失、lease/epoch 变化、恢复回执异常、旧序号、他人的连接或帧均保守拒绝；原窗口与焦点等输入门禁没有放宽。本机非 Host 模式仍由本人点击继续。
 
-有原控制条时，由远端本人点击继续，保留原lease并等待原3秒倒计时，再发送新请求。没有可用控制条或Host重启/崩溃留下恢复记录时，先停止前台Host并保留其状态目录/原daemon，再由Host本人明确执行（运行中的Host持有状态锁）：
+首次3秒倒计时和取消门禁保留。活动请求最多15秒无法确认心跳、超时、回执/ACK丢失或控制会话300秒空闲后，禁止新输入，并要求原生保持暂停ACK。取消未确认不能报告已安全停止。网络不是瞬间感知，只有ACK后才承诺旧请求不能继续投递。
+
+投递结果不确定时返回对应错误和requestId，不自动重放。已有回执可通过只读query协议查询；查询不是重新执行。重连/清客户端缓存/换session/更换scope不能解除硬暂停或恢复锁；软暂停仅由同 owner 的新输入在原执行器内按上述条件恢复。
+
+对于明确的人工硬停止，有原控制条时仍由远端本人点击继续，保留原lease并等待原3秒倒计时，再发送新请求。没有可用控制条或Host重启/崩溃留下恢复记录时，先停止前台Host并保留其状态目录/原daemon，再由Host本人明确执行（运行中的Host持有状态锁）：
 
 ```sh
 mcc host recover
@@ -143,7 +151,20 @@ mcc host recover --state-dir /absolute/private/host-state
 
 ## 7. 文件与管理接口
 
-默认远端select-file拒绝。Host本人显式设置允许根时才开放，例如：
+默认拒绝文件传输和远端 `select-file`。Host 可显式启用私有文件接收目录：
+
+```sh
+mcc host start ... --upload-dir /absolute/private/transfers
+# 在客户端执行，复用原 --remote/CA/token/--remote-state-dir 参数：
+mcc --remote ... file put --connection CONNECTION_ID --local /absolute/client/report.pdf
+mcc --remote ... select-file --connection CONNECTION_ID --file-id FILE_ID
+```
+
+`file put` 返回 `fileId/name/bytes/sha256`。接收前检查 owner/connection，按 32KiB 二进制块接收，长度和 SHA256 一致后才发布。单文件最多 64MiB、整个目录最多 256MiB/128 项；55 秒总预算，单次读等待最多 5 秒。文件名仅允许 basename。文件保存在私有目录，不能指定任意 Host 目标路径。`fileId` 绑定原 Host 会话和 connection；跨会话/连接、文件被替换或内容被修改时拒绝。显式 disconnect 清理该连接的文件；异常退出残留继续占配额，由本地操作者在 Host 停止后检查清理。
+
+客户端需先点击网页上传控件打开原生文件选择框，再调用 `select-file`。Docker Firefox 通过 X11 系统事件完成 GTK 原生选择框，选择文件不自动提交网页。Docker 配置与完整示例见 [Docker 使用指南](MCC-DOCKER.md#从宿主传文件并上传网页)。Host 握手仅在启用接收目录时声明 `remote.files.v1`；旧 Host 不支持这两个新增用法。
+
+Host 本人也可沿用原有路径白名单，例如：
 
 ```sh
 mcc host start ... --files-root /absolute/host/uploads
@@ -151,7 +172,7 @@ mcc host start ... --files-root /absolute/host/uploads
 
 之后select-file的path始终属于Host，且必须解析在允许根内，不能借symlink逃逸。它不会上传客户端本地文件。canonical-root检查不是文件系统沙箱；本地同权限进程在检查与原生文件选择之间并发替换路径仍存在TOCTOU边界，不应把允许根放在不可信进程可写的位置。图片下载只限会话注册帧，不是任意Host路径读取。
 
-远端不提供：--config、--jev-key、Host/daemon生命周期、permissions --request、恢复暂停、shell或通用文件管理。初始化、模型配置、token轮换和恢复都在Host本地明确操作。
+远端不提供：--config、--jev-key、Host/daemon生命周期、permissions --request、任意恢复/清除硬暂停、shell或通用文件管理。内部 transport-auto-resume 不作为 WSS/CLI 动作暴露，客户端不能注入 takeover 或能力字段。初始化、模型配置、token轮换和恢复都在Host本地明确操作。
 
 ## 8. 公网资源限制与轮换
 

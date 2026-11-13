@@ -2,7 +2,7 @@
 use super::{
     credentials, images,
     options::HostOptions,
-    protocol::{self, Hello},
+    protocol::{self, Hello, RemoteEnvelope},
     session::{Begin, Effect, SessionManager, State},
     wire::{self, Admission, ClientControl, RequestBudget, ServerControl},
 };
@@ -108,11 +108,19 @@ struct Core {
     requests: RequestBudget,
     pause_proof: Option<PauseProof>,
     allowed_file_roots: Vec<PathBuf>,
+    files: Option<super::files::FileStore>,
     backend_running: bool,
     transitioning: bool,
     active_transports: usize,
 }
 impl Core {
+    fn capabilities(&self) -> Vec<String> {
+        let mut caps = protocol::host_capabilities(self.scope);
+        if self.files.is_some() {
+            caps.push("remote.files.v1".into());
+        }
+        caps
+    }
     fn now(&self) -> u64 {
         self.started.elapsed().as_millis().min(u64::MAX as u128) as u64
     }
@@ -292,7 +300,7 @@ fn cached_frame_failure(cached: bool, scope: Scope, error: Error) -> Result<Valu
             "FRAME_NOT_FOUND" | "REMOTE_IMAGE_INVALID"
         )
     {
-        Ok(crate::protocol::response_for(
+        Ok(crate::protocol::response_for_host(
             Err(fail("FRAME_NOT_FOUND")),
             scope,
         ))
@@ -431,11 +439,30 @@ fn execute(
         .to_owned();
     let scope = locked(core)?.scope;
     if action == "select-file" {
-        let input = request["path"]
-            .as_str()
-            .ok_or_else(|| fail("INVALID_ARGUMENT"))?;
-        let path = allowed_file(&locked(core)?.allowed_file_roots, Path::new(input))?;
-        request["path"] = json!(path);
+        let resolved = if let Some(id) = request.get("fileId").and_then(Value::as_str) {
+            let c = locked(core)?;
+            c.files
+                .as_ref()
+                .ok_or_else(|| fail("FILE_NOT_ALLOWED"))?
+                .resolve(
+                    sid,
+                    request["connectionId"]
+                        .as_str()
+                        .ok_or_else(|| fail("INVALID_ARGUMENT"))?,
+                    id,
+                )?
+        } else {
+            let input = request["path"]
+                .as_str()
+                .ok_or_else(|| fail("INVALID_ARGUMENT"))?;
+            let path = allowed_file(&locked(core)?.allowed_file_roots, Path::new(input))?;
+            path
+        };
+        request
+            .as_object_mut()
+            .ok_or_else(|| fail("INVALID_ARGUMENT"))?
+            .remove("fileId");
+        request["path"] = json!(resolved);
     }
     if action == "frame" {
         let connection = request["connectionId"]
@@ -484,7 +511,10 @@ fn execute(
             .ok_or_else(|| fail("NOT_OWNER"))?
     };
     let runtime = Runtime::from_env_for_scope(scope)?;
-    if matches!(action.as_str(), "connect" | "chrome-start") {
+    if matches!(
+        action.as_str(),
+        "connect" | "chrome-start" | "firefox-start"
+    ) {
         let needs_claim = {
             let c = locked(core)?;
             read_journal(&c.journal)?.is_none_or(|j| j.daemon_pid.is_none())
@@ -579,14 +609,123 @@ fn execute(
     result
 }
 type BackendThreads = Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>;
+fn receive_upload(
+    ws: &mut Socket,
+    core: &Arc<Mutex<Core>>,
+    sid: &str,
+    env: &RemoteEnvelope,
+    ticket: u64,
+    deadline: Instant,
+) -> Result<Value> {
+    let mut pending = {
+        let c = locked(core)?;
+        c.manager.authorize_connection(
+            sid,
+            env.request["connectionId"]
+                .as_str()
+                .ok_or_else(|| fail("INVALID_ARGUMENT"))?,
+        )?;
+        let manifest=serde_json::from_value(json!({"name":env.request["name"],"bytes":env.request["bytes"],"sha256":env.request["sha256"]})).map_err(|_|fail("INVALID_ARGUMENT"))?;
+        c.files
+            .as_ref()
+            .ok_or_else(|| fail("FILE_NOT_ALLOWED"))?
+            .begin(sid, env.request["connectionId"].as_str().unwrap(), manifest)?
+    };
+    send(
+        ws,
+        &ServerControl::FileReady {
+            id: env.id.clone(),
+            sequence: env.sequence,
+        },
+        deadline,
+    )?;
+    let mut frames = 0;
+    while pending.remaining() > 0 {
+        if STOP.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(fail("REMOTE_STOPPING"));
+        }
+        frames += 1;
+        if frames > 2176 {
+            return Err(fail("FILE_TRANSFER_INVALID"));
+        }
+        ws.get_mut()
+            .inner_mut()
+            .sock
+            .set_deadline(deadline.min(Instant::now() + Duration::from_secs(5)));
+        match ws.read().map_err(|_| fail("REMOTE_DISCONNECTED"))? {
+            Message::Binary(bytes)
+                if bytes.len()
+                    == pending.remaining().min(super::files::CHUNK_BYTES as u64) as usize =>
+            {
+                pending.push(&bytes)?
+            }
+            Message::Ping(_) => ws.flush().map_err(|_| fail("REMOTE_DISCONNECTED"))?,
+            _ => return Err(fail("FILE_TRANSFER_INVALID")),
+        }
+        let mut c = locked(core)?;
+        let now = c.now();
+        c.manager.heartbeat_rpc(sid, ticket, now)?;
+    }
+    if STOP.load(Ordering::Acquire) {
+        return Err(fail("REMOTE_STOPPING"));
+    }
+    locked(core)?
+        .files
+        .as_mut()
+        .ok_or_else(|| fail("FILE_NOT_ALLOWED"))?
+        .commit(pending)
+}
+fn reconcile_local_resume(core: &Arc<Mutex<Core>>, sid: &str, scope: Scope) -> Result<()> {
+    // A network message cannot resume control. Only observe a locally resumed
+    // native lease and reconcile it while no Host flight or backend worker exists.
+    let resume = {
+        let c = locked(core)?;
+        if c.manager.state() == State::LostPaused && c.active_transports == 0 && !c.backend_running
+        {
+            c.owner
+                .as_ref()
+                .filter(|o| o.sid == sid)
+                .and_then(|o| c.pause_proof.map(|p| (o.capability.clone(), p)))
+        } else {
+            None
+        }
+    };
+    if let Some((owner, proof)) = resume {
+        if let Ok(state) = Runtime::from_env_for_scope(scope)
+            .and_then(|r| daemon::remote_control_state(&r, &owner))
+        {
+            if proof.matches(&state) {
+                let mut c = locked(core)?;
+                if c.manager.state() == State::LostPaused
+                    && c.active_transports == 0
+                    && !c.backend_running
+                    && c.owner
+                        .as_ref()
+                        .is_some_and(|o| o.sid == sid && o.capability == owner)
+                {
+                    let now = c.now();
+                    if c.manager.acknowledge_local_resume(sid, now).is_ok() {
+                        c.pause_proof = None;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
 fn serve_connection(
     mut ws: Socket,
     core: Arc<Mutex<Core>>,
     backends: BackendThreads,
 ) -> Result<()> {
-    let (boot, scope, allow_files) = {
+    let (boot, scope, allow_files, capabilities) = {
         let c = locked(&core)?;
-        (c.boot.clone(), c.scope, !c.allowed_file_roots.is_empty())
+        (
+            c.boot.clone(),
+            c.scope,
+            !c.allowed_file_roots.is_empty() || c.files.is_some(),
+            c.capabilities(),
+        )
     };
     send(
         &mut ws,
@@ -595,7 +734,7 @@ fn serve_connection(
             version: env!("CARGO_PKG_VERSION").into(),
             scope,
             boot_id: boot.clone(),
-            capabilities: vec!["remote-v1".into()],
+            capabilities: capabilities.clone(),
         },
         Instant::now() + Duration::from_secs(5),
     )?;
@@ -625,41 +764,7 @@ fn serve_connection(
             s
         }
     };
-    // A network message cannot resume control. Only observe a locally resumed
-    // native lease and reconcile it while no Host flight or backend worker exists.
-    let resume = {
-        let c = locked(&core)?;
-        if c.manager.state() == State::LostPaused && c.active_transports == 0 && !c.backend_running
-        {
-            c.owner
-                .as_ref()
-                .filter(|o| o.sid == sid)
-                .and_then(|o| c.pause_proof.map(|p| (o.capability.clone(), p)))
-        } else {
-            None
-        }
-    };
-    if let Some((owner, proof)) = resume {
-        if let Ok(state) = Runtime::from_env_for_scope(scope)
-            .and_then(|r| daemon::remote_control_state(&r, &owner))
-        {
-            if proof.matches(&state) {
-                let mut c = locked(&core)?;
-                if c.manager.state() == State::LostPaused
-                    && c.active_transports == 0
-                    && !c.backend_running
-                    && c.owner
-                        .as_ref()
-                        .is_some_and(|o| o.sid == sid && o.capability == owner)
-                {
-                    let now = c.now();
-                    if c.manager.acknowledge_local_resume(&sid, now).is_ok() {
-                        c.pause_proof = None;
-                    }
-                }
-            }
-        }
-    }
+    reconcile_local_resume(&core, &sid, scope)?;
     let state = {
         let c = locked(&core)?;
         state_name(c.manager.state()).to_owned()
@@ -685,6 +790,7 @@ fn serve_connection(
             return Err(fail("NOT_OWNER"));
         }
         protocol::validate_action_with_files(scope, &request, allow_files)?;
+        protocol::require_capability(&request, &capabilities)?;
         let req = serde_json::to_vec(&request).map_err(|_| fail("PROTOCOL_ERROR"))?;
         let value = {
             let mut c = locked(&core)?;
@@ -711,7 +817,10 @@ fn serve_connection(
             let candidate = protocol::parse_envelope_with_files(&bytes, true)?;
             if candidate.scope != scope
                 || candidate.session != sid
-                || candidate.request["action"] != "select-file"
+                || !matches!(
+                    candidate.request["action"].as_str(),
+                    Some("select-file" | "file-put")
+                )
             {
                 return Err(error);
             }
@@ -724,7 +833,7 @@ fn serve_connection(
                 &mut ws,
                 &candidate.id,
                 candidate.sequence,
-                crate::protocol::response_for(Err(fail("FILE_NOT_ALLOWED")), scope),
+                crate::protocol::response_for_host(Err(fail("FILE_NOT_ALLOWED")), scope),
             );
         }
         Err(error) => return Err(error),
@@ -741,6 +850,42 @@ fn serve_connection(
         .as_str()
         .ok_or_else(|| fail("INVALID_ARGUMENT"))?
         .to_string();
+    protocol::require_capability(&env.request, &capabilities)?;
+    // Docker tokens authorize the shared desktop. Reuse an idle connection without
+    // replacing its native owner capability or opening another browser window.
+    if crate::execution::container_desktop_enabled(scope)
+        && (action == "status" || env.request["connectionId"].is_string())
+    {
+        let adopted = (|| -> Result<()> {
+            let mut c = locked(&core)?;
+            if !matches!(c.manager.state(), State::Ready | State::LostPaused) {
+                return Ok(());
+            }
+            if c.active_transports != 0 || c.backend_running || c.transitioning {
+                return Err(fail("BUSY"));
+            }
+            let now = c.now();
+            if let Some((previous, connection)) =
+                c.manager
+                    .adopt_idle_connection(&sid, env.request["connectionId"].as_str(), now)?
+            {
+                c.owner.as_mut().ok_or_else(|| fail("NOT_OWNER"))?.sid = sid.clone();
+                if let Some(files) = &mut c.files {
+                    files.release(&previous, &connection);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = adopted {
+            return send_untracked_result(
+                &mut ws,
+                &env.id,
+                env.sequence,
+                crate::protocol::response_for_host(Err(error), scope),
+            );
+        }
+        reconcile_local_resume(&core, &sid, scope)?;
+    }
     if matches!(
         action.as_str(),
         "status" | "apps" | "windows" | "permissions"
@@ -768,7 +913,7 @@ fn serve_connection(
                 &mut ws,
                 &env.id,
                 env.sequence,
-                crate::protocol::response_for(response, scope),
+                crate::protocol::response_for_host(response, scope),
             );
         }
     }
@@ -782,7 +927,11 @@ fn serve_connection(
         if c.backend_running || c.transitioning {
             return Err(fail("BUSY"));
         }
-        if matches!(action.as_str(), "connect" | "chrome-start") && c.owner.is_none() {
+        if matches!(
+            action.as_str(),
+            "connect" | "chrome-start" | "firefox-start"
+        ) && c.owner.is_none()
+        {
             c.manager.reserve_control(&sid, now)?;
             let owner = crate::protocol::random_id()?;
             c.write_journal(&Journal {
@@ -820,7 +969,7 @@ fn serve_connection(
                 &mut ws,
                 &env.id,
                 env.sequence,
-                crate::protocol::response_for(Err(error), scope),
+                crate::protocol::response_for_host(Err(error), scope),
             );
         }
     };
@@ -842,27 +991,39 @@ fn serve_connection(
     let c = core.clone();
     let s = sid.clone();
     let request = env.request.clone();
-    let seq = env.sequence;
+    // A Docker native owner survives client handoff. Its daemon high-water mark
+    // must use the Host's monotonic ticket, not each client's independent sequence.
+    let seq = if crate::execution::container_desktop_enabled(scope) {
+        ticket
+    } else {
+        env.sequence
+    };
     match &begin {
         Begin::Execute => {
-            let handle = std::thread::spawn(move || {
-                struct BackendSlot(Arc<Mutex<Core>>);
-                impl Drop for BackendSlot {
-                    fn drop(&mut self) {
-                        if let Ok(mut core) = self.0.lock() {
-                            core.backend_running = false;
+            if action == "file-put" {
+                let result = receive_upload(&mut ws, &core, &sid, &env, ticket, deadline);
+                locked(&core)?.backend_running = false;
+                tx.send(result).map_err(|_| fail("REMOTE_DISCONNECTED"))?;
+            } else {
+                let handle = std::thread::spawn(move || {
+                    struct BackendSlot(Arc<Mutex<Core>>);
+                    impl Drop for BackendSlot {
+                        fn drop(&mut self) {
+                            if let Ok(mut core) = self.0.lock() {
+                                core.backend_running = false;
+                            }
                         }
                     }
-                }
-                let slot = BackendSlot(c.clone());
-                let result = execute(&c, &s, request, seq, expected_owner.as_deref(), &cancel);
-                drop(slot);
-                let _ = tx.send(result);
-            });
-            backends
-                .lock()
-                .map_err(|_| fail("RECOVERY_REQUIRED"))?
-                .push(handle);
+                    let slot = BackendSlot(c.clone());
+                    let result = execute(&c, &s, request, seq, expected_owner.as_deref(), &cancel);
+                    drop(slot);
+                    let _ = tx.send(result);
+                });
+                backends
+                    .lock()
+                    .map_err(|_| fail("RECOVERY_REQUIRED"))?
+                    .push(handle);
+            }
         }
         Begin::Cached(value) => {
             let v = serde_json::from_slice::<Value>(value).map_err(|_| fail("PROTOCOL_ERROR"))?;
@@ -915,14 +1076,19 @@ fn serve_connection(
     };
     let mut response = match begin {
         Begin::Cached(_) => outcome?,
-        Begin::Execute => crate::protocol::response_for(outcome, scope),
+        Begin::Execute => crate::protocol::response_for_host(outcome, scope),
     };
     if action == "status" && response["ok"] == true {
         response["remoteHostState"] = json!(state_name(locked(&core)?.manager.state()));
     }
     let mut image = None;
     let mut image_bytes = None;
-    if response["ok"] == true && matches!(action.as_str(), "connect" | "chrome-start") {
+    if response["ok"] == true
+        && matches!(
+            action.as_str(),
+            "connect" | "chrome-start" | "firefox-start"
+        )
+    {
         let connection = response["connectionId"]
             .as_str()
             .ok_or_else(|| fail("PROTOCOL_ERROR"))?;
@@ -1023,8 +1189,10 @@ fn serve_connection(
         let permit = c
             .manager
             .ack_rpc(&sid, env.sequence, &env.id, ticket, now)?;
-        let safe_failure = matches!(action.as_str(), "connect" | "chrome-start")
-            && response["ok"] == false
+        let safe_failure = matches!(
+            action.as_str(),
+            "connect" | "chrome-start" | "firefox-start"
+        ) && response["ok"] == false
             && matches!(
                 response["error"]["code"].as_str(),
                 Some(
@@ -1109,6 +1277,11 @@ fn serve_connection(
             return Err(fail("RECOVERY_REQUIRED"));
         }
         let mut c = locked(&core)?;
+        if let Some(files) = c.files.as_mut() {
+            if let Some(connection) = env.request["connectionId"].as_str() {
+                files.release(&sid, connection);
+            }
+        }
         c.manager
             .release_disconnected(&sid, env.sequence, &env.id)?;
         c.write_journal(&Journal {
@@ -1146,6 +1319,12 @@ fn serve_connection(
 }
 /// Foreground Host. SIGINT/SIGTERM pause owned work before return.
 pub fn run(options: HostOptions, scope: Scope) -> Result<Value> {
+    if !cfg!(target_os = "macos") && !crate::execution::container_desktop_enabled(scope) {
+        return Err(Error::new(
+            "UNSUPPORTED_PLATFORM",
+            "本地 Host 仅支持 macOS 或显式容器桌面模式",
+        ));
+    }
     let roots: Result<Vec<PathBuf>> = options
         .allowed_file_roots
         .iter()
@@ -1170,8 +1349,13 @@ pub fn run(options: HostOptions, scope: Scope) -> Result<Value> {
         .as_ref()
         .is_some_and(|j| !j.clean || j.scope != scope);
     let boot = crate::protocol::random_id()?;
+    let files = options
+        .upload_dir
+        .as_ref()
+        .map(|p| super::files::FileStore::open(p))
+        .transpose()?;
     let mut manager = SessionManager::new(&boot, recovery)?;
-    manager.set_allow_files(!roots.is_empty())?;
+    manager.set_allow_files(!roots.is_empty() || files.is_some())?;
     let core = Arc::new(Mutex::new(Core {
         manager,
         owner: None,
@@ -1182,6 +1366,7 @@ pub fn run(options: HostOptions, scope: Scope) -> Result<Value> {
         requests: RequestBudget::new(),
         pause_proof: None,
         allowed_file_roots: roots,
+        files,
         backend_running: false,
         transitioning: false,
         active_transports: 0,

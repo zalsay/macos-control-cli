@@ -14,6 +14,7 @@ fn main() {
         })
         .collect::<Result<Vec<_>>>()
         .and_then(|args| args::parse_for_scope(args, scope));
+    let remote_output = matches!(&parsed, Ok(Command::Remote { .. }));
     let result = match parsed {
         Ok(Command::Help) => {
             let executable = std::env::args_os().next().unwrap_or_default();
@@ -33,13 +34,21 @@ fn main() {
         },
         Ok(Command::Remote { options, command }) => match *command {
             Command::Request { request, output } => client::run(options, request, output, scope),
+            Command::FilePut { connection, local } => {
+                client::put_file(options, &connection, &local, scope)
+            }
             _ => Err(Error::invalid("远程只允许请求命令")),
         },
         Ok(command) => copis_chrome::execution::execute_local(command, scope),
         Err(error) => Err(error),
     };
     let failed = result.is_err();
-    println!("{}", response_for(result, scope));
+    let response = if remote_output {
+        copis_chrome::protocol::response_for_host(result, scope)
+    } else {
+        response_for(result, scope)
+    };
+    println!("{response}");
     if failed {
         std::process::exit(1);
     }

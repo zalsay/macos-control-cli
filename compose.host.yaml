@@ -1,0 +1,8 @@
+# Opt in with: docker compose -f compose.yaml -f compose.host.yaml up -d --wait
+# Initialize TLS/token in the mcc-config volume first; see docs/MCC-DOCKER.md.
+services:
+  mcc:
+    environment:
+      MCC_HOST_ENABLED: "1"
+    ports:
+      - "${MCC_HOST_BIND_IP:-127.0.0.1}:${MCC_HOST_PORT:-8765}:8765"

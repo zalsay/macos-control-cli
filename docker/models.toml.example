@@ -1,0 +1,11 @@
+# Format reference only; this file is not loaded automatically.
+# Configure /home/mcc/.config/mcc/models.toml in the mcc-config volume.
+# Prefer `mcc --config set jev ... --api-key-stdin` for private, atomic writes.
+# Never commit a real API key or copy it into a Docker image.
+default_model = "jev"
+
+[models.jev]
+enabled = true
+url = "https://openrouter.ai/api/alpha/decisions"
+api_key = "YOUR_API_KEY"
+model = "typesafe/jev-1.13"

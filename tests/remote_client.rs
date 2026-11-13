@@ -1056,3 +1056,41 @@ fn output_race_is_acked_but_corrupt_image_is_not() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn version_mismatch_reports_both_safe_versions_without_leaking_untrusted_hello_text() {
+    use copis_chrome::protocol::Scope;
+    use copis_chrome::remote::wire::parse_hello;
+    let mut hello = serde_json::json!({"remoteProtocol":1,"version":"0.3.5","scope":"desktop","bootId":"boot-a","capabilities":["remote-v1"]});
+    let error = parse_hello(
+        &serde_json::to_vec(&hello).unwrap(),
+        "0.3.5+1",
+        Scope::Desktop,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "PROTOCOL_ERROR");
+    assert!(
+        error.message.contains("0.3.5+1") && error.message.contains("Host 0.3.5"),
+        "mismatch must identify both versions: {error}"
+    );
+    assert!(error.message.contains("未发送桌面操作"));
+    hello["version"] = serde_json::json!("private-token-DO-NOT-PRINT");
+    let error = parse_hello(
+        &serde_json::to_vec(&hello).unwrap(),
+        "0.3.5+1",
+        Scope::Desktop,
+    )
+    .unwrap_err();
+    assert!(!error.message.contains("private-token"));
+    hello["version"] = serde_json::json!("1".repeat(100));
+    let error = parse_hello(
+        &serde_json::to_vec(&hello).unwrap(),
+        "0.3.5+1",
+        Scope::Desktop,
+    )
+    .unwrap_err();
+    assert!(
+        error.message.len() < 512,
+        "do not echo unbounded remote version fields"
+    );
+}

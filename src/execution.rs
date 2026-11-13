@@ -6,13 +6,23 @@ use crate::{
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+/// Container mode is explicit and desktop scoped; ordinary Linux remains unsupported.
+pub fn container_desktop_enabled(scope: Scope) -> bool {
+    cfg!(target_os = "linux")
+        && scope == Scope::Desktop
+        && std::env::var_os("MCC_DOCKER").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+fn local_execution_enabled(scope: Scope) -> bool {
+    cfg!(target_os = "macos") || container_desktop_enabled(scope)
+}
+
 #[cfg(unix)]
 pub fn execute_local(command: Command, scope: Scope) -> Result<Value> {
     use crate::{daemon, runtime::Runtime};
     if let Command::Config(args) = command {
         return crate::config::Store::from_env()?.execute(&args, std::io::stdin().lock());
     }
-    if !cfg!(target_os = "macos") {
+    if !local_execution_enabled(scope) {
         return Err(Error::new(
             "UNSUPPORTED_PLATFORM",
             "桌面自动化仅支持 macOS 14 及以上版本",
@@ -30,7 +40,7 @@ pub fn execute_local(command: Command, scope: Scope) -> Result<Value> {
             }
         }
         Command::Request { request, output } => execute_request(request, output, scope),
-        Command::Host(_) | Command::Remote { .. } => {
+        Command::FilePut { .. } | Command::Host(_) | Command::Remote { .. } => {
             Err(Error::invalid("远程命令只能由 CLI 前端分派"))
         }
         Command::Help | Command::Version | Command::Config(_) => unreachable!(),
@@ -48,11 +58,16 @@ fn execute_request_inner(
     scope: Scope,
     remote: Option<(&str, &str)>,
 ) -> Result<Value> {
+    if request.get("fileId").is_some() {
+        return Err(Error::invalid(
+            "--file-id 仅用于远端 Host 文件；本地选择请使用 --path",
+        ));
+    }
     use crate::{
         daemon,
         runtime::{export_image, Runtime},
     };
-    if !cfg!(target_os = "macos") {
+    if !local_execution_enabled(scope) {
         return Err(Error::new(
             "UNSUPPORTED_PLATFORM",
             "桌面自动化仅支持 macOS 14 及以上版本",
@@ -71,6 +86,11 @@ fn execute_request_inner(
         apply_chrome_start_settings(&mut request, &crate::config::Store::from_env()?)?;
     }
     if remote.is_none() {
+        if request["action"] == "control" {
+            // Interrupt the existing helper without Service's startup/status
+            // preflight, which is busy while an input holds its mutex.
+            return daemon::call(&runtime, request);
+        }
         if request["action"] == "status" {
             return daemon::status(&runtime);
         }
@@ -78,6 +98,7 @@ fn execute_request_inner(
     }
     if request["action"] == "click-target"
         || request["action"] == "chrome-start"
+        || request["action"] == "firefox-start"
         || request["action"] == "permissions"
     {
         // Reuse the version gate for new startup protocol, and authenticate
@@ -104,7 +125,7 @@ fn execute_request_inner(
 }
 
 /// Execute an already-authorized Host request without starting a daemon.
-/// `operation` is the validated envelope sequence encoded as a nonzero,
+/// `operation` is the trusted Host operation sequence encoded as a nonzero,
 /// canonical decimal u64, monotonically increasing for the current owner.
 #[cfg(unix)]
 pub fn execute_remote_request(
@@ -113,7 +134,7 @@ pub fn execute_remote_request(
     owner: &str,
     operation: &str,
 ) -> Result<Value> {
-    if !cfg!(target_os = "macos") {
+    if !local_execution_enabled(scope) {
         return Err(Error::new(
             "UNSUPPORTED_PLATFORM",
             "桌面自动化仅支持 macOS 14 及以上版本",
@@ -123,7 +144,7 @@ pub fn execute_remote_request(
     if crate::daemon::remote_read_only(&request) {
         return crate::daemon::remote_read(&runtime, owner, operation, request);
     }
-    crate::daemon::remote_reserve(&runtime, owner, operation)?;
+    crate::daemon::remote_reserve(&runtime, owner, operation, &request)?;
     let result = execute_request_inner(request, None, scope, Some((owner, operation)));
     // A dispatched operation has already cleared its reservation; a preprocessing
     // failure leaves only the matching not-yet-running reservation to abandon.

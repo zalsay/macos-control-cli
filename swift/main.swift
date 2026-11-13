@@ -46,6 +46,11 @@ func handleLine(_ line: Data, oversized: Bool) {
             writer.success(id: request.id, data: cancellation.transportPause())
             return
         }
+        if request.action == "transport-auto-resume" {
+            guard let lease = request.expectedLease, let epoch = request.inputEpoch else { throw HelperFailure.invalidArgument }
+            writer.success(id: request.id, data: try cancellation.resumeHostSoftPause(expectedLease: lease, expectedEpoch: epoch))
+            return
+        }
         if request.action == "transport-disconnect" {
             guard let epoch = request.inputEpoch else { throw HelperFailure.invalidArgument }
             try cancellation.cancelIfNotPaused(expectedEpoch: epoch)

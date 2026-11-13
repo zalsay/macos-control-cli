@@ -58,8 +58,10 @@ struct Frame {
     width: u32,
     height: u32,
     bounds: Bounds,
+    backend_frame_id: Option<String>,
 }
 struct Connection {
+    firefox: bool,
     id: String,
     window: Window,
     frames: VecDeque<Frame>,
@@ -110,6 +112,45 @@ impl<N: Native> Service<N> {
     pub(crate) fn connected(&self) -> bool {
         self.connection.is_some()
     }
+    /// Pure connection/frame eligibility only. Real identity, geometry, focus,
+    /// permissions and countdown remain in the original native input path.
+    pub(crate) fn allows_host_soft_takeover(&self, intent: &Value) -> bool {
+        let Some(action) = intent["action"].as_str() else {
+            return false;
+        };
+        if !matches!(
+            action,
+            "click"
+                | "scroll"
+                | "type"
+                | "press"
+                | "click-target"
+                | "select-file"
+                | "move"
+                | "hover"
+                | "drag"
+                | "actions"
+        ) {
+            return false;
+        }
+        let Some(id) = intent["connectionId"].as_str() else {
+            return false;
+        };
+        let Ok(connection) = self.require_connection(id) else {
+            return false;
+        };
+        if connection.release_pending {
+            return false;
+        }
+        match intent.get("frameId") {
+            Some(Value::String(id)) => connection
+                .frames
+                .iter()
+                .any(|frame| frame.id == *id && frame.bounds == connection.window.bounds),
+            None => matches!(action, "click-target" | "select-file"),
+            _ => false,
+        }
+    }
     pub(crate) fn clear_remote_connection(&mut self) {
         self.clear();
     }
@@ -155,12 +196,35 @@ impl<N: Native> Service<N> {
         let action = string(&request, "action")?;
         let allowed: &[&str] = match action {
             "chrome-start" => &["action", "url", "maxWidthPx", "profile"],
+            "firefox-start" => &["action", "url", "profile"],
+            "control" => &["action", "command"],
+            "move" | "hover" => &["action", "connectionId", "frameId", "x", "y", "durationMs"],
+            "drag" => &[
+                "action",
+                "connectionId",
+                "frameId",
+                "fromX",
+                "fromY",
+                "toX",
+                "toY",
+                "durationMs",
+            ],
+            "actions" => &["action", "connectionId", "frameId", "actions"],
             "status" | "apps" => &["action"],
             "windows" => &["action", "bundleId"],
             "permissions" => &["action", "request"],
             "connect" => &["action", "windowId"],
             "observe" | "disconnect" => &["action", "connectionId"],
-            "click" => &["action", "connectionId", "frameId", "x", "y", "clickCount"],
+            "click" => &[
+                "action",
+                "connectionId",
+                "frameId",
+                "x",
+                "y",
+                "clickCount",
+                "button",
+                "modifiers",
+            ],
             "click-target" => &[
                 "action",
                 "connectionId",
@@ -178,10 +242,16 @@ impl<N: Native> Service<N> {
         };
         fields(&request, allowed)?;
         let result = match action {
-            "status" => Ok(
-                json!({"running":true,"connected":self.connection.is_some(),"window":self.connection.as_ref().map(|c| &c.window),
-                    "version":env!("CARGO_PKG_VERSION"),"jev":{"protocol":crate::jev::DECISION_PROTOCOL,"dynamicEndpoint":true}}),
-            ),
+            "status" => {
+                let mut status = json!({"running":true,"connected":self.connection.is_some(),"window":self.connection.as_ref().map(|c| &c.window),
+                    "version":env!("CARGO_PKG_VERSION"),"jev":{"protocol":crate::jev::DECISION_PROTOCOL,"dynamicEndpoint":true}});
+                if crate::execution::container_desktop_enabled(self.scope) {
+                    if let Some(connection) = &self.connection {
+                        status["connectionId"] = json!(connection.id);
+                    }
+                }
+                Ok(status)
+            }
             "apps" => {
                 self.require_scope(Scope::Desktop)?;
                 self.native.request(json!({"action":"apps"}))
@@ -193,6 +263,12 @@ impl<N: Native> Service<N> {
                 }
                 let requested = request["request"].as_bool().unwrap_or(false);
                 self.native.request(json!({"action":"permissions","request":requested})).and_then(|result| {
+                    if self.scope == Scope::Desktop && result["platform"] == "linux-docker" {
+                        if !result["screenRecording"].is_boolean() || !result["accessibility"].is_boolean() {
+                            return Err(Error::new("HELPER_PROTOCOL", "容器桌面权限状态无效"));
+                        }
+                        return Ok(result);
+                    }
                     let automation = &result["chromeAutomation"];
                     if automation["target"] != "com.google.Chrome"
                         || automation["requested"] != requested
@@ -206,6 +282,12 @@ impl<N: Native> Service<N> {
             }
             "connect" => self.connect(&request),
             "chrome-start" => self.chrome_start(&request),
+            "firefox-start" => self.firefox_start(&request),
+            "control" => {
+                self.require_scope(Scope::Desktop)?;
+                crate::args::validate_desktop_extension(&request)?;
+                self.native.request(request.clone())
+            }
             _ => {
                 let connection_id = string(&request, "connectionId")?;
                 let connection = self.require_connection(connection_id)?;
@@ -310,6 +392,57 @@ impl<N: Native> Service<N> {
                 )
             })
     }
+    fn firefox_start(&mut self, request: &Value) -> Result<Value> {
+        self.require_scope(Scope::Desktop)?;
+        if self.connection.is_some() {
+            return Err(Error::new(
+                "CONNECTION_BUSY",
+                "已有控制连接；请先用原连接凭据 disconnect",
+            ));
+        }
+        crate::args::validate_desktop_extension(request)?;
+        let launched = self.native.request(request.clone())?;
+        let window: Window = decode(launched["window"].clone())?;
+        if window.window_id == 0
+            || window.pid <= 0
+            || window.bundle_id.as_deref() != Some("org.mozilla.firefox")
+            || !window.bounds.valid()
+            || launched["backend"] != "firefox-x11"
+            || launched["created"] != true
+            || launched["profile"] != json!({"name":request["profile"]})
+        {
+            let _ = self.cancel_native();
+            return Err(Error::new(
+                "HELPER_PROTOCOL",
+                "新建 Firefox 窗口或 profile 身份无效",
+            ));
+        }
+        let result = self.connect(&json!({"action":"connect","windowId":window.window_id}));
+        let mut connected = match result {
+            Ok(connected) => connected,
+            Err(error) => {
+                let _ = self.cancel_native();
+                return Err(error);
+            }
+        };
+        let verified: Window = decode(connected["window"].clone())?;
+        if verified.pid != window.pid
+            || verified.bundle_id != window.bundle_id
+            || verified.bounds != window.bounds
+        {
+            let _ = self.disconnect();
+            return Err(Error::new(
+                "WINDOW_CHANGED",
+                "启动与连接之间 Firefox 窗口身份或几何变化",
+            ));
+        }
+        self.connection.as_mut().expect("已校验连接").firefox = true;
+        connected["backend"] = json!("firefox-x11");
+        connected["created"] = json!(true);
+        connected["profile"] = launched["profile"].clone();
+        Ok(connected)
+    }
+
     fn chrome_start(&mut self, request: &Value) -> Result<Value> {
         if self.connection.is_some() {
             return Err(Error::new(
@@ -499,7 +632,18 @@ impl<N: Native> Service<N> {
         if let Some(bundle_id) = &window.bundle_id {
             query["bundleId"] = json!(bundle_id);
         }
-        let verified: Window = decode(self.native.request(query)?["window"].clone())?;
+        let verified_reply = self.native.request(query)?;
+        let verified: Window = decode(verified_reply["window"].clone())?;
+        let firefox = verified_reply["backend"] == "firefox-x11";
+        if firefox
+            && (self.scope != Scope::Desktop
+                || verified.bundle_id.as_deref() != Some("org.mozilla.firefox"))
+        {
+            return Err(Error::new(
+                "HELPER_PROTOCOL",
+                "Firefox 后端与窗口身份不匹配",
+            ));
+        }
         if verified.window_id != window.window_id
             || verified.pid != window.pid
             || verified.bundle_id != window.bundle_id
@@ -512,9 +656,13 @@ impl<N: Native> Service<N> {
         }
         let window = verified;
         let id = random_id()?;
-        let result =
+        let mut result =
             json!({"connectionId":id,"connected":true,"window":window,"permissions":permissions});
+        if firefox {
+            result["backend"] = json!("firefox-x11");
+        }
         self.connection = Some(Connection {
+            firefox,
             id,
             window,
             frames: VecDeque::new(),
@@ -550,10 +698,15 @@ impl<N: Native> Service<N> {
             .expect("已校验连接")
             .window
             .bundle_id;
-        if self.scope == Scope::Desktop && identity.as_deref() != Some("com.google.Chrome") {
+        let firefox = self.connection.as_ref().is_some_and(|c| c.firefox)
+            && identity.as_deref() == Some("org.mozilla.firefox");
+        if self.scope == Scope::Desktop
+            && identity.as_deref() != Some("com.google.Chrome")
+            && !firefox
+        {
             return Err(Error::new(
                 "FILE_DIALOG_UNSUPPORTED",
-                "原生文件选择当前仅支持 Google Chrome",
+                "原生文件选择仅支持 Chrome 或 owned Linux Firefox",
             ));
         }
         let path = selectable_file_path(string(request, "path")?)?;
@@ -573,10 +726,13 @@ impl<N: Native> Service<N> {
         {
             native_request["bundleId"] = json!(bundle_id);
         }
-        let receipt = self
-            .native
-            .request(native_request)
-            .map_err(sanitize_file_selection_error)?;
+        let receipt = self.native.request(native_request).map_err(|e| {
+            if firefox {
+                e
+            } else {
+                sanitize_file_selection_error(e)
+            }
+        })?;
         if receipt["selected"] != true || receipt["dialogClosed"] != true {
             return Err(Error::new(
                 "HELPER_PROTOCOL",
@@ -635,6 +791,22 @@ impl<N: Native> Service<N> {
         if !metadata.is_file() || metadata.len() == 0 || metadata.len() >= 1024 * 1024 {
             return Err(Error::new("HELPER_PROTOCOL", "原生截图文件类型或大小无效"));
         }
+        let backend_frame_id = match image.get("backendFrameId") {
+            Some(Value::String(value))
+                if !value.is_empty()
+                    && value.len() <= 256
+                    && !value.chars().any(char::is_control) =>
+            {
+                Some(value.clone())
+            }
+            None if !self.connection.as_ref().expect("已校验连接").firefox => None,
+            _ => {
+                return Err(Error::new(
+                    "HELPER_PROTOCOL",
+                    "Firefox 截图缺少有效的后端帧身份",
+                ))
+            }
+        };
         let connection = self.connection.as_mut().expect("已校验连接");
         connection.window = window.clone();
         connection.frames.push_back(Frame {
@@ -643,6 +815,7 @@ impl<N: Native> Service<N> {
             width,
             height,
             bounds,
+            backend_frame_id,
         });
         if connection.frames.len() > 32 {
             if let Some(oldest) = connection.frames.pop_front() {
@@ -737,7 +910,20 @@ impl<N: Native> Service<N> {
                 )
             })?;
         let action = string(request, "action")?;
+        let firefox = self.connection.as_ref().expect("已校验连接").firefox;
+        let extended = matches!(action, "move" | "hover" | "drag" | "actions")
+            || request.get("button").is_some()
+            || request.get("modifiers").is_some();
+        if extended && !firefox {
+            return Err(Error::new(
+                "ACTION_UNSUPPORTED",
+                "该动作或选项仅支持受管理的 Firefox 系统输入连接",
+            ));
+        }
         let mut native = json!({"action":action,"expectedBounds":frame.bounds});
+        if let Some(id) = &frame.backend_frame_id {
+            native["backendFrameId"] = json!(id);
+        }
         let mut screen_point = None;
         match action {
             "click" | "scroll" => {
@@ -762,12 +948,35 @@ impl<N: Native> Service<N> {
                         return Err(Error::invalid("clickCount 只能为 1 或 2"));
                     }
                     native["clickCount"] = json!(count);
+                    crate::args::validate_desktop_extension(request)?;
+                    for key in ["button", "modifiers"] {
+                        if let Some(value) = request.get(key) {
+                            native[key] = value.clone();
+                        }
+                    }
                 } else {
                     let delta = integer(request, "deltaY")?;
                     if delta == 0 || !(-1200..=1200).contains(&delta) {
                         return Err(Error::invalid("deltaY 必须为 [-1200,1200] 内的非零整数"));
                     }
                     native["deltaY"] = json!(delta);
+                }
+            }
+            "move" | "hover" | "drag" | "actions" => {
+                crate::firefox::actions::compile(request, frame.width, frame.height, (0, 0))?;
+                for key in [
+                    "x",
+                    "y",
+                    "fromX",
+                    "fromY",
+                    "toX",
+                    "toY",
+                    "durationMs",
+                    "actions",
+                ] {
+                    if let Some(value) = request.get(key) {
+                        native[key] = value.clone();
+                    }
                 }
             }
             "type" => {
@@ -781,7 +990,9 @@ impl<N: Native> Service<N> {
             }
             "press" => {
                 let key = string(request, "key")?;
-                if !KEYS.contains(&key) {
+                if firefox {
+                    crate::firefox::actions::compile(request, frame.width, frame.height, (0, 0))?;
+                } else if !KEYS.contains(&key) {
                     return Err(Error::invalid("按键不在允许的 21 个按键或组合键中"));
                 }
                 native["key"] = json!(key);
@@ -814,6 +1025,17 @@ impl<N: Native> Service<N> {
         let mut result = json!({"sent":true,"connectionId":self.connection.as_ref().unwrap().id,"frameId":frame_id});
         if let Some(screen_point) = screen_point {
             result["screenPoint"] = screen_point;
+        }
+        for key in [
+            "backend",
+            "dispatchState",
+            "completedSteps",
+            "inputState",
+            "effectVerified",
+        ] {
+            if let Some(value) = receipt.get(key) {
+                result[key] = value.clone();
+            }
         }
         Ok(result)
     }
@@ -1095,6 +1317,7 @@ mod tests {
             std::env::temp_dir(),
         );
         service.connection = Some(Connection {
+            firefox: false,
             id: connection_id.clone(),
             window: serde_json::from_value(window()).unwrap(),
             frames: VecDeque::new(),
@@ -1151,6 +1374,7 @@ mod tests {
             .unwrap()
             .frames
             .push_back(Frame {
+                backend_frame_id: None,
                 id: "frame-1".into(),
                 path: frame_path,
                 width: 100,
@@ -1236,6 +1460,7 @@ mod tests {
             .unwrap()
             .frames
             .push_back(Frame {
+                backend_frame_id: None,
                 id: "frame-1".into(),
                 path: frame_path.clone(),
                 width: 100,
@@ -1270,6 +1495,7 @@ mod tests {
             .unwrap()
             .frames
             .push_back(Frame {
+                backend_frame_id: None,
                 id: "frame-1".into(),
                 path: frame_path.clone(),
                 width: 100,
@@ -1306,6 +1532,7 @@ mod tests {
             .unwrap()
             .frames
             .push_back(Frame {
+                backend_frame_id: None,
                 id: "frame-1".into(),
                 path: frame_path,
                 width: 100,
@@ -1367,6 +1594,7 @@ mod tests {
             .unwrap()
             .frames
             .push_back(Frame {
+                backend_frame_id: None,
                 id: "frame-1".into(),
                 path: frame_path,
                 width: 100,
@@ -1815,5 +2043,66 @@ mod tests {
         assert_eq!(service.native.requests.len(), 1);
         assert_eq!(service.native.requests[0]["action"], "window");
         assert!(service.connected());
+    }
+    #[test]
+    fn soft_takeover_eligibility_is_read_only_bound_to_connection_and_current_frame() {
+        let (mut service, id) = connected_service(Ok(json!({"selected":true})));
+        let count = service.native.requests.len();
+        let bounds = service.connection.as_ref().unwrap().window.bounds;
+        service
+            .connection
+            .as_mut()
+            .unwrap()
+            .frames
+            .push_back(Frame {
+                backend_frame_id: None,
+                id: "frame-a".into(),
+                path: PathBuf::from("/not-read"),
+                width: 900,
+                height: 700,
+                bounds,
+            });
+        assert!(service.allows_host_soft_takeover(
+            &json!({"action":"click","connectionId":id,"frameId":"frame-a"})
+        ));
+        assert!(
+            service.allows_host_soft_takeover(&json!({"action":"click-target","connectionId":id}))
+        );
+        assert!(
+            service.allows_host_soft_takeover(&json!({"action":"select-file","connectionId":id}))
+        );
+        for action in ["disconnect", "observe", "status", "connect", "chrome-start"] {
+            assert!(!service.allows_host_soft_takeover(
+                &json!({"action":action,"connectionId":id,"frameId":"frame-a"})
+            ));
+        }
+        assert!(!service.allows_host_soft_takeover(
+            &json!({"action":"click","connectionId":"other","frameId":"frame-a"})
+        ));
+        assert!(!service.allows_host_soft_takeover(
+            &json!({"action":"click","connectionId":id,"frameId":"other"})
+        ));
+        assert!(!service.allows_host_soft_takeover(&json!({"action":"click","connectionId":id})));
+        service
+            .connection
+            .as_mut()
+            .unwrap()
+            .frames
+            .front_mut()
+            .unwrap()
+            .bounds
+            .x += 1.0;
+        assert!(!service.allows_host_soft_takeover(
+            &json!({"action":"click","connectionId":id,"frameId":"frame-a"})
+        ));
+        service.connection.as_mut().unwrap().release_pending = true;
+        assert!(
+            !service.allows_host_soft_takeover(&json!({"action":"click-target","connectionId":id}))
+        );
+        assert_eq!(
+            service.native.requests.len(),
+            count,
+            "eligibility must not do AX/OCR/input or mutate native state"
+        );
     }
 }

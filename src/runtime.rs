@@ -53,7 +53,7 @@ impl Runtime {
         let socket = root.join("daemon.sock");
         if socket.as_os_str().as_encoded_bytes().len() > 100 {
             return Err(Error::invalid(&format!(
-                "运行目录过长，无法创建 macOS Unix socket；请设置较短的 {runtime_variable}"
+                "运行目录过长，无法创建 Unix socket；请设置较短的 {runtime_variable}"
             )));
         }
         let runtime = Self {
@@ -216,11 +216,15 @@ fn secure_file(path: &Path) -> Result<File> {
         Err(error) => Err(Error::io("无法创建私有运行文件", error)),
     }
 }
-fn adjacent_helper_path(executable: &Path) -> Result<PathBuf> {
+fn adjacent_helper_path(executable: &Path, scope: Scope) -> Result<PathBuf> {
     Ok(executable
         .parent()
         .ok_or_else(|| Error::new("HELPER_NOT_FOUND", "无法定位功能包目录"))?
-        .join("macos-chrome-helper"))
+        .join(if cfg!(target_os = "linux") && scope == Scope::Desktop {
+            "mcc-linux-helper"
+        } else {
+            "macos-chrome-helper"
+        }))
 }
 
 pub fn helper_path(scope: Scope) -> Result<PathBuf> {
@@ -235,12 +239,12 @@ pub fn helper_path(scope: Scope) -> Result<PathBuf> {
         let executable = std::env::current_exe()
             .and_then(fs::canonicalize)
             .map_err(|e| Error::io("无法定位当前可执行文件的真实路径", e))?;
-        adjacent_helper_path(&executable)?
+        adjacent_helper_path(&executable, scope)?
     };
     if !path.is_absolute() || !path.is_file() {
         return Err(Error::new(
             "HELPER_NOT_FOUND",
-            "找不到原生 helper；请运行功能包 build.sh，或将 macos-chrome-helper 放在 CLI 同目录",
+            "找不到原生 helper；请构建对应平台 helper，或通过 COPIS_DESKTOP_HELPER 指定绝对路径",
         ));
     }
     Ok(path)
@@ -385,7 +389,11 @@ mod helper_filename_tests {
     #[test]
     fn default_helper_uses_macos_name_at_stable_visible_path() {
         assert_eq!(
-            adjacent_helper_path(Path::new("/Users/example/Applications/MCC/mcc")).unwrap(),
+            adjacent_helper_path(
+                Path::new("/Users/example/Applications/MCC/mcc"),
+                Scope::Chrome
+            )
+            .unwrap(),
             Path::new("/Users/example/Applications/MCC/macos-chrome-helper")
         );
     }

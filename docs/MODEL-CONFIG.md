@@ -56,6 +56,14 @@ v0.3.0 不再隐式读取进程 `JEV_API_KEY`/`OPENROUTER_API_KEY` 或工作目�
 
 CLI 在发送 key 前核对 daemon 精确版本和 `jev.protocol:"decisions-v1", dynamicEndpoint:true`，不匹配返回 `DAEMON_UPGRADE_REQUIRED`；只停止自己持有的旧 daemon，重新连接。RPC 同时携带本次 URL/key/model 以及协议标签，旧客户端不被默默映射到新端点。key 不发给 Swift、不放 curl argv、不写 daemon.log。
 
+## Docker 与远程 Host
+
+Docker 版复用以上配置格式与命令。镜像设置 `MCC_CONFIG_DIR=/home/mcc/.config/mcc`，实际文件为 `/home/mcc/.config/mcc/models.toml`，保存在 Compose 的 `mcc-config` 命名卷中。宿主配置与容器配置各自独立；初次使用须将所需 profile 写入容器。重建容器会保留该卷，`docker compose down -v` 会删除配置。
+
+通过 `docker compose exec -T mcc mcc --config …` 管理模型，密钥使用 `--api-key-stdin`。命令以容器用户 UID/GID 1000 写入私有文件；每次模型调用重新读取配置，无需重启。完整 Jev 示例见 [Docker 模型配置](MCC-DOCKER.md#jev-模型配置) 和 [models.toml 示例](../docker/models.toml.example)。
+
+`mcc --remote` 的语义点击在 Host 一侧解析模型配置；Docker Host 读取容器内的文件，不使用客户端本机的默认模型。远端模式不开放 `--config`，需在 Host 本地管理配置。真实密钥不要加入镜像、仓库或 Compose 环境变量。
+
 ## 与 Jev 数据契约的关系
 
 仍是 target +候选 ID/文字，返回 ID 后本地查同帧坐标、调用原点击。请求 `model` 和响应校验使用本次配置的模型名（允许同名 `-YYYYMMDD` 版本），不再固定 OpenRouter。隐私授权、阈值、输入门禁和 `effectVerified:false` 不变，见 [Jev 点击契约](JEV-CLICK-TARGET.md)。

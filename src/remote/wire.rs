@@ -119,6 +119,10 @@ pub fn parse_client_control(bytes: &[u8]) -> Result<ClientControl> {
     deny_unknown_fields
 )]
 pub enum ServerControl {
+    FileReady {
+        id: String,
+        sequence: u64,
+    },
     Session {
         session: String,
         boot_id: String,
@@ -139,6 +143,11 @@ pub enum ServerControl {
 impl fmt::Debug for ServerControl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::FileReady { id, sequence } => f
+                .debug_struct("FileReady")
+                .field("id", id)
+                .field("sequence", sequence)
+                .finish(),
             Self::Session { boot_id, state, .. } => f
                 .debug_struct("Session")
                 .field("boot_id", boot_id)
@@ -372,7 +381,7 @@ pub fn parse_server_control(bytes: &[u8]) -> Result<ServerControl> {
                 return Err(Error::new("PROTOCOL_ERROR", "远程会话响应无效"));
             }
         }
-        ServerControl::Acked { id, sequence } => {
+        ServerControl::FileReady { id, sequence } | ServerControl::Acked { id, sequence } => {
             if !valid_id(id) || *sequence == 0 {
                 return Err(Error::new("PROTOCOL_ERROR", "远程确认无效"));
             }
@@ -557,13 +566,40 @@ pub fn parse_hello(
     let hello: crate::remote::protocol::Hello = serde_json::from_slice(bytes)
         .map_err(|_| Error::new("PROTOCOL_ERROR", "远程握手消息无效"))?;
     if hello.remote_protocol != REMOTE_PROTOCOL
-        || hello.version != version
         || hello.scope != scope
         || !valid_id(&hello.boot_id)
         || hello.capabilities.len() > 64
-        || hello.capabilities.iter().any(|v| !valid_id(v))
+        || hello.capabilities.iter().any(|v| {
+            !valid_id(v)
+                && !matches!(
+                    v.as_str(),
+                    "firefox.x11.v1" | "firefox.system-input.v1" | "remote.files.v1"
+                )
+        })
     {
         return Err(Error::new("PROTOCOL_ERROR", "远程版本、scope 或能力无效"));
+    }
+    if hello.version != version {
+        // Do not echo arbitrary authenticated peer text or an unbounded field.
+        // Keep the existing error code and exact-match gate; improve diagnostics only.
+        let display = |s: &str| {
+            if !s.is_empty()
+                && s.len() <= 32
+                && s.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
+                && s.bytes().all(|b| b.is_ascii_digit() || b".-+".contains(&b))
+            {
+                s.to_owned()
+            } else {
+                "<不可显示>".to_owned()
+            }
+        };
+        return Err(Error::new(
+            "PROTOCOL_ERROR",
+            &format!(
+            "远程版本不匹配：客户端 {}，Host {}；未发送桌面操作，请使用完全相同版本的客户端和 Host",
+            display(version), display(&hello.version)
+        ),
+        ));
     }
     Ok(hello)
 }

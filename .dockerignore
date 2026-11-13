@@ -1,0 +1,13 @@
+.git
+.gitignore
+.worktrees
+target
+dist
+outputs
+.secrets
+.env
+.env.*
+*.log
+*.key
+*.pem
+.DS_Store

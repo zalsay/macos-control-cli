@@ -42,8 +42,22 @@ impl Canceller {
         if !matches!(
             action,
             "transport-state" | "transport-pause" | "transport-recover"
-        ) || self.terminating.load(Ordering::Acquire)
-        {
+        ) {
+            return Err(Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"));
+        }
+        self.transport_request(json!({"action":action}))
+    }
+    pub(crate) fn local_control(&self, command: &str) -> Result<Value> {
+        if !matches!(command, "state" | "pause" | "resume" | "cancel") {
+            return Err(Error::invalid("control command 无效"));
+        }
+        self.transport_request(json!({"action":"control","command":command}))
+    }
+    pub(crate) fn resume_host_soft_pause(&self, lease: u64, epoch: u64) -> Result<Value> {
+        self.transport_request(json!({"action":"transport-auto-resume","expectedLease":lease,"expectedInputEpoch":epoch}))
+    }
+    fn transport_request(&self, mut request: Value) -> Result<Value> {
+        if self.terminating.load(Ordering::Acquire) {
             return Err(Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"));
         }
         let id = format!(
@@ -65,7 +79,8 @@ impl Canceller {
             input
                 .set_write_timeout(Some(Duration::from_secs(2)))
                 .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?;
-            let bytes = format!("{}\n", json!({"id":id,"action":action}));
+            request["id"] = json!(id);
+            let bytes = format!("{request}\n");
             input
                 .write_all(bytes.as_bytes())
                 .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?;
@@ -75,6 +90,26 @@ impl Canceller {
                 .map_err(|_| Error::new("CANCEL_UNCONFIRMED", "无法确认原生传输控制状态"))?;
             if response["ok"] == true && response["data"].is_object() {
                 Ok(response["data"].clone())
+            } else if request["action"] == "transport-auto-resume"
+                && response["error"]["code"] == "USER_PAUSED"
+            {
+                Err(Error::new(
+                    "USER_PAUSED",
+                    crate::protocol::USER_PAUSED_PUBLIC_MESSAGE,
+                ))
+            } else if request["action"] == "control" && response["ok"] == false {
+                let (code, message) = match response["error"]["code"].as_str() {
+                    Some("RECOVERY_REQUIRED") => (
+                        "RECOVERY_REQUIRED",
+                        "输入状态尚未确认；请先断开 owned 会话并显式恢复",
+                    ),
+                    Some("BUSY") => ("BUSY", "当前输入尚未结束或确认释放，请稍后继续"),
+                    Some("USER_PAUSED") => {
+                        ("USER_PAUSED", crate::protocol::USER_PAUSED_PUBLIC_MESSAGE)
+                    }
+                    _ => ("HELPER_UPGRADE_REQUIRED", "原生 helper 不支持安全传输控制"),
+                };
+                Err(Error::new(code, message))
             } else {
                 Err(Error::new(
                     "HELPER_UPGRADE_REQUIRED",
@@ -260,6 +295,10 @@ impl Helper {
     pub fn canceller(&self) -> Canceller {
         self.canceller.clone()
     }
+    #[cfg(test)]
+    pub(crate) fn set_test_request_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
 }
 impl Native for Helper {
     fn set_input_epoch(&mut self, epoch: Option<u64>) {
@@ -289,7 +328,19 @@ impl Native for Helper {
             }
             if matches!(
                 request["action"].as_str(),
-                Some("click" | "scroll" | "type" | "press" | "select-file" | "chrome-start")
+                Some(
+                    "click"
+                        | "scroll"
+                        | "type"
+                        | "press"
+                        | "select-file"
+                        | "chrome-start"
+                        | "firefox-start"
+                        | "move"
+                        | "hover"
+                        | "drag"
+                        | "actions"
+                )
             ) {
                 request["expectedInputEpoch"] = json!(epoch);
             }
@@ -438,5 +489,54 @@ mod transport_tests {
                 .unwrap()["screenRecording"],
             true
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod firefox_epoch_tests {
+    use super::*;
+    #[test]
+    fn every_new_input_and_firefox_start_receives_reserved_epoch() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "mcc-epoch-{}.py",
+            crate::protocol::random_id().unwrap()
+        ));
+        std::fs::write(&path, "#!/usr/bin/env python3\nimport sys,json\nfor line in sys.stdin:\n r=json.loads(line)\n print(json.dumps({'id':r['id'],'ok':True,'data':{'epoch':r.get('expectedInputEpoch')}}),flush=True)\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut helper = Helper::with_timeout(&path, Duration::from_secs(2)).unwrap();
+        helper.set_input_epoch(Some(37));
+        for action in ["firefox-start", "move", "hover", "drag", "actions"] {
+            assert_eq!(
+                helper.request(json!({"action":action})).unwrap()["epoch"],
+                37,
+                "{action}"
+            );
+        }
+        assert!(helper.request(json!({"action":"observe"})).unwrap()["epoch"].is_null());
+        drop(helper);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod local_control_error_tests {
+    use super::*;
+    #[test]
+    fn resume_recovery_lock_keeps_its_error_code_without_private_diagnostics() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "mcc-control-error-{}.py",
+            crate::protocol::random_id().unwrap()
+        ));
+        std::fs::write(&path,"#!/usr/bin/env python3\nimport sys,json\nfor line in sys.stdin:\n r=json.loads(line)\n print(json.dumps({'id':r['id'],'ok':False,'error':{'code':'RECOVERY_REQUIRED','message':'private diagnostics'}}),flush=True)\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let helper =
+            Helper::with_timeout_for_scope(&path, Scope::Desktop, Duration::from_secs(2)).unwrap();
+        let error = helper.canceller().local_control("resume").unwrap_err();
+        assert_eq!(error.code, "RECOVERY_REQUIRED");
+        assert!(!error.message.contains("private"));
+        drop(helper);
+        std::fs::remove_file(path).unwrap();
     }
 }

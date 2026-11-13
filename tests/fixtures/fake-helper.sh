@@ -23,8 +23,21 @@ transport_paused=false
 transport_recovery=false
 transport_epoch=0
 transport_lease=null
+transport_reason=none
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  if [ "${MCC_FAKE_HOST_AUTO_TAKEOVER:-0}" = 1 ]; then
+    if [ -n "${MCC_FAKE_HOST_SOFT_PAUSE:-}" ] && [ -f "$MCC_FAKE_HOST_SOFT_PAUSE" ]; then
+      reason=$(cat "$MCC_FAKE_HOST_SOFT_PAUSE"); rm "$MCC_FAKE_HOST_SOFT_PAUSE"
+      if [ "$transport_paused" != true ]; then transport_epoch=$((transport_epoch + 1)); transport_reason=$reason; fi
+      transport_paused=true; transport_phase=paused
+    fi
+    if [ -n "${MCC_FAKE_HOST_MANUAL_PAUSE:-}" ] && [ -f "$MCC_FAKE_HOST_MANUAL_PAUSE" ]; then
+      rm "$MCC_FAKE_HOST_MANUAL_PAUSE"
+      if [ "$transport_paused" != true ]; then transport_epoch=$((transport_epoch + 1)); fi
+      transport_paused=true; transport_phase=paused; transport_reason=manual
+    fi
+  fi
   case "$line" in
     *'"expectedInputEpoch":'*)
       case "$line" in
@@ -37,7 +50,7 @@ while IFS= read -r line; do
       esac ;;
   esac
   case "$line" in
-    *'"action":"transport-state"'*|*'"action":"transport-pause"'*|*'"action":"transport-recover"'*)
+    *'"action":"transport-state"'*|*'"action":"transport-pause"'*|*'"action":"transport-recover"'*|*'"action":"transport-auto-resume"'*)
       if [ "${MCC_FAKE_TRANSPORT_UNSUPPORTED:-0}" = 1 ]; then
         printf '{"id":"%s","ok":false,"error":{"code":"UNKNOWN_ACTION","message":"unsupported fake transport"}}\n' "$id"
         continue
@@ -47,16 +60,28 @@ while IFS= read -r line; do
       fi
       if [ "$transport_paused" = true ] && [ "$transport_lease" != null ] && [ -n "${MCC_FAKE_REMOTE_RESUME:-}" ] && [ -e "$MCC_FAKE_REMOTE_RESUME" ]; then
         rm "$MCC_FAKE_REMOTE_RESUME"
-        transport_epoch=$((transport_epoch + 1)); transport_paused=false; transport_phase=countdown; transport_recovery=false
+        transport_epoch=$((transport_epoch + 1)); transport_paused=false; transport_phase=countdown; transport_recovery=false; transport_reason=none
       fi
       extra=''
       case "$line" in
         *'"action":"transport-pause"'*)
           if [ "$transport_paused" != true ]; then transport_epoch=$((transport_epoch + 1)); fi
-          transport_paused=true; transport_phase=paused; transport_recovery=true; extra=',"recovered":false' ;;
+          transport_paused=true; transport_phase=paused; transport_recovery=true; transport_reason=transport; extra=',"recovered":false' ;;
         *'"action":"transport-recover"'*)
-          transport_epoch=$((transport_epoch + 1)); transport_paused=false; transport_phase=awaitingCountdown; transport_recovery=false; transport_lease=null ;;
+          transport_epoch=$((transport_epoch + 1)); transport_paused=false; transport_phase=awaitingCountdown; transport_recovery=false; transport_lease=null; transport_reason=none ;;
+        *'"action":"transport-auto-resume"'*)
+          expected=$(printf '%s' "$line" | sed -n 's/.*"expectedInputEpoch":\([0-9]*\).*/\1/p')
+          lease=$(printf '%s' "$line" | sed -n 's/.*"expectedLease":\([0-9]*\).*/\1/p')
+          if [ -n "${MCC_FAKE_HOST_AUTO_RACE:-}" ] && [ -f "$MCC_FAKE_HOST_AUTO_RACE" ]; then transport_reason=manual; fi
+          if [ "${MCC_FAKE_HOST_AUTO_TAKEOVER:-0}" != 1 ] || [ "$transport_paused" != true ] || [ "$transport_recovery" = true ] || [ "$expected" != "$transport_epoch" ] || [ "$lease" != "$transport_lease" ]; then
+            printf '{"id":"%s","ok":false,"error":{"code":"USER_PAUSED","message":"fake auto resume rejected"}}\n' "$id"; continue
+          fi
+          case "$transport_reason" in userInteraction|focusLoss) ;; *) printf '{"id":"%s","ok":false,"error":{"code":"USER_PAUSED","message":"fake hard pause"}}\n' "$id"; continue ;; esac
+          transport_epoch=$((transport_epoch + 1)); transport_paused=false; transport_phase=awaitingCountdown; transport_reason=none; extra=',"autoResumed":true'
+          [ -z "${MCC_FAKE_HOST_AUTO_TRACE:-}" ] || printf 'auto-resume\n' >> "$MCC_FAKE_HOST_AUTO_TRACE"
+          if [ -n "${MCC_FAKE_HOST_AUTO_BAD_ACK:-}" ] && [ -f "$MCC_FAKE_HOST_AUTO_BAD_ACK" ]; then extra=',"autoResumed":true,"lease":999'; fi ;;
       esac
+      if [ "${MCC_FAKE_HOST_AUTO_TAKEOVER:-0}" = 1 ]; then extra="$extra,\"hostAutoTakeoverVersion\":1,\"pauseReason\":\"$transport_reason\""; fi
       data="{\"transportPauseVersion\":1,\"paused\":$transport_paused,\"phase\":\"$transport_phase\",\"inputEpoch\":$transport_epoch,\"lease\":$transport_lease,\"recoveryRequired\":$transport_recovery$extra}" ;;
     *'"action":"permissions"'*)
       requested=false

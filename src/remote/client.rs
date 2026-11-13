@@ -173,6 +173,25 @@ pub fn run(
     output: Option<PathBuf>,
     scope: Scope,
 ) -> Result<Value> {
+    run_inner(options, request, output, scope, None)
+}
+pub fn put_file(
+    options: ClientOptions,
+    connection: &str,
+    path: &std::path::Path,
+    scope: Scope,
+) -> Result<Value> {
+    let local = super::files::LocalFile::open(path)?;
+    let request = serde_json::json!({"action":"file-put","connectionId":connection,"name":local.manifest.name,"bytes":local.manifest.bytes,"sha256":local.manifest.sha256});
+    run_inner(options, request, None, scope, Some(local))
+}
+fn run_inner(
+    options: ClientOptions,
+    request: Value,
+    output: Option<PathBuf>,
+    scope: Scope,
+    mut upload: Option<super::files::LocalFile>,
+) -> Result<Value> {
     protocol::validate_action_with_files(scope, &request, true)?;
     let action = request["action"].as_str().ok_or_else(invalid)?.to_owned();
     if output.is_some() && action != "observe" && action != "frame" {
@@ -224,6 +243,7 @@ pub fn run(
         env!("CARGO_PKG_VERSION"),
         scope,
     )?;
+    protocol::require_capability(&request, &hello.capabilities)?;
     if state.as_ref().is_some_and(|s| s.boot_id != hello.boot_id) {
         return Err(Error::new(
             "RECOVERY_REQUIRED",
@@ -296,9 +316,33 @@ pub fn run(
             String::from_utf8(serialized).map_err(|_| invalid())?.into(),
         ))
         .map_err(|_| outcome(&id))?;
-    let result =
+    let mut result =
         wire::parse_server_control(&text(&mut socket, deadline).map_err(|_| outcome(&id))?)
             .map_err(|_| outcome(&id))?;
+    if let ServerControl::FileReady { id: rid, sequence } = &result {
+        if rid != &id || *sequence != s.sequence || action != "file-put" {
+            return Err(outcome(&id));
+        }
+        let local = upload.as_mut().ok_or_else(invalid)?;
+        use std::io::Read;
+        let mut remaining = local.manifest.bytes;
+        let mut buf = [0; super::files::CHUNK_BYTES];
+        while remaining > 0 {
+            let n = remaining.min(super::files::CHUNK_BYTES as u64) as usize;
+            local
+                .file
+                .read_exact(&mut buf[..n])
+                .map_err(|_| outcome(&id))?;
+            set_deadline(&mut socket, deadline);
+            socket
+                .send(Message::Binary(buf[..n].to_vec().into()))
+                .map_err(|_| outcome(&id))?;
+            remaining -= n as u64;
+        }
+        result =
+            wire::parse_server_control(&text(&mut socket, deadline).map_err(|_| outcome(&id))?)
+                .map_err(|_| outcome(&id))?;
+    }
     let (mut response, manifest) = match result {
         ServerControl::Result {
             id: rid,
