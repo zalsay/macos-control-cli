@@ -1319,10 +1319,14 @@ fn serve_connection(
 }
 /// Foreground Host. SIGINT/SIGTERM pause owned work before return.
 pub fn run(options: HostOptions, scope: Scope) -> Result<Value> {
-    if !cfg!(target_os = "macos") && !crate::execution::container_desktop_enabled(scope) {
+    #[cfg(target_os = "linux")]
+    if scope == Scope::Desktop {
+        crate::execution::validate_linux_environment()?;
+    }
+    if !cfg!(target_os = "macos") && !crate::execution::linux_desktop_enabled(scope) {
         return Err(Error::new(
             "UNSUPPORTED_PLATFORM",
-            "本地 Host 仅支持 macOS 或显式容器桌面模式",
+            "本地 Host 支持 macOS、Ubuntu Xorg 宿主及显式 Docker 桌面模式",
         ));
     }
     let roots: Result<Vec<PathBuf>> = options

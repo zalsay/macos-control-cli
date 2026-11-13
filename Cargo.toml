@@ -3,7 +3,7 @@ name = "copis-chrome"
 version = "4.0.0"
 edition = "2021"
 rust-version = "1.89"
-description = "macOS 与 Docker 桌面自动化 CLI（Rust + Swift / X11）"
+description = "macOS、Ubuntu Xorg 与 Docker 桌面自动化 CLI（Rust + Swift / X11）"
 license = "AGPL-3.0-only"
 publish = false
 

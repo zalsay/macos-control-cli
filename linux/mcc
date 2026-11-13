@@ -1,0 +1,12 @@
+#!/bin/sh
+# Use the logged-in user's real Xorg session; never start a display or desktop.
+set -eu
+package_root=$(CDPATH= cd -P "$(dirname "$(readlink -f "$0")")" && pwd)
+export MCC_LINUX_DESKTOP=1
+export COPIS_DESKTOP_HELPER=${COPIS_DESKTOP_HELPER:-"$package_root/libexec/mcc-linux-helper"}
+# Separate native GNOME sessions and Docker's runtime, while retaining explicit overrides.
+if [ -z "${COPIS_DESKTOP_RUNTIME_DIR:-}" ]; then
+    display_id=$(printf '%s' "${DISPLAY:-unset}" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_')
+    export COPIS_DESKTOP_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$HOME/.cache}/mcc-x11-$display_id"
+fi
+exec "$package_root/libexec/mcc" "$@"

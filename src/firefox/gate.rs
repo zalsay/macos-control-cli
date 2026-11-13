@@ -1,5 +1,6 @@
 use crate::protocol::{Error, Result};
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 
 pub struct Gate {
     pub lease: u64,
@@ -7,6 +8,8 @@ pub struct Gate {
     pub paused: bool,
     pub recovery: bool,
     transport_locked: bool,
+    host_desktop: bool,
+    countdown_until: Option<Instant>,
     pub reason: &'static str,
     pub active: bool,
     pub target: Option<(u32, i32)>,
@@ -25,16 +28,43 @@ impl Gate {
             paused: false,
             recovery: false,
             transport_locked: false,
+            host_desktop: false,
+            countdown_until: None,
             reason: "",
             active: false,
             target: None,
             input_started: false,
         }
     }
+    pub fn for_host_desktop() -> Self {
+        Self {
+            host_desktop: true,
+            ..Self::new()
+        }
+    }
+    pub fn begin_countdown(&mut self) -> Option<Instant> {
+        if !self.host_desktop || self.input_started {
+            return None;
+        }
+        Some(
+            *self
+                .countdown_until
+                .get_or_insert_with(|| Instant::now() + Duration::from_secs(3)),
+        )
+    }
+    pub fn countdown_remaining(&self) -> Option<Duration> {
+        self.countdown_until
+            .map(|until| until.saturating_duration_since(Instant::now()))
+    }
+    pub fn input_ready(&mut self) {
+        self.countdown_until = None;
+        self.input_started = true;
+    }
     pub fn bind(&mut self, id: u32, pid: i32) {
         self.lease += 1;
         self.target = Some((id, pid));
         self.input_started = false;
+        self.countdown_until = None;
     }
     pub fn check(&self, expected: Option<u64>) -> Result<()> {
         if self.recovery {
@@ -73,13 +103,13 @@ impl Gate {
         Ok(())
     }
     pub fn pause(&mut self, reason: &'static str, recovery: bool) {
-        // This gate belongs to the dedicated Docker desktop. Passive noVNC
-        // activity does not revoke a permit; explicit stops and faults still do.
-        if !recovery && matches!(reason, "userInteraction" | "focusLoss") {
+        let passive = !recovery && matches!(reason, "userInteraction" | "focusLoss");
+        if passive && (!self.host_desktop || self.paused) {
             return;
         }
         self.paused = true;
         self.reason = reason;
+        self.countdown_until = None;
         self.recovery |= recovery;
         self.epoch += 1;
         self.input_started = false;
@@ -95,9 +125,9 @@ impl Gate {
         self.transport_locked = false;
         self.reason = "";
         self.epoch += 1;
-        // Host recognizes a locally resumed lease in the running phase.
-        // No countdown is needed on the dedicated container desktop.
-        self.input_started = self.target.is_some();
+        self.input_started = self.target.is_some() && !self.host_desktop;
+        self.countdown_until = (self.host_desktop && self.target.is_some())
+            .then(|| Instant::now() + Duration::from_secs(3));
         Ok(())
     }
     pub fn auto_resume(&mut self, lease: u64, epoch: u64) -> Result<()> {
@@ -130,6 +160,7 @@ impl Gate {
         self.paused = false;
         self.recovery = false;
         self.transport_locked = false;
+        self.countdown_until = None;
         self.reason = "";
         self.target = None;
         self.active = false;
@@ -138,6 +169,8 @@ impl Gate {
     pub fn state(&self) -> Value {
         let phase = if self.paused {
             "paused"
+        } else if self.countdown_until.is_some() {
+            "countdown"
         } else if self.input_started {
             "running"
         } else {
@@ -152,6 +185,33 @@ impl Gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ubuntu_x11_host_user_activity_pauses_and_cannot_downgrade_a_hard_stop() {
+        let mut gate = Gate::for_host_desktop();
+        gate.bind(7, 42);
+        let epoch = gate.epoch;
+        gate.pause("userInteraction", false);
+        assert!(gate.paused, "shared host input must revoke automation");
+        assert!(gate.check(Some(epoch)).is_err());
+        gate.resume().unwrap();
+        gate.pause("explicitCancel", false);
+        gate.pause("focusLoss", false);
+        assert_eq!(gate.reason, "explicitCancel");
+        assert!(gate.auto_resume(gate.lease, gate.epoch).is_err());
+    }
+    #[test]
+    fn ubuntu_x11_host_resume_keeps_a_countdown_and_transport_stops_locked() {
+        let mut gate = Gate::for_host_desktop();
+        gate.bind(7, 42);
+        gate.pause("explicitPause", false);
+        gate.resume().unwrap();
+        assert_eq!(gate.state()["phase"], "countdown");
+        assert!(!gate.input_started);
+        gate.transport_pause();
+        gate.pause("userInteraction", false);
+        assert!(gate.auto_resume(gate.lease, gate.epoch).is_err());
+        assert_eq!(gate.reason, "transport");
+    }
     #[test]
     fn passive_container_activity_does_not_pause_or_revoke_input() {
         let mut gate = Gate::new();

@@ -343,6 +343,7 @@ pub struct Desktop {
     logical_keys: HashMap<String, (u8, Option<u8>)>,
     remapped_keys: HashMap<u8, Vec<u32>>,
     control_status: RefCell<String>,
+    host_desktop: bool,
 }
 impl Desktop {
     pub fn connect() -> Result<Self> {
@@ -353,7 +354,7 @@ impl Desktop {
         if !(display.starts_with(':') || display.starts_with("unix:")) {
             return Err(Error::new(
                 "X11_UNVERIFIED",
-                "只允许专属本地 X11 Unix 显示连接",
+                "只允许当前用户的本地 X11 Unix 显示连接",
             ));
         }
         let (connection, screen) = x11rb::connect(Some(&display)).map_err(xerror)?;
@@ -568,6 +569,7 @@ impl Desktop {
             logical_keys: HashMap::new(),
             remapped_keys: HashMap::new(),
             control_status: RefCell::new(String::new()),
+            host_desktop: crate::execution::host_desktop_enabled(crate::protocol::Scope::Desktop),
         };
         desktop.draw_control("Ready - helper manages input permission")?;
         Ok(desktop)
@@ -881,6 +883,12 @@ impl Desktop {
     /// Capture an identity-verified window, or a crop wholly inside that window.
     /// Pixels are never resized, including when encoding would exceed the budget.
     pub fn capture(&self, window: &Window, path: &Path) -> Result<(u32, u32)> {
+        if self.host_desktop && !self.lease_focused(window.window_id, window.pid)? {
+            return Err(Error::new(
+                "WINDOW_NOT_FOREGROUND",
+                "宿主 X11 截图要求目标窗口或其受验证的文件选择框在前台；请先显示原窗口",
+            ));
+        }
         let current = self.window(window.window_id, window.pid)?;
         if current.bundle_id != window.bundle_id || !contains_bounds(current.bounds, window.bounds)
         {
@@ -1243,10 +1251,36 @@ impl Desktop {
             });
         }
     }
-    fn explicit_stop_pending(&self) -> bool {
-        self.events
+    pub fn input_stop_reason(&self) -> Option<&'static str> {
+        if self
+            .events
             .iter()
-            .any(|event| matches!(event, DesktopEvent::Pause | DesktopEvent::Cancel))
+            .any(|event| matches!(event, DesktopEvent::Cancel))
+        {
+            Some("explicitCancel")
+        } else if self
+            .events
+            .iter()
+            .any(|event| matches!(event, DesktopEvent::Pause))
+        {
+            Some("explicitPause")
+        } else if self.host_desktop && self.events.contains(&DesktopEvent::UserInteraction) {
+            Some("userInteraction")
+        } else {
+            None
+        }
+    }
+    fn explicit_stop_pending(&self) -> bool {
+        self.input_stop_reason().is_some()
+    }
+    pub fn lease_focused(&self, id: u32, pid: i32) -> Result<bool> {
+        if self.focused(id)? {
+            return Ok(true);
+        }
+        let parent = self.window(id, pid)?;
+        Ok(self
+            .file_dialog(&parent)
+            .is_ok_and(|dialog| self.focused(dialog.window_id).unwrap_or(false)))
     }
     fn queue_event(&mut self, event: DesktopEvent) {
         if self.events.back() != Some(&event) {
@@ -1264,7 +1298,7 @@ impl Desktop {
         if matches!(kind, 2 | 4 | 6) && self.explicit_stop_pending() {
             return Err(Error::new(
                 "USER_PAUSED",
-                "已收到明确暂停或取消，停止后续 X11 注入",
+                "检测到暂停、取消或宿主人工输入，停止后续 X11 注入",
             ));
         }
         let result = (|| {
@@ -1325,7 +1359,7 @@ impl Desktop {
         if self.explicit_stop_pending() {
             return Err(Error::new(
                 "USER_PAUSED",
-                "已收到明确暂停或取消，请由 helper 重新确认许可",
+                "检测到人工接管或明确停止，请由 helper 重新确认许可",
             ));
         }
         let current = self.window(window.window_id, window.pid)?;

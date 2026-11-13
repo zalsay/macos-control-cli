@@ -29,6 +29,20 @@ pub fn validate_profile(name: &str) -> Result<()> {
     }
     Ok(())
 }
+fn validate_host_binary(path: &std::path::Path) -> Result<()> {
+    use std::io::Read;
+    let mut magic = [0; 4];
+    File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .map_err(|_| Error::new("FIREFOX_UNAVAILABLE", "无法读取 Firefox 可执行文件"))?;
+    if &magic != b"\x7fELF" {
+        return Err(Error::new(
+            "BROWSER_PACKAGE_UNSUPPORTED",
+            "宿主模式要求 Mozilla 普通版或非 Snap 的 Firefox ELF 可执行文件；不接受 Snap 启动脚本",
+        ));
+    }
+    Ok(())
+}
 fn executable(variable: &str, default: &str) -> Result<PathBuf> {
     let path = PathBuf::from(std::env::var_os(variable).unwrap_or_else(|| default.into()));
     if !path.is_absolute() || !path.is_file() {
@@ -43,6 +57,9 @@ fn executable(variable: &str, default: &str) -> Result<PathBuf> {
             "BROWSER_PACKAGE_UNSUPPORTED",
             "容器仅支持 Mozilla 官方非 Snap/Flatpak Firefox",
         ));
+    }
+    if crate::execution::host_desktop_enabled(crate::protocol::Scope::Desktop) {
+        validate_host_binary(&actual)?;
     }
     Ok(path)
 }
@@ -156,6 +173,7 @@ user_pref("browser.sessionstore.resume_from_crash", false);
             .arg(&path)
             .args(["--width", "1200", "--height", "820"])
             .env("MOZ_ENABLE_WAYLAND", "0")
+            .env("GDK_BACKEND", "x11")
             .env_remove("MOZ_MARIONETTE")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -330,5 +348,25 @@ mod native_launch_contract_tests {
         assert!(first_prefs.contains("network.proxy.type"));
         drop(Browser::start("ordinary", None).unwrap());
         assert_eq!(std::fs::read_to_string(&userjs).unwrap(), first_prefs);
+    }
+}
+
+#[cfg(test)]
+mod ubuntu_x11_tests {
+    use super::*;
+    #[test]
+    fn snap_launcher_scripts_are_not_accepted_as_native_firefox() {
+        let path = std::env::temp_dir().join(format!(
+            "mcc-host-binary-{}",
+            crate::protocol::random_id().unwrap()
+        ));
+        std::fs::write(&path, b"#!/bin/sh\nexec /snap/bin/firefox\n").unwrap();
+        assert_eq!(
+            validate_host_binary(&path).unwrap_err().code,
+            "BROWSER_PACKAGE_UNSUPPORTED"
+        );
+        std::fs::write(&path, b"\x7fELFfixture").unwrap();
+        validate_host_binary(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 }

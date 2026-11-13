@@ -2,6 +2,8 @@
 
 **4.0.0** 提供独立的 Ubuntu 22.04 容器桌面：Xvfb、Openbox、Firefox/X11 与 noVNC。启动、密码设置和命令见 [Docker 使用说明](docs/MCC-DOCKER.md)，从宿主调用见 [mccd 使用指南](docs/MCCD-USAGE.md)。此模式控制容器内应用，不连接宿主桌面。
 
+本开发分支新增直接连接当前 Ubuntu 22.04 Xorg 桌面的运行方式，复用现有 X11 后端，安装与验证边界见 [Ubuntu 原生桌面说明](docs/UBUNTU-X11.md)。
+
 **4.0.0** 包含 Firefox profile 持久化、无 WebDriver 的系统键鼠事件、远程 Host 控制、网页上传文件通道、模型配置及 Docker 空闲连接跨客户端续用。验证边界见 [版本说明](docs/RELEASE-4.0.0.md)。保留 0.3.6 的 Host 软暂停自动接管；明确停止、传输不确定状态和恢复锁不自动解除。
 
 此前补丁：Git tag 为 **0.3.5.1**，Cargo/功能包/CLI 版本为 **0.3.5+1**（Cargo 不接受四段版本号）。本补丁更新 `--help`，修复状态回执对版本元数据 `+` 的兼容，不改变输入与安全门禁。见[版本说明](docs/RELEASE-0.3.5.1.md)。

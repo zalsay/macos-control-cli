@@ -2,6 +2,8 @@
 
 Version **4.0.0** adds an isolated Ubuntu 22.04 desktop with Xvfb, Openbox, Firefox/X11 and noVNC. See the [Docker guide](docs/MCC-DOCKER.md) for startup, password setup and CLI usage. This mode controls applications inside its container.
 
+This development branch also supports the logged-in Ubuntu 22.04 Xorg desktop through the existing X11 backend. See [native Ubuntu setup and validation limits](docs/UBUNTU-X11.md).
+
 Version **4.0.0** includes persistent Firefox profiles, system mouse/keyboard events without WebDriver, authenticated remote Host control, file transfer for web uploads, shared model configuration, and idle Docker connection handoff. See [release notes](docs/RELEASE-4.0.0.md) for validation boundaries. Host soft-pause takeover from 0.3.6 is retained; explicit stops, transport uncertainty and recovery locks remain blocked.
 
 Previous patch: Git tag **0.3.5.1**, Cargo/package/CLI version **0.3.5+1** (Cargo requires three-component SemVer). This patch refreshes `--help` and accepts numeric build metadata in status receipts; existing input and security behavior is unchanged. See [release notes](docs/RELEASE-0.3.5.1.md).

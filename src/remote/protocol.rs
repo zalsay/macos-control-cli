@@ -263,7 +263,7 @@ pub fn required_capability(request: &Value) -> Option<&'static str> {
 }
 pub fn host_capabilities(scope: Scope) -> Vec<String> {
     let mut capabilities = vec!["remote-v1".to_owned()];
-    if crate::execution::container_desktop_enabled(scope) {
+    if crate::execution::linux_desktop_enabled(scope) {
         capabilities.extend([
             "firefox.x11.v1".to_owned(),
             "firefox.system-input.v1".to_owned(),

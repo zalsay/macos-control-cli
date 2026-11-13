@@ -620,7 +620,7 @@ click-target 通过 models.toml 中完整 Decisions URL 发送 target 与 ID/文
 chrome start 需要宿主控制Google Chrome的macOS自动化权限；权限缺失明确拒绝，不代替本人授权。
 chrome start --profile 指定 Chrome 的显示名称（仅匹配已有配置，不是路径）；省略时使用 [chrome].profile。它与 models.toml 中的模型 profile 无关，且不会创建 Chrome 配置。
 chrome start 仅创建并布局新窗口：主屏可用区域最左侧、全高，宽默认最多1600原像素；随后返回原connect凭据，不移动其他窗口。
-Firefox、move/hover/drag/actions 与 click --button left|middle|right / --modifiers shift,control,alt,meta 用于显式 MCC_DOCKER=1 的 Linux 容器桌面；新增输入选项要求 Firefox 系统输入连接。
+Firefox、move/hover/drag/actions 与 click --button left|middle|right / --modifiers shift,control,alt,meta 用于 Ubuntu Xorg 宿主桌面（MCC_LINUX_DESKTOP=1）及 Linux 容器桌面（MCC_DOCKER=1）；新增输入选项要求 Firefox 系统输入连接。
 firefox start 必须显式指定 --profile NAME；NAME 为 1–64 个字母、数字、下划线或短横线，不是路径。
 actions 文件为 version:1 的受限步骤 JSON，最多 64KiB、256 步、总时长 10 秒，按键与按钮必须释放；文件内容内联发送，不把本地路径交给远端。
 control 只在本地控制当前桌面；已有远端 owner 时拒绝，不绕过 Host 的 owner 或恢复锁。

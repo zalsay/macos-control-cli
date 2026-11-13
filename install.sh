@@ -1,6 +1,10 @@
 #!/bin/sh
 # 本地用户级安装；不联网、不修改 shell 配置、不启动桌面控制。
 set -eu
+if [ "$(uname -s)" = Linux ]; then
+    installer_root=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+    exec sh "$installer_root/linux/install.sh" "$@"
+fi
 fail() { printf '[mcc] %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'HELP'

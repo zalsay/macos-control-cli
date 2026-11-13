@@ -6,14 +6,83 @@ use crate::{
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-/// Container mode is explicit and desktop scoped; ordinary Linux remains unsupported.
+/// Native Linux shares the X11 backend, but never inherits Docker handoff policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxDesktopMode {
+    Docker,
+    Host,
+}
+impl LinuxDesktopMode {
+    fn select(docker: bool, host: bool) -> Result<Option<Self>> {
+        match (docker, host) {
+            (true, false) => Ok(Some(Self::Docker)),
+            (false, true) => Ok(Some(Self::Host)),
+            (false, false) => Ok(None),
+            (true, true) => Err(Error::invalid(
+                "MCC_DOCKER 与 MCC_LINUX_DESKTOP 不能同时启用",
+            )),
+        }
+    }
+    fn validate_session(
+        self,
+        uid: u32,
+        session: Option<&str>,
+        display: Option<&str>,
+    ) -> Result<()> {
+        if uid == 0 {
+            return Err(Error::new(
+                "UNSUPPORTED_PLATFORM",
+                "Linux 桌面必须由当前登录的普通用户运行，不能使用 sudo/root",
+            ));
+        }
+        if self == Self::Host && session != Some("x11") {
+            return Err(Error::new("SESSION_UNSUPPORTED", "宿主模式仅支持 Xorg；请在 Ubuntu on Xorg 登录会话的终端运行，Wayland/XWayland 不受支持"));
+        }
+        let display = display.unwrap_or("");
+        let local = display
+            .strip_prefix(':')
+            .or_else(|| display.strip_prefix("unix:"));
+        if !local.is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        }) {
+            return Err(Error::new(
+                "X11_UNVERIFIED",
+                "DISPLAY 必须为当前用户的本地 X11 显示，例如 :0；不支持 SSH X11 转发",
+            ));
+        }
+        Ok(())
+    }
+}
+fn configured_linux_mode(scope: Scope) -> Result<Option<LinuxDesktopMode>> {
+    if !cfg!(target_os = "linux") || scope != Scope::Desktop {
+        return Ok(None);
+    }
+    LinuxDesktopMode::select(
+        std::env::var_os("MCC_DOCKER").as_deref() == Some(std::ffi::OsStr::new("1")),
+        std::env::var_os("MCC_LINUX_DESKTOP").as_deref() == Some(std::ffi::OsStr::new("1")),
+    )
+}
 pub fn container_desktop_enabled(scope: Scope) -> bool {
-    cfg!(target_os = "linux")
-        && scope == Scope::Desktop
-        && std::env::var_os("MCC_DOCKER").as_deref() == Some(std::ffi::OsStr::new("1"))
+    configured_linux_mode(scope).ok().flatten() == Some(LinuxDesktopMode::Docker)
+}
+pub fn host_desktop_enabled(scope: Scope) -> bool {
+    configured_linux_mode(scope).ok().flatten() == Some(LinuxDesktopMode::Host)
+}
+pub fn linux_desktop_enabled(scope: Scope) -> bool {
+    configured_linux_mode(scope).ok().flatten().is_some()
+}
+#[cfg(target_os = "linux")]
+pub(crate) fn validate_linux_environment() -> Result<LinuxDesktopMode> {
+    let mode = configured_linux_mode(Scope::Desktop)?.ok_or_else(|| Error::new("UNSUPPORTED_PLATFORM", "请通过 Ubuntu X11 安装入口运行，或显式设置 MCC_LINUX_DESKTOP=1；Docker 使用 MCC_DOCKER=1"))?;
+    mode.validate_session(
+        unsafe { libc::geteuid() },
+        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+        std::env::var("DISPLAY").ok().as_deref(),
+    )?;
+    Ok(mode)
 }
 fn local_execution_enabled(scope: Scope) -> bool {
-    cfg!(target_os = "macos") || container_desktop_enabled(scope)
+    cfg!(target_os = "macos") || linux_desktop_enabled(scope)
 }
 
 #[cfg(unix)]
@@ -22,10 +91,14 @@ pub fn execute_local(command: Command, scope: Scope) -> Result<Value> {
     if let Command::Config(args) = command {
         return crate::config::Store::from_env()?.execute(&args, std::io::stdin().lock());
     }
+    #[cfg(target_os = "linux")]
+    if scope == Scope::Desktop {
+        validate_linux_environment()?;
+    }
     if !local_execution_enabled(scope) {
         return Err(Error::new(
             "UNSUPPORTED_PLATFORM",
-            "桌面自动化仅支持 macOS 14 及以上版本",
+            "桌面自动化支持 macOS 14+、Ubuntu Xorg 宿主桌面及显式 Docker 桌面",
         ));
     }
     match command {
@@ -67,10 +140,14 @@ fn execute_request_inner(
         daemon,
         runtime::{export_image, Runtime},
     };
+    #[cfg(target_os = "linux")]
+    if scope == Scope::Desktop {
+        validate_linux_environment()?;
+    }
     if !local_execution_enabled(scope) {
         return Err(Error::new(
             "UNSUPPORTED_PLATFORM",
-            "桌面自动化仅支持 macOS 14 及以上版本",
+            "桌面自动化支持 macOS 14+、Ubuntu Xorg 宿主桌面及显式 Docker 桌面",
         ));
     }
     let runtime = Runtime::from_env_for_scope(scope)?;
@@ -134,10 +211,14 @@ pub fn execute_remote_request(
     owner: &str,
     operation: &str,
 ) -> Result<Value> {
+    #[cfg(target_os = "linux")]
+    if scope == Scope::Desktop {
+        validate_linux_environment()?;
+    }
     if !local_execution_enabled(scope) {
         return Err(Error::new(
             "UNSUPPORTED_PLATFORM",
-            "桌面自动化仅支持 macOS 14 及以上版本",
+            "桌面自动化支持 macOS 14+、Ubuntu Xorg 宿主桌面及显式 Docker 桌面",
         ));
     }
     let runtime = crate::runtime::Runtime::from_env_for_scope(scope)?;
@@ -155,7 +236,7 @@ pub fn execute_remote_request(
 pub fn execute_remote_request(_: Value, _: Scope, _: &str, _: &str) -> Result<Value> {
     Err(Error::new(
         "UNSUPPORTED_PLATFORM",
-        "桌面自动化仅支持 macOS 14 及以上版本",
+        "桌面自动化支持 macOS 14+、Ubuntu Xorg 宿主桌面及显式 Docker 桌面",
     ))
 }
 
@@ -174,14 +255,14 @@ fn apply_chrome_start_settings(request: &mut Value, store: &crate::config::Store
 pub fn execute_local(_: Command, _: Scope) -> Result<Value> {
     Err(Error::new(
         "UNSUPPORTED_PLATFORM",
-        "桌面自动化仅支持 macOS 14 及以上版本",
+        "桌面自动化支持 macOS 14+、Ubuntu Xorg 宿主桌面及显式 Docker 桌面",
     ))
 }
 #[cfg(not(unix))]
 pub fn execute_request(_: Value, _: Option<PathBuf>, _: Scope) -> Result<Value> {
     Err(Error::new(
         "UNSUPPORTED_PLATFORM",
-        "桌面自动化仅支持 macOS 14 及以上版本",
+        "桌面自动化支持 macOS 14+、Ubuntu Xorg 宿主桌面及显式 Docker 桌面",
     ))
 }
 
@@ -271,5 +352,42 @@ mod tests {
         assert!(result.is_err());
         assert_ne!(result.unwrap_err().code, "NOT_IMPLEMENTED");
         assert!(!root.exists());
+    }
+}
+
+#[cfg(test)]
+mod ubuntu_x11_tests {
+    use super::*;
+    #[test]
+    fn modes_and_shared_session_validation_are_separate() {
+        assert_eq!(
+            LinuxDesktopMode::select(true, false).unwrap(),
+            Some(LinuxDesktopMode::Docker)
+        );
+        assert_eq!(
+            LinuxDesktopMode::select(false, true).unwrap(),
+            Some(LinuxDesktopMode::Host)
+        );
+        assert!(LinuxDesktopMode::select(true, true).is_err());
+        let host = LinuxDesktopMode::Host;
+        assert!(host.validate_session(1000, Some("x11"), Some(":0")).is_ok());
+        assert!(host
+            .validate_session(1000, Some("x11"), Some("unix:1.0"))
+            .is_ok());
+        for session in [Some("wayland"), None] {
+            assert_eq!(
+                host.validate_session(1000, session, Some(":0"))
+                    .unwrap_err()
+                    .code,
+                "SESSION_UNSUPPORTED"
+            );
+        }
+        assert!(host.validate_session(0, Some("x11"), Some(":0")).is_err());
+        for display in [None, Some("localhost:10.0"), Some(":"), Some("host:0")] {
+            assert!(host.validate_session(1000, Some("x11"), display).is_err());
+        }
+        assert!(LinuxDesktopMode::Docker
+            .validate_session(1000, None, Some(":99"))
+            .is_ok());
     }
 }

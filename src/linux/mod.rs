@@ -1,4 +1,4 @@
-//! Ubuntu container implementation of the existing Native helper protocol.
+//! Ubuntu Xorg host/container implementation of the existing Native helper protocol.
 pub mod x11;
 use crate::{
     firefox::{actions, browser::Browser, gate::Gate},
@@ -99,8 +99,9 @@ impl Helper {
     }
     fn permissions(&self) -> Result<Value> {
         let _desktop = lock(&self.desktop)?;
+        let host = crate::execution::host_desktop_enabled(crate::protocol::Scope::Desktop);
         Ok(
-            json!({"platform":"linux-docker","screenRecording":true,"accessibility":true,"backend":"x11","ocr":{"engine":"tesseract","languages":["eng","chi_sim"]},"capabilities":["firefox.x11.v1","firefox.system-input.v1","docker.x11.v1"]}),
+            json!({"platform":if host {"linux-x11"} else {"linux-docker"},"screenRecording":true,"accessibility":true,"backend":"x11","ocr":{"engine":"tesseract","languages":["eng","chi_sim"]},"capabilities":["firefox.x11.v1","firefox.system-input.v1",if host {"linux.x11.v1"} else {"docker.x11.v1"}]}),
         )
     }
     fn request(&mut self, request: &Value) -> Result<Value> {
@@ -168,7 +169,7 @@ impl Helper {
                 self.disconnect()?;
                 Ok(lock(&self.gate)?.state())
             }
-            "chrome-start" => Err(Error::new("ACTION_UNSUPPORTED", "容器未实现此原生功能")),
+            "chrome-start" => Err(Error::new("ACTION_UNSUPPORTED", "Linux 未实现此原生功能")),
             _ => Err(Error::invalid("未知 Linux helper 操作")),
         }
     }
@@ -272,25 +273,34 @@ impl Helper {
         Ok(out)
     }
     fn permit(&mut self, request: &Value, real: &Window) -> Result<u64> {
+        self.permit_for(request, real, real)
+    }
+    fn permit_for(&mut self, request: &Value, real: &Window, lease: &Window) -> Result<u64> {
         let expected = {
-            let mut gate = lock(&self.gate)?;
+            let gate = lock(&self.gate)?;
             gate.check(request["expectedInputEpoch"].as_u64())?;
-            if gate.target != Some((real.window_id, real.pid)) {
+            if gate.target != Some((lease.window_id, lease.pid)) {
                 return Err(Error::new(
                     "WINDOW_UNAVAILABLE",
                     "输入目标未绑定到当前 lease",
                 ));
             }
-            gate.active = true;
             gate.epoch
         };
-        // A dedicated container has no macOS-style human handoff. Reacquire
-        // the verified target for each new command without a countdown.
         lock(&self.desktop)?.activate(real.window_id)?;
+        let countdown = {
+            let mut gate = lock(&self.gate)?;
+            gate.check(Some(expected))?;
+            gate.active = true;
+            gate.begin_countdown()
+        };
+        if let Some(deadline) = countdown {
+            self.wait_until(expected, real, deadline)?;
+        }
         {
             let mut gate = lock(&self.gate)?;
             gate.check(Some(expected))?;
-            gate.input_started = true;
+            gate.input_ready();
         }
         self.check_step(expected, real)?;
         Ok(expected)
@@ -312,6 +322,7 @@ impl Helper {
             ));
         }
         if !desktop.focused(real.window_id)? {
+            lock(&self.gate)?.pause("focusLoss", false);
             return Err(Error::new(
                 "FOCUS_LOST",
                 "目标窗口失焦；当前动作已停止，下一条命令会重新激活目标",
@@ -453,8 +464,23 @@ impl Helper {
                 Ok(json!({"sent":true,"backend":"x11","effectVerified":false}))
             }
         })();
-        let released = lock(&self.desktop)?.release_inputs();
-        lock(&self.gate)?.active = false;
+        let mut desktop = lock(&self.desktop)?;
+        let released = desktop.release_inputs();
+        let reason = desktop.input_stop_reason();
+        drop(desktop);
+        let mut gate = lock(&self.gate)?;
+        if let Some(reason) = reason {
+            gate.pause(reason, false);
+        }
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.code == "FOCUS_LOST")
+        {
+            gate.pause("focusLoss", false);
+        }
+        gate.active = false;
+        drop(gate);
         if let Err(error) = released {
             lock(&self.gate)?.pause("unknownInput", true);
             if let Some(target) = &mut self.target {
@@ -522,24 +548,7 @@ impl Helper {
         let mut dispatched = false;
         let mut completed = 0;
         let result = (|| -> Result<Value> {
-            let epoch = {
-                let mut gate = lock(&self.gate)?;
-                gate.check(request["expectedInputEpoch"].as_u64())?;
-                if gate.target != Some((parent.window_id, parent.pid)) {
-                    return Err(Error::new(
-                        "FILE_DIALOG_UNVERIFIED",
-                        "选择框不属于当前 lease",
-                    ));
-                }
-                gate.active = true;
-                gate.epoch
-            };
-            lock(&self.desktop)?.activate(dialog.window_id)?;
-            {
-                let mut gate = lock(&self.gate)?;
-                gate.check(Some(epoch))?;
-                gate.input_started = true;
-            }
+            let epoch = self.permit_for(request, &dialog, &parent)?;
             for operation in [
                 json!({"action":"press","key":"Control+l"}),
                 json!({"action":"type","text":path}),
@@ -609,8 +618,23 @@ impl Helper {
                 std::thread::sleep(Duration::from_millis(10));
             }
         })();
-        let released = lock(&self.desktop)?.release_inputs();
-        lock(&self.gate)?.active = false;
+        let mut desktop = lock(&self.desktop)?;
+        let released = desktop.release_inputs();
+        let reason = desktop.input_stop_reason();
+        drop(desktop);
+        let mut gate = lock(&self.gate)?;
+        if let Some(reason) = reason {
+            gate.pause(reason, false);
+        }
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.code == "FOCUS_LOST")
+        {
+            gate.pause("focusLoss", false);
+        }
+        gate.active = false;
+        drop(gate);
         if let Err(error) = released {
             lock(&self.gate)?.pause("unknownInput", true);
             if let Some(t) = self.target.as_mut() {
@@ -718,14 +742,14 @@ fn recognize(path: &Path, width: u32, height: u32, stop: &AtomicBool) -> Value {
 }
 
 pub fn run() -> Result<()> {
-    if std::env::var("MCC_DOCKER").as_deref() != Ok("1") || unsafe { libc::geteuid() } == 0 {
-        return Err(Error::new(
-            "UNSUPPORTED_PLATFORM",
-            "Linux helper 只在普通用户 MCC_DOCKER=1 专属桌面中运行",
-        ));
-    }
+    let mode = crate::execution::validate_linux_environment()?;
+    let host_desktop = mode == crate::execution::LinuxDesktopMode::Host;
     let desktop = Arc::new(Mutex::new(Desktop::connect()?));
-    let gate = Arc::new(Mutex::new(Gate::new()));
+    let gate = Arc::new(Mutex::new(if host_desktop {
+        Gate::for_host_desktop()
+    } else {
+        Gate::new()
+    }));
     let stop = Arc::new(AtomicBool::new(false));
     let output = Arc::new(Mutex::new(std::io::stdout()));
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
@@ -789,8 +813,18 @@ pub fn run() -> Result<()> {
                         DesktopEvent::Resume => {
                             let _ = gate.resume();
                         }
-                        // Ordinary noVNC events do not pause this dedicated
-                        // desktop. Each input still checks its exact target.
+                        DesktopEvent::UserInteraction if host_desktop && gate.target.is_some() => {
+                            gate.pause("userInteraction", false)
+                        }
+                        DesktopEvent::FocusChanged
+                            if host_desktop && (gate.input_started || gate.active) =>
+                        {
+                            if let Some((id, pid)) = gate.target {
+                                if !desktop.lease_focused(id, pid)? {
+                                    gate.pause("focusLoss", false);
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -798,6 +832,8 @@ pub fn run() -> Result<()> {
                     "RECOVERY REQUIRED".to_owned()
                 } else if gate.paused {
                     "PAUSED".to_owned()
+                } else if let Some(remaining) = gate.countdown_remaining() {
+                    format!("MCC START IN {}s", remaining.as_millis().div_ceil(1000))
                 } else if gate.target.is_some() {
                     "MCC CONTROL".to_owned()
                 } else {

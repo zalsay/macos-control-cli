@@ -2,6 +2,9 @@
 set -euo pipefail
 
 PACKAGE_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ "$(uname -s)" == Linux ]]; then
+  exec bash "$PACKAGE_DIR/linux/build.sh" "$@"
+fi
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "[copis-chrome] 原生功能包仅支持在 macOS 上构建" >&2
   exit 1

@@ -263,9 +263,9 @@ impl<N: Native> Service<N> {
                 }
                 let requested = request["request"].as_bool().unwrap_or(false);
                 self.native.request(json!({"action":"permissions","request":requested})).and_then(|result| {
-                    if self.scope == Scope::Desktop && result["platform"] == "linux-docker" {
+                    if self.scope == Scope::Desktop && matches!(result["platform"].as_str(), Some("linux-docker" | "linux-x11")) {
                         if !result["screenRecording"].is_boolean() || !result["accessibility"].is_boolean() {
-                            return Err(Error::new("HELPER_PROTOCOL", "容器桌面权限状态无效"));
+                            return Err(Error::new("HELPER_PROTOCOL", "Linux 桌面权限状态无效"));
                         }
                         return Ok(result);
                     }
@@ -1284,6 +1284,16 @@ mod tests {
         )
     }
 
+    #[test]
+    fn ubuntu_x11_permissions_do_not_require_macos_chrome_automation() {
+        let (mut service, _) = connected_service(Ok(json!({"selected":true})));
+        service.scope = Scope::Desktop;
+        service.native.replies = VecDeque::from([Ok(
+            json!({"platform":"linux-x11","screenRecording":true,"accessibility":true,"backend":"x11"}),
+        )]);
+        let result = service.execute(json!({"action":"permissions"})).unwrap();
+        assert_eq!(result["platform"], "linux-x11");
+    }
     #[test]
     fn permission_query_native_eof_keeps_original_connection_invalidation() {
         let (mut service, _) = connected_service(Ok(json!({"selected":true})));
