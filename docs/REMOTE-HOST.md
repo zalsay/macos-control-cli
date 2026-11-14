@@ -178,12 +178,14 @@ mcc host start ... --files-root /absolute/host/uploads
 
 默认：握手5秒，头8KiB，认证前连接8，认证后连接4，一个活动动作；控制JSON与WS帧64KiB，有界分片/写缓冲；禁压缩和未masked客户端帧；有界IP/全局认证失败预算和请求速率。浏览器Origin存在即拒绝，首版不提供浏览器页面控制台或Cookie登录。
 
-证书/token启动时加载，首版不热重载。轮换需按暂停/停止流程由Host本人操作、换受保护文件并重启；旧boot/session不自动变成新控制身份。Host本地恢复并重启后，旧客户端缓存会明确报RECOVERY_REQUIRED；操作者确认新Host身份后可选择新的--remote-state-dir重新建立会话，不把清客户端缓存当作解除Host暂停的方法。保留恢复记录，在必要时完成本地恢复后重新配对。不要假设修改token文件就立即撤销所有现有连接。
+证书/token启动时加载，首版不热重载。轮换需按暂停/停止流程由Host本人操作、换受保护文件并重启；修改token文件不会立即撤销已有连接。认证成功后，Host复用当前boot下有效且scope匹配的session；未知/过期session或旧boot缓存会收到Host新签发的session。客户端清零sequence、丢弃旧auto-image登记；首次重绑定只允许status/apps/windows/permissions继续，其他操作返回SESSION_REBOUND且不发送请求，须操作者确认后重新执行。新session不会继承旧owner、connection或frame，不能接管他人的控制权。
+
+Host本地恢复并重启后，session重绑定不会解除recovery_required、暂停或恢复锁。只读status会报告Host状态；输入/控制仍被RECOVERY_REQUIRED门禁阻断，须本人先完成本地恢复。不要把重新配对、清客户端缓存或更换runtime当作解除Host暂停的方法，也不要假设新session恢复了旧桌面控制身份。
 
 ## 9. 协议与验收状态
 
 WS子协议mcc.remote.v1，外层remoteProtocol=1；握手报告精确MCC版本、scope、boot、能力。认证、版本、大小、字段白名单和归属都先于操作。内部daemon所有者capability、原生pause参数及Jev参数不接受来自网络对端。
 
-协议顺序为Hello→session确认→RemoteEnvelope→result/可选manifest+二进制→ACK→acked→close；只有原请求的id/sequence匹配才可确认。原请求按digest匹配已有回执，旧序号/淘汰回执拒绝，不作为新输入。
+协议顺序为Hello→session确认→RemoteEnvelope→result/可选manifest+二进制→ACK→acked→close；只有原请求的id/sequence匹配才可确认。认证成功后，session确认会复用当前boot下有效session，或对未知/过期/旧boot身份签发新session；scope不匹配仍拒绝。客户端允许缓存boot与Host不同，但要求本连接session回复的bootId与同一连接的Hello一致，这是协议一致性校验，不是旧缓存拒绝。客户端重绑定时sequence归零且不带用旧frame/auto-image登记。首次重绑定不会自动发送控制请求；SESSION_REBOUND 表示新身份已保存、当前操作未发送。原请求按digest匹配已有回执，旧序号/淘汰回执拒绝，不作为新输入。
 
 验证必须分层报告：纯状态/证书单测；本机真实TLS loopback+fake native/Decisions；双Mac桌面；受控公网。当前层级及具体命令以[V034验证记录](V034-VERIFICATION.md)为准。没有第二台Mac或可控公网地址时，不以loopback成功宣称双机/公网验收。

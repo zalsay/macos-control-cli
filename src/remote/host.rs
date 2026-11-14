@@ -751,17 +751,23 @@ fn serve_connection(
         } if s == scope => (session, boot_id),
         _ => return Err(fail("PROTOCOL_ERROR")),
     };
-    let sid = {
+    let (sid, rebound) = {
         let mut c = locked(&core)?;
-        if let Some(s) = requested {
-            c.manager
-                .authorize(&s, requested_boot.as_deref().unwrap_or(""), scope)?;
-            s
+        let current = match requested.as_deref() {
+            Some(session) => c.manager.session_is_current(
+                session,
+                requested_boot.as_deref().unwrap_or(""),
+                scope,
+            )?,
+            None => false,
+        };
+        if current {
+            (requested.expect("current session was supplied"), false)
         } else {
             let s = crate::protocol::random_id()?;
             let now = c.now();
             c.manager.issue(&s, scope, now)?;
-            s
+            (s, requested.is_some())
         }
     };
     reconcile_local_resume(&core, &sid, scope)?;
@@ -850,10 +856,25 @@ fn serve_connection(
         .as_str()
         .ok_or_else(|| fail("INVALID_ARGUMENT"))?
         .to_string();
+    if rebound && !protocol::session_rebind_read_only(&action) {
+        return send_untracked_result(
+            &mut ws,
+            &env.id,
+            env.sequence,
+            crate::protocol::response_for_host(
+                Err(Error::new(
+                    "SESSION_REBOUND",
+                    "Host 已签发新会话；当前控制操作未执行",
+                )),
+                scope,
+            ),
+        );
+    }
     protocol::require_capability(&env.request, &capabilities)?;
     // Docker tokens authorize the shared desktop. Reuse an idle connection without
     // replacing its native owner capability or opening another browser window.
-    if crate::execution::container_desktop_enabled(scope)
+    if !rebound
+        && crate::execution::container_desktop_enabled(scope)
         && (action == "status" || env.request["connectionId"].is_string())
     {
         let adopted = (|| -> Result<()> {

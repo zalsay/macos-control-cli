@@ -166,14 +166,22 @@ impl SessionManager {
         Ok(())
     }
     pub fn authorize(&self, credential: &str, boot: &str, scope: Scope) -> Result<()> {
-        let s = self
-            .sessions
-            .get(credential)
-            .ok_or_else(|| fail("SESSION_INVALID"))?;
-        if boot != self.boot || s.scope != scope {
+        if !self.session_is_current(credential, boot, scope)? {
             return Err(fail("SESSION_INVALID"));
         }
         Ok(())
+    }
+    /// Whether a client-provided identity can be reused for this Host boot.
+    /// A missing/expired session or old boot may be rebound to a newly issued
+    /// session after token authentication; scope mismatches remain invalid.
+    pub fn session_is_current(&self, credential: &str, boot: &str, scope: Scope) -> Result<bool> {
+        let Some(session) = self.sessions.get(credential) else {
+            return Ok(false);
+        };
+        if session.scope != scope {
+            return Err(fail("SESSION_INVALID"));
+        }
+        Ok(boot == self.boot)
     }
     /// Reserve the sole control owner before dispatching connect or chrome-start.
     pub fn reserve_control(&mut self, credential: &str, now: u64) -> Result<()> {

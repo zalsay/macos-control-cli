@@ -92,6 +92,32 @@ fn ownership_replay_and_loss_are_fail_closed() {
         .is_err());
     assert!(!format!("{m:?}").contains("secret-a"));
 }
+
+#[test]
+fn stale_or_missing_session_requires_new_host_issued_identity() {
+    let mut manager = SessionManager::new("boot-current", false).unwrap();
+    manager.issue("known-session", Scope::Desktop, 0).unwrap();
+
+    assert!(manager
+        .session_is_current("known-session", "boot-current", Scope::Desktop)
+        .unwrap());
+    assert!(!manager
+        .session_is_current("expired-session", "boot-current", Scope::Desktop)
+        .unwrap());
+    assert!(!manager
+        .session_is_current("known-session", "boot-old", Scope::Desktop)
+        .unwrap());
+    assert!(manager
+        .session_is_current("known-session", "boot-current", Scope::Chrome)
+        .is_err());
+    assert_eq!(
+        manager
+            .authorize("known-session", "boot-old", Scope::Desktop)
+            .unwrap_err()
+            .code,
+        "SESSION_INVALID"
+    );
+}
 #[test]
 fn readonly_loss_does_not_lock_and_idle_does() {
     let mut m = SessionManager::new("boot-a", false).unwrap();

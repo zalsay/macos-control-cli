@@ -291,7 +291,7 @@ fn invalid_result_is_not_acked_or_reported_as_success() {
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]
-fn host_boot_change_does_not_replace_cached_session() {
+fn host_boot_change_rebinds_cached_session_without_sending_control() {
     use copis_chrome::protocol::Scope;
     use copis_chrome::remote::{client, credentials, options::ClientOptions, wire};
     use std::{net::TcpListener, os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
@@ -310,7 +310,7 @@ fn host_boot_change_does_not_replace_cached_session() {
     let cfg = credentials::server_config(&cert.certificate, &cert.private_key).unwrap();
     let p = token.clone();
     let t = std::thread::spawn(move || {
-        for boot in ["boot1", "boot2"] {
+        for boot in ["boot1", "boot2", "boot3"] {
             let (tcp, _) = listener.accept().unwrap();
             tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let tls = rustls::StreamOwned::new(
@@ -320,11 +320,36 @@ fn host_boot_change_does_not_replace_cached_session() {
             let mut ws =
                 wire::accept_authenticated(tls, &credentials::read_token(&p).unwrap()).unwrap();
             ws.send(Message::Text(json!({"remoteProtocol":1,"version":env!("CARGO_PKG_VERSION"),"scope":"chrome","bootId":boot,"capabilities":[]}).to_string().into())).unwrap();
+            let session_request: serde_json::Value =
+                serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
             if boot == "boot2" {
+                assert_eq!(session_request["session"], "sid");
+                assert_eq!(session_request["bootId"], "boot1");
+                ws.send(Message::Text(
+                    json!({"type":"session","session":"sid2","bootId":boot,"state":"ready"})
+                        .to_string()
+                        .into(),
+                ))
+                .unwrap();
+                assert!(
+                    !matches!(ws.read(), Ok(Message::Text(_))),
+                    "control RPC must not be sent after rebind"
+                );
+                continue;
+            }
+            if boot == "boot3" {
+                assert_eq!(session_request["session"], "sid2");
+                assert_eq!(session_request["bootId"], "boot2");
+                ws.send(Message::Text(
+                    json!({"type":"session","session":"sid3","bootId":"unexpected-boot","state":"ready"})
+                        .to_string()
+                        .into(),
+                ))
+                .unwrap();
                 assert!(!matches!(ws.read(), Ok(Message::Text(_))));
                 break;
             }
-            let _ = ws.read().unwrap();
+            assert_eq!(session_request["session"], serde_json::Value::Null);
             ws.send(Message::Text(
                 json!({"type":"session","session":"sid","bootId":boot,"state":"ready"})
                     .to_string()
@@ -357,9 +382,29 @@ fn host_boot_change_does_not_replace_cached_session() {
         Scope::Chrome,
     )
     .unwrap();
-    let error = client::run(opts, json!({"action":"status"}), None, Scope::Chrome).unwrap_err();
-    assert_eq!(error.code, "RECOVERY_REQUIRED");
+    let error = client::run(
+        opts.clone(),
+        json!({"action":"click","connectionId":"old-connection","frameId":"old-frame","x":1,"y":1}),
+        None,
+        Scope::Chrome,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "SESSION_REBOUND");
+    let inconsistent =
+        client::run(opts, json!({"action":"status"}), None, Scope::Chrome).unwrap_err();
+    assert_eq!(inconsistent.code, "PROTOCOL_ERROR");
     t.join().unwrap();
+    let endpoint = std::fs::read_dir(root.join("state"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.join("session.json").is_file())
+        .expect("client endpoint state directory");
+    let cache: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(endpoint.join("session.json")).unwrap()).unwrap();
+    assert_eq!(cache["session"], "sid2");
+    assert_eq!(cache["bootId"], "boot2");
+    assert_eq!(cache["sequence"], 0);
+    assert_eq!(cache["autoImages"], json!([]));
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]

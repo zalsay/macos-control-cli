@@ -728,11 +728,11 @@ Host 默认自动接管：鼠标活动/普通失焦造成的软暂停，在同 o
 自动恢复保留原 lease、更新 epoch，仍经原窗口/焦点/几何/权限校验，控制条展示后等待原 3 秒倒计时；不重放旧动作。
 显式暂停/取消/关闭控制条、断线投递不确定或恢复锁保持停止，不能自动解除；本机非 Host 模式仍需本人点击继续。
 活动控制会话空闲 300 秒按传输硬暂停处理；已断开的非控制会话也会过期，新会话不解除原硬暂停或恢复锁。
-已断开会话过期可能返回 REMOTE_CLIENT_FAILED；确认无控制连接后，可保留旧缓存并显式选择新的私有 --remote-state-dir。
-Host 重启后旧客户端可能返回 RECOVERY_REQUIRED；不能靠清缓存/换 session/换 runtime 恢复输入。
+已断开会话过期或 Host 重启后，token 认证成功会绑定 Host 新签发的 session，并清零序号/旧帧登记；旧控制操作不自动发送，首次返回 SESSION_REBOUND 后需由操作者确认并重新执行。
+session 重绑定不会取得旧 owner/connection/frame；Host 的 recovery_required 仍须本人完成本地恢复，不能靠新 session/换 runtime 恢复输入。
 无可用控制条或 Host 留下恢复记录时，先停止 Host，再在远端核对原 daemon/helper 安全停止并执行：
   {program} host recover --state-dir /absolute/host-state
---state-dir 必须与原 Host 一致；仅在恢复成功后重启 Host，保留旧客户端缓存并显式使用新的私有 --remote-state-dir。
+--state-dir 必须与原 Host 一致；仅在恢复成功后重启 Host。保留旧客户端缓存即可在认证后重绑定，但 recovery_required 仍会阻断控制操作。
 断线/超时可能表示投递结果未知；sent:true/click_sent、effectVerified:false 不证明业务完成，须观察后置状态。
 
 详细说明：USAGE.md、docs/AGENT-INTEGRATION.md、docs/MODEL-CONFIG.md、docs/CHROME-PROFILES.md、docs/STABLE-INSTALL.md、docs/REMOTE-HOST.md。

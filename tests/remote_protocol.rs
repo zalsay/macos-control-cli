@@ -33,6 +33,24 @@ fn rejects_untrusted_input_before_dispatch() {
     let parsed = parse_envelope(&serde_json::to_vec(&good).unwrap()).unwrap();
     assert!(!format!("{parsed:?}").contains("secret"));
 }
+
+#[test]
+fn only_global_readonly_actions_run_on_first_request_after_rebind() {
+    for action in ["status", "apps", "windows", "permissions"] {
+        assert!(
+            remote_protocol::session_rebind_read_only(action),
+            "{action}"
+        );
+    }
+    for action in [
+        "session", "frame", "observe", "connect", "click", "type", "file-put",
+    ] {
+        assert!(
+            !remote_protocol::session_rebind_read_only(action),
+            "{action}"
+        );
+    }
+}
 #[test]
 fn schema_manifest_is_bounded_and_strict() {
     use remote_protocol::ImageManifest;

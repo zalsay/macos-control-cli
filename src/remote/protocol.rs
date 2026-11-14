@@ -9,6 +9,12 @@ pub const SUBPROTOCOL: &str = "mcc.remote.v1";
 pub const PATH: &str = "/mcc/v1";
 const MAX_ID: usize = 128;
 
+/// Actions safe to send on the first request after Host session rebinding.
+/// They do not take or use an existing control owner, connection, or frame.
+pub fn session_rebind_read_only(action: &str) -> bool {
+    matches!(action, "status" | "apps" | "windows" | "permissions")
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoteEnvelope {

@@ -367,6 +367,14 @@ impl ProcessGuard {
         }
         output
     }
+    fn client_session(&self, state: &str) -> PathBuf {
+        fs::read_dir(self.root.join(state))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.join("session.json").is_file())
+            .expect("client endpoint state directory")
+            .join("session.json")
+    }
     fn isolated(&self) {
         assert!(!self.root.join("client-runtime").exists());
         assert!(!self.root.join("client-config/models.toml").exists());
@@ -606,6 +614,9 @@ fn host_restart_does_not_resume_old_control_implicitly() {
         &["observe", "--connection", &id],
     ));
     let frame = frame["frameId"].as_str().unwrap().to_owned();
+    let client_cache = f.client_session("owner");
+    let cached_before_restart: Value =
+        serde_json::from_slice(&fs::read(&client_cache).unwrap()).unwrap();
     f.stop_host();
     f.start();
     let before = f.native();
@@ -630,6 +641,16 @@ fn host_restart_does_not_resume_old_control_implicitly() {
         "restart must require recovery: {}",
         json(&out)
     );
+    let old_client_error = json(&out);
+    assert_eq!(
+        old_client_error["error"]["code"], "RECOVERY_REQUIRED",
+        "{old_client_error}"
+    );
+    let rebound: Value = serde_json::from_slice(&fs::read(&client_cache).unwrap()).unwrap();
+    assert_ne!(rebound["session"], cached_before_restart["session"]);
+    assert_ne!(rebound["bootId"], cached_before_restart["bootId"]);
+    assert_eq!(rebound["sequence"], 0);
+    assert_eq!(rebound["autoImages"], serde_json::json!([]));
     assert!(
         !f.native()[before.len()..].contains("\"action\":\"click\""),
         "restart dispatched input"
@@ -643,6 +664,136 @@ fn host_restart_does_not_resume_old_control_implicitly() {
     assert!(!fresh.status.success());
     let recovery = json(&fresh);
     assert_eq!(recovery["error"]["code"], "RECOVERY_REQUIRED", "{recovery}");
+    let status = ok(&f.remote("recovery-observer", "tls/host-ca.pem", "token", &["status"]));
+    assert_eq!(status["remoteHostState"], "recovery_required", "{status}");
+    f.isolated();
+}
+
+#[test]
+fn stale_cached_session_rebinds_without_dispatching_old_control() {
+    let mut f = ProcessGuard::new();
+    f.init();
+    f.start();
+    let connection = ok(&f.remote(
+        "stale-client",
+        "tls/host-ca.pem",
+        "token",
+        &["connect", "--window", "42"],
+    ));
+    let connection_id = connection["connectionId"].as_str().unwrap();
+    let observed = ok(&f.remote(
+        "stale-client",
+        "tls/host-ca.pem",
+        "token",
+        &["observe", "--connection", connection_id],
+    ));
+    let frame_id = observed["frameId"].as_str().unwrap();
+
+    let cache = f.client_session("stale-client");
+    let mut cached: Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    let boot = cached["bootId"].as_str().unwrap().to_owned();
+    let old_session = cached["session"].as_str().unwrap().to_owned();
+    cached["session"] = serde_json::json!("expired-session");
+    fs::write(&cache, serde_json::to_vec(&cached).unwrap()).unwrap();
+
+    let before = f.native();
+    let rejected = f.remote(
+        "stale-client",
+        "tls/host-ca.pem",
+        "token",
+        &[
+            "click",
+            "--connection",
+            connection_id,
+            "--frame",
+            frame_id,
+            "--x",
+            "10",
+            "--y",
+            "10",
+        ],
+    );
+    let error = json(&rejected);
+    assert!(
+        !rejected.status.success(),
+        "stale session unexpectedly worked: {error}"
+    );
+    assert_eq!(
+        error["error"]["code"], "SESSION_REBOUND",
+        "{error}; cached boot={boot}"
+    );
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("未发送"));
+    assert_eq!(
+        native_action_count(&f, "click"),
+        native_action_count_text(&before, "click")
+    );
+    let rebound: Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    assert_ne!(rebound["session"], old_session);
+    assert_eq!(rebound["bootId"], boot);
+    assert_eq!(rebound["sequence"], 0);
+    assert_eq!(rebound["autoImages"], serde_json::json!([]));
+
+    let server_gate = raw_rebound_click(&f, "expired-session", &boot, connection_id, frame_id);
+    assert_eq!(
+        server_gate["error"]["code"], "SESSION_REBOUND",
+        "{server_gate}"
+    );
+    assert_eq!(
+        native_action_count(&f, "click"),
+        native_action_count_text(&before, "click")
+    );
+
+    let stale_control = f.remote(
+        "stale-client",
+        "tls/host-ca.pem",
+        "token",
+        &[
+            "click",
+            "--connection",
+            connection_id,
+            "--frame",
+            frame_id,
+            "--x",
+            "10",
+            "--y",
+            "10",
+        ],
+    );
+    let stale_control_error = json(&stale_control);
+    assert!(!stale_control.status.success());
+    assert_eq!(
+        stale_control_error["error"]["code"], "NOT_OWNER",
+        "{stale_control_error}"
+    );
+    assert_eq!(
+        native_action_count(&f, "click"),
+        native_action_count_text(&before, "click")
+    );
+    f.isolated();
+}
+
+#[test]
+fn expired_readonly_session_is_reissued_by_authenticated_host() {
+    let mut f = ProcessGuard::new();
+    f.init();
+    f.start();
+    ok(&f.remote("stale-reader", "tls/host-ca.pem", "token", &["status"]));
+    let cache = f.client_session("stale-reader");
+    let mut cached: Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    let old_session = cached["session"].as_str().unwrap().to_owned();
+    let boot = cached["bootId"].as_str().unwrap().to_owned();
+    cached["session"] = serde_json::json!("expired-readonly-session");
+    fs::write(&cache, serde_json::to_vec(&cached).unwrap()).unwrap();
+
+    let result = ok(&f.remote("stale-reader", "tls/host-ca.pem", "token", &["status"]));
+    assert_eq!(result["remoteHostState"], "ready");
+    let rebound: Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    assert_ne!(rebound["session"], old_session);
+    assert_eq!(rebound["bootId"], boot);
+    assert_eq!(rebound["sequence"], 1);
     f.isolated();
 }
 
@@ -737,7 +888,11 @@ fn fallback_signals_only_a_matching_captured_process_identity() {
 }
 
 fn native_action_count(f: &ProcessGuard, action: &str) -> usize {
-    f.native()
+    native_action_count_text(&f.native(), action)
+}
+
+fn native_action_count_text(trace: &str, action: &str) -> usize {
+    trace
         .lines()
         .filter(|line| {
             serde_json::from_str::<Value>(line)
@@ -1386,6 +1541,67 @@ fn ws_json(ws: &mut ReplaySocket) -> Value {
             other => panic!("expected WSS JSON, got {other:?}"),
         }
     }
+}
+fn raw_rebound_click(
+    f: &ProcessGuard,
+    stale_session: &str,
+    stale_boot: &str,
+    connection: &str,
+    frame: &str,
+) -> Value {
+    use copis_chrome::remote::{credentials, wire};
+    use tungstenite::Message;
+    let config = credentials::client_config(Some(&f.root.join("tls/host-ca.pem"))).unwrap();
+    let token = credentials::read_token(&f.root.join("token")).unwrap();
+    let mut ws = wire::connect_authenticated(
+        &format!("wss://127.0.0.1:{}/mcc/v1", f.port),
+        config,
+        &token,
+    )
+    .unwrap();
+    ws.get_mut()
+        .inner_mut()
+        .sock
+        .set_deadline(Instant::now() + LIMIT);
+    let hello = ws_json(&mut ws);
+    assert_eq!(hello["bootId"], stale_boot);
+    ws.send(Message::Text(
+        serde_json::json!({"type":"session","remoteProtocol":1,"scope":"desktop","session":stale_session,"bootId":stale_boot})
+            .to_string()
+            .into(),
+    ))
+    .unwrap();
+    let session = ws_json(&mut ws);
+    assert_eq!(session["type"], "session");
+    assert_ne!(session["session"], stale_session);
+    let id = "rebound-control";
+    ws.send(Message::Text(
+        serde_json::json!({
+            "remoteProtocol":1,
+            "id":id,
+            "session":session["session"],
+            "sequence":1,
+            "scope":"desktop",
+            "request":{"action":"click","connectionId":connection,"frameId":frame,"x":10,"y":10}
+        })
+        .to_string()
+        .into(),
+    ))
+    .unwrap();
+    let result = ws_json(&mut ws);
+    assert_eq!(result["type"], "result");
+    assert_eq!(result["id"], id);
+    assert_eq!(result["sequence"], 1);
+    let response = result["response"].clone();
+    ws.send(Message::Text(
+        serde_json::json!({"type":"ack","id":id,"sequence":1})
+            .to_string()
+            .into(),
+    ))
+    .unwrap();
+    assert_eq!(ws_json(&mut ws)["type"], "acked");
+    ws.close(None).unwrap();
+    response
 }
 fn replay_rpc(
     f: &ProcessGuard,

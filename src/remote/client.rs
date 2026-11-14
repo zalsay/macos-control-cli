@@ -244,12 +244,6 @@ fn run_inner(
         scope,
     )?;
     protocol::require_capability(&request, &hello.capabilities)?;
-    if state.as_ref().is_some_and(|s| s.boot_id != hello.boot_id) {
-        return Err(Error::new(
-            "RECOVERY_REQUIRED",
-            "Host 已重启；旧会话未自动替换",
-        ));
-    }
     let session_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     set_deadline(&mut socket, session_deadline);
     send(
@@ -270,12 +264,25 @@ fn run_inner(
             } => (session, boot_id, state),
             _ => return Err(invalid()),
         };
-    if boot != hello.boot_id
-        || state
-            .as_ref()
-            .is_some_and(|s| s.session != session || s.boot_id != boot)
-    {
-        return Err(Error::new("RECOVERY_REQUIRED", "Host 会话身份不匹配"));
+    if boot != hello.boot_id {
+        return Err(Error::new(
+            "PROTOCOL_ERROR",
+            "Host session bootId 与同一连接的 Hello 不一致",
+        ));
+    }
+    let rebound = state
+        .as_ref()
+        .is_some_and(|s| s.session != session || s.boot_id != boot);
+    let rebound_control = rebound && !protocol::session_rebind_read_only(&action);
+    if rebound {
+        state = Some(CachedSession {
+            session: session.clone(),
+            boot_id: boot.clone(),
+            sequence: 0,
+            auto_images: Vec::new(),
+        });
+        let renewed = state.as_ref().ok_or_else(invalid)?;
+        save_state(&store, renewed)?;
     }
     if status != "ready"
         && !matches!(
@@ -286,6 +293,12 @@ fn run_inner(
         return Err(Error::new(
             "RECOVERY_REQUIRED",
             "Host 会话已暂停或需要本地恢复",
+        ));
+    }
+    if rebound_control {
+        return Err(Error::new(
+            "SESSION_REBOUND",
+            "Host 已签发新会话；当前控制操作未发送，请确认后重新执行",
         ));
     }
     let s = state.get_or_insert(CachedSession {

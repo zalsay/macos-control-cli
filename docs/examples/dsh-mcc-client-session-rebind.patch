@@ -1,0 +1,137 @@
+--- a/lib/mcc-client.js
++++ b/lib/mcc-client.js
+@@ -14 +14 @@
+- * 语义要点：序列号单调递增且每次请求 +1；session/boot 跨调用缓存；bootId 变化必须报 RECOVERY_REQUIRED。
++ * 语义要点：认证后自动重绑定失效 session/旧 boot；新 session 序号从 1 开始，已发送的 RPC 不自动重放。
+@@ -25,0 +26 @@
++const ATTACH_ACTIONS = new Set(['connect', 'chrome-start', 'firefox-start']);
+@@ -53 +54 @@
+-      this.closed = new MccError('WS_CLOSED', `连接已关闭 (${code}${reason?.length ? ' ' + reason.toString() : ''})`);
++      this.closed = new MccError('WS_CLOSED', `连接已关闭 (${code}${reason?.length ? ' ' + reason.toString() : ''})`, { closeCode: code });
+@@ -156,0 +158,10 @@
++function hasConnectionBinding(value, seen = new WeakSet()) {
++  if (!value || typeof value !== 'object' || seen.has(value)) return false;
++  seen.add(value);
++  for (const [key, child] of Object.entries(value)) {
++    if ((key === 'connectionId' || key === 'frameId') && typeof child === 'string' && child.length > 0) return true;
++    if (hasConnectionBinding(child, seen)) return true;
++  }
++  return false;
++}
++
+@@ -174 +185 @@
+-async function openSocket(url, ca, token, servername) {
++async function openSocket(url, ca, token, servername, WebSocketImpl = WebSocket) {
+@@ -186 +197 @@
+-  const ws = new WebSocket(url.toString(), [SUBPROTOCOL], options);
++  const ws = new WebSocketImpl(url.toString(), [SUBPROTOCOL], options);
+@@ -212 +223,2 @@
+-  async load() {
++  async load({ refresh = false } = {}) {
++    if (refresh) this.data = null;
+@@ -240 +252 @@
+-  constructor(config) {
++  constructor(config, { WebSocketImpl = WebSocket } = {}) {
+@@ -244,0 +257 @@
++    this.WebSocketImpl = WebSocketImpl;
+@@ -257 +270 @@
+-    const conn = await openSocket(this.url, ca, token, this.config.servername);
++    let conn = await openSocket(this.url, ca, token, this.config.servername, this.WebSocketImpl);
+@@ -261,10 +274,36 @@
+-      const hello = await conn.text(Date.now() + 5000, 'Hello');
+-      if (hello?.remoteProtocol !== REMOTE_PROTOCOL) {
+-        throw new MccError('PROTOCOL_ERROR', `Host 协议版本不符：${hello?.remoteProtocol}`);
+-      }
+-      if (hello.scope !== this.scope) {
+-        throw new MccError('SCOPE_MISMATCH', `Host scope 是 ${hello.scope}，客户端为 ${this.scope}`);
+-      }
+-      const cached = await this.cache.load();
+-      if (cached && cached.bootId !== hello.bootId) {
+-        throw new MccError('RECOVERY_REQUIRED', 'Host 已重启（bootId 变化）；需要本地 mcc host recover 后重新配对');
++      const readHello = async (connection) => {
++        const value = await connection.text(Date.now() + 5000, 'Hello');
++        if (value?.remoteProtocol !== REMOTE_PROTOCOL) {
++          throw new MccError('PROTOCOL_ERROR', `Host 协议版本不符：${value?.remoteProtocol}`);
++        }
++        if (value.scope !== this.scope) {
++          throw new MccError('SCOPE_MISMATCH', `Host scope 是 ${value.scope}，客户端为 ${this.scope}`);
++        }
++        return value;
++      };
++      const sendSession = async (connection, cached) => {
++        await connection.send({
++          type: 'session',
++          remoteProtocol: REMOTE_PROTOCOL,
++          scope: this.scope,
++          session: cached?.session ?? null,
++          bootId: cached?.bootId ?? null,
++        });
++        return connection.text(Date.now() + 5000, 'session');
++      };
++      let hello = await readHello(conn);
++      const cached = await this.cache.load({ refresh: true });
++      let sessionReply;
++      let resumedCache = cached;
++      try {
++        sessionReply = await sendSession(conn, cached);
++      } catch (err) {
++        // Legacy 0.3.6 closes an unknown cached session during negotiation. Retry
++        // only this pre-RPC handshake once, with an empty session; never infer
++        // that an RPC was safe to replay from a generic 1006 close.
++        if (!cached || err?.code !== 'WS_CLOSED' || err.closeCode !== 1006) throw err;
++        await conn.close();
++        conn = await openSocket(this.url, ca, token, this.config.servername, this.WebSocketImpl);
++        hello = await readHello(conn);
++        sessionReply = await sendSession(conn, null);
++        resumedCache = null;
+@@ -272,8 +310,0 @@
+-      await conn.send({
+-        type: 'session',
+-        remoteProtocol: REMOTE_PROTOCOL,
+-        scope: this.scope,
+-        session: cached?.session ?? null,
+-        bootId: cached?.bootId ?? null,
+-      });
+-      const sessionReply = await conn.text(Date.now() + 5000, 'session');
+@@ -285,0 +317,19 @@
++      const continuingSession = Boolean(
++        resumedCache
++        && resumedCache.session === sessionReply.session
++        && resumedCache.bootId === hello.bootId,
++      );
++      const requiresAttach = Boolean(
++        (cached && !continuingSession)
++        || (continuingSession && resumedCache.requiresAttach),
++      );
++      if (!continuingSession) {
++        // Persist the issued identity even if the request must be reattached, so
++        // the next call does not continue presenting an obsolete session.
++        await this.cache.save({
++          session: sessionReply.session,
++          bootId: hello.bootId,
++          sequence: 0,
++          ...(requiresAttach ? { requiresAttach: true } : {}),
++        });
++      }
+@@ -290 +340,7 @@
+-      sequence = (cached?.sequence ?? 0) + 1;
++      if (cached && !continuingSession && !READ_ONLY.has(action)) {
++        throw new MccError('SESSION_REBOUND', 'Host 已签发新 session；本次命令未发送，请重新 attach/connect 后用新的连接凭据发起新命令');
++      }
++      if (requiresAttach && hasConnectionBinding(request)) {
++        throw new MccError('SESSION_REBOUND', 'Host 已签发新 session；旧 connectionId/frameId 不再有效，本次命令未发送，请重新 attach/connect 后再操作');
++      }
++      sequence = continuingSession ? resumedCache.sequence + 1 : 1;
+@@ -292 +348,7 @@
+-      await this.cache.save({ session: sessionReply.session, bootId: hello.bootId, sequence });
++      const savedSession = {
++        session: sessionReply.session,
++        bootId: hello.bootId,
++        sequence,
++        ...(requiresAttach ? { requiresAttach: true } : {}),
++      };
++      await this.cache.save(savedSession);
+@@ -395,0 +458,3 @@
++      if (ATTACH_ACTIONS.has(action) && typeof response.connectionId === 'string') {
++        await this.cache.save({ ...savedSession, requiresAttach: false });
++      }
