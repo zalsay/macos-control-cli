@@ -293,7 +293,7 @@ import AppKit
         guard case .success(let result) = reply.outcome else { return true }
         switch (action, result) {
         case (.getState, .stateRead(let state)): return state.target == target
-        case (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished), (.screenshot, .snapshotWritten),
+        case (.navigate, .navigationSubmitted), (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished), (.screenshot, .snapshotWritten),
              (.move, .nativeDelivered), (.mouseDown, .nativeDelivered), (.mouseUp, .nativeDelivered),
              (.click, .nativeDelivered), (.scroll, .nativeDelivered), (.insertText, .nativeDelivered),
              (.key, .nativeDelivered): return true
@@ -314,6 +314,9 @@ import AppKit
             }
             return entry.releaseReply ?? failure(request, .sessionBusy)
         }
+        // A failed channel cannot perform the release handshake again. Waiting
+        // for automatic close to finish does not make this session reusable.
+        if entry.phase == .closing || entry.phase == .closed { return failure(request, .sessionExpired) }
         pruneRetainedRunners()
         guard retainedRunners.count + opens.values.filter({ $0.releaseWorkerRunning }).count < AutomationLimits.replayEntries else { return failure(request, .replayWindowFull) }
         guard entry.phase == .active, entry.cancellers.isEmpty, let token = entry.token,

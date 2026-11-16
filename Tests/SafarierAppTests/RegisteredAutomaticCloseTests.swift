@@ -206,8 +206,7 @@ final class RegisteredAutomaticCloseTests: XCTestCase {
                 broker.acknowledgement(pending, received: true)
             } else { XCTAssertNil(closeAck) }
             let (after, _) = try await send(.daemonStop)
-            if scenario == "confirmed" { XCTAssertEqual(after.status, "ok") }
-            else { XCTAssertEqual(after.error, "SESSION_BUSY", scenario) }
+            XCTAssertEqual(after.status, "ok", scenario)
         }
     }
     #endif

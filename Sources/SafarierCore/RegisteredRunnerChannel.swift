@@ -125,8 +125,11 @@ public actor RegisteredRunnerChannel {
         }
     }
     public func openGeneration() async throws -> (epoch: UUID, channel: AutomationChannel) {
+        // A failed drain permanently closes the root while retaining its epoch.
+        // Report that terminal state before considering an in-progress generation.
+        guard !closed else { throw AutomationError(code: .backendUnavailable) }
         guard pendingEpoch == nil else { throw AutomationError(code: .sessionBusy) }
-        enum Stage: String { case deadline, initialCheck, pair, frame, send, descriptor, childClose, ack, afterAckCheck }
+        enum Stage: String { case deadline, initialCheck, pair, frame, send, descriptor, ack, childClose, afterAckCheck }
         var stage = Stage.deadline
         do {
             let d = try RegistrationFrame.deadline()
@@ -143,11 +146,13 @@ public actor RegisteredRunnerChannel {
                 try await d.run(channel: channel) { try await self.channel.send(frame) }
                 stage = .descriptor
                 try await channel.sendRegisteredDescriptor(pair.child, timeout: try RegistrationFrame.descriptorTimeout(d))
-                stage = .childClose
-                try pair.child.close()
                 stage = .ack
                 guard let ack = try await d.run(channel: channel, operation: { try await self.reader.receive() }),
                       try RegistrationFrame.read(ack, kind: "accepted") == epoch else { throw AutomationError(code: .invalidRequest) }
+                // Keep the original endpoint alive until the Runner has adopted
+                // the transferred descriptor, not merely until sendmsg returns.
+                stage = .childClose
+                try pair.child.close()
                 stage = .afterAckCheck
                 try check(d)
                 return (epoch, pair.parent)

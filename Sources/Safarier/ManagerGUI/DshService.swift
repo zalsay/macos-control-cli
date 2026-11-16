@@ -4,7 +4,7 @@ import Combine
 import WebKit
 
 /// DeepSeek Harness (dsh) 本地服务生命周期管控层。
-/// 负责检测 dsh CLI、启动后台 Web UI 服务（动态端口）、解析认证 URL 并管理进程生命周期。
+/// 负责检测 dsh CLI、启动后台 Web UI 服务（固定端口 61919）、解析认证 URL 并管理进程生命周期。
 @MainActor
 final class DshService: ObservableObject {
     static let shared = DshService()
@@ -127,7 +127,7 @@ final class DshService: ObservableObject {
         #endif
     }
 
-    /// 启动 dsh web 服务（使用动态端口 --port 0）
+    /// 启动 dsh web 服务；固定端口保持 Web UI 的 localStorage origin。
     func start() {
         #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
         if failedLeases.isEmpty { mountUncertain = false }
@@ -148,7 +148,7 @@ final class DshService: ObservableObject {
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executable)
-        proc.arguments = ["web", "--no-open", "--port", "0"]
+        proc.arguments = ["web", "--no-open", "--port", "61919"]
 
         var env = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -319,7 +319,7 @@ final class DshService: ObservableObject {
     private func launchControlled(_ lease: any DshControlledRuntime.Lease, token: Int) {
         let proc = Process()
         proc.executableURL = lease.nodeURL
-        proc.arguments = [lease.entryURL.path, "web", "--no-open", "--port", "0"]
+        proc.arguments = [lease.entryURL.path, "web", "--no-open", "--port", "61919"]
         binaryPath = lease.nodeURL.path
         var env = controlledEnvironment()
         for key in Array(env.keys) where key == "NODE_OPTIONS" || key == "NODE_PATH" || key == "NODE_BINARY" || key.hasPrefix("DYLD_") || ["all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"].contains(key) { env.removeValue(forKey: key) }

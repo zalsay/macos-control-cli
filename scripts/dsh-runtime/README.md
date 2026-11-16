@@ -47,6 +47,8 @@ A read-only mount prevents writes through that mount, but does not by itself pro
 python3 scripts/dsh-runtime/unified-release.py
 ```
 
+当前默认材料为 `dist/releases/2026-11-16-dsh-rc2/runtime-artifact`，对应官方 `@deepseek-ai/dsh@0.2.2-rc.2` 和 Node 24.19.0；`scripts/build-dsh.sh` 同样固定安装 rc.2。材料需按上述流程准备和审核，源码中的 Swift/Python 固定锚须与材料一致。此前 rc.1 材料和已安装版本保留供回退。
+
 进度条显示已完成的七个阶段和当前步骤，不代表耗时或文件处理百分比；终端中的长步骤会定期显示运行状态，重定向输出时保留简洁阶段记录。失败时显示出错步骤，不标记完成。
 
 入口使用现有 release testing 构建及 `package-release.py`，复核受审 runtime 与 Swift 固定锚后生成配套目录，再更新 `dist/releases/Safarier AI.app`、`candidate-sha256.json` 和 `release-current.json`。新候选的 GUI 和 CLI 均待验收；候选自身的 pins 和 evidence 是一致性收据，不是独立信任锚。runtime 变化必须重新审核并更新相应源码锚；可用 `--artifact /绝对路径` 指定已审核材料，不能以其自带的 review.json 代替审核。

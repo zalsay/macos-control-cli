@@ -24,8 +24,8 @@ class InstallTests(unittest.TestCase):
     def tearDown(self): self.tmp.cleanup()
     def test_reviewed_candidate_anchor_is_fixed(self):
         self.assertEqual(install.required_anchor(), install.RuntimeAnchor(
-            '34e57a58a7674ebe656b249ab9f3bd2ca0cef45bdb9eacbec88592a8a0ec57de',
-            '8a4c22bb334a3c307f8494cda029b80cd6a49545789e5e6087b878eef464baeb',
+            'b4f513bfec24a40c0f4d5cdb8181017f790ce7857a871e9a3ed5cd8165586c5a',
+            '53fad47a4ffc8cd0a8e9989ae619d1cfbe34618f7c9d921f52086ae4c5e01a9a',
             '24.19.0'))
     def test_reviewed_anchor_rejects_different_artifact_before_publish(self):
         with self.assertRaisesRegex(ValueError, 'SHA-256 mismatch'):

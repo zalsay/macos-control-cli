@@ -42,6 +42,100 @@ final class RegistrationDescriptorTransferTests: XCTestCase {
         XCTAssertEqual(try local.read(upToCount: 1), Data([0x42]))
     }
 
+    func testAcknowledgedGenerationSurvivesSenderCloseAndDelayedHelloRead() async throws {
+        let root = try AutomationChannel.makePair()
+        let peer = try AutomationChannel(adopting: root.child)
+        let reader = try peer.claimExclusiveReader()
+        defer { root.parent.close(); peer.close() }
+        for _ in 0..<1000 {
+            let generation = try AutomationChannel.makePair()
+            generation.parent.labelRegistration(.generationManager)
+            defer { generation.parent.close() }
+            try await root.parent.sendRegisteredDescriptor(generation.child, timeout: 1)
+            let received = try await reader.receiveRegisteredDescriptor(timeout: 1)
+            let runner = try AutomationChannel(adopting: received)
+            runner.labelRegistration(.generationRunner)
+            defer { runner.close() }
+            let runnerReader = try runner.claimExclusiveReader()
+            let epoch = UUID()
+            try await peer.send(RegistrationFrame.make("accepted", epoch))
+            let ack = try await AutomationChannelDeadline.run(channel: root.parent, seconds: 1) {
+                try await root.parent.receive()
+            }
+            XCTAssertEqual(try RegistrationFrame.read(XCTUnwrap(ack), kind: "accepted"), epoch)
+            try generation.child.close()
+            let hello = try AutomationHandshakeCodec.makeChallenge(profileID: UUID(), nonce: AutomationSessionToken.generate())
+            try await generation.parent.send(hello)
+            // Installation opens/closes many unrelated descriptors before hello.
+            for _ in 0..<128 {
+                let fd = open("/dev/null", O_RDONLY | O_CLOEXEC)
+                XCTAssertGreaterThanOrEqual(fd, 0)
+                if fd >= 0 { Darwin.close(fd) }
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+            let observed = try await AutomationChannelDeadline.run(channel: runner, seconds: 1) {
+                try await runnerReader.receive()
+            }
+            XCTAssertEqual(observed, hello)
+            try await runner.send(Data([0x52]))
+            let reply = try await AutomationChannelDeadline.run(channel: generation.parent, seconds: 1) {
+                try await generation.parent.receive()
+            }
+            XCTAssertEqual(reply, Data([0x52]))
+        }
+    }
+
+    func testAcknowledgedGenerationTransferToAnotherProcessSurvivesSenderClose() async throws {
+        let root = try AutomationChannel.makePair()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", """
+        import socket, array, struct, os, fcntl
+        root = socket.socket(fileno=0)
+        marker, ancillary, flags, address = root.recvmsg(1, socket.CMSG_SPACE(4))
+        assert marker == b'G' and len(ancillary) == 1
+        descriptors = array.array('i'); descriptors.frombytes(ancillary[0][2])
+        assert len(descriptors) == 1
+        adopted = fcntl.fcntl(descriptors[0], fcntl.F_DUPFD_CLOEXEC, 0)
+        os.close(descriptors[0])
+        generation = socket.socket(fileno=adopted); generation.settimeout(2)
+        root.sendall(struct.pack('!I', 1) + b'A')
+        def exact(n):
+            data = b''
+            while len(data) < n:
+                chunk = generation.recv(n-len(data))
+                assert chunk, 'unexpected generation EOF'
+                data += chunk
+            return data
+        size = struct.unpack('!I', exact(4))[0]
+        assert size == 1 and exact(size) == b'H'
+        generation.sendall(struct.pack('!I', 1) + b'R')
+        """]
+        process.standardInput = root.child
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.standardError
+        try process.run()
+        try root.child.close()
+        defer { root.parent.close(); if process.isRunning { process.terminate() } }
+        let generation = try AutomationChannel.makePair()
+        defer { generation.parent.close() }
+        try await root.parent.sendRegisteredDescriptor(generation.child, timeout: 1)
+        let adopted = try await AutomationChannelDeadline.run(channel: root.parent, seconds: 2) {
+            try await root.parent.receive()
+        }
+        XCTAssertEqual(adopted, Data([0x41]))
+        try generation.child.close()
+        // The real failure occurs when Runner reads before Manager sends hello.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        try await generation.parent.send(Data([0x48]))
+        let reply = try await AutomationChannelDeadline.run(channel: generation.parent, seconds: 2) {
+            try await generation.parent.receive()
+        }
+        XCTAssertEqual(reply, Data([0x52]))
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+    }
+
     func testFreshFrameDeadlineAllowsDescriptorSend() async throws {
         let root = try AutomationChannel.makePair()
         let peer = try AutomationChannel(adopting: root.child)

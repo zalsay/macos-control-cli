@@ -287,7 +287,8 @@ def build_inputs(attempt, variant, configuration):
         '--scratch-path', attempt / 'scratch', '--cache-path', attempt / 'cache',
         '--config-path', attempt / 'config', '--security-path', attempt / 'security',
         '--disable-dependency-cache', '--manifest-cache', 'local',
-        '-Xswiftc', '-D', '-Xswiftc', 'SAFARIER_BOUND_LOCAL_CANDIDATE']
+        '-Xswiftc', '-D', '-Xswiftc', 'SAFARIER_BOUND_LOCAL_CANDIDATE',
+        '-Xcc', '-DSAFARIER_BOUND_LOCAL_CANDIDATE']
     if variant == 'testing':
         command += ['-Xswiftc', '-D', '-Xswiftc', 'SAFARIER_INTERNAL_TEST_APP']
     if variant == 'observer':

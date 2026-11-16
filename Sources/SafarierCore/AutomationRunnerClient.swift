@@ -690,7 +690,7 @@ public actor AutomationRunnerClient {
         case (.capabilities, .capabilities(let c)): return c.role == "runner"
         case (.openSession, .sessionOpened(_, let target, _)): return matches(target)
         case (.getState, .stateRead(let state)): return matches(state.target)
-        case (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished), (.screenshot, .snapshotWritten): return true
+        case (.navigate, .navigationSubmitted), (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished), (.screenshot, .snapshotWritten): return true
         case (.move, .nativeDelivered), (.mouseDown, .nativeDelivered), (.mouseUp, .nativeDelivered), (.click, .nativeDelivered), (.scroll, .nativeDelivered), (.insertText, .nativeDelivered), (.key, .nativeDelivered): return true
         case (.cancel, .sessionClosed), (.closeSession, .sessionClosed): return true
         case (.releaseControl, .controlReleasePrepared(let value)): return matches(value.target)

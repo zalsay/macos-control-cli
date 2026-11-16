@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 DSH_DIR="$ROOT/.build/dsh"
-TARGET_VERSION="0.2.2-rc.1"
+TARGET_VERSION="0.2.2-rc.2"
 
 echo "==> 检查 Safarier 内部 dsh 环境: $DSH_DIR"
 mkdir -p "$DSH_DIR" "$DSH_DIR/bin"

@@ -348,7 +348,7 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
             return releasePreparation?.transferID == transferID && value.transferID == transferID && value.target == target && value.inputReleased && value.artifactsCleaned && value.browserRetained && value.manualInteractionEnabled
         case let (.getState, .stateRead(value)): return value.target == target && value.viewVersion == viewport?.viewVersion && value.sessionState == state
         case let (.screenshot, .snapshotWritten(_, value)): return value == viewport
-        case let (.navigate, .navigationFinished(v)), let (.navigateByInput, .navigationFinished(v)): return v == viewport?.viewVersion
+        case let (.navigate, .navigationSubmitted(v)), let (.navigate, .navigationFinished(v)), let (.navigateByInput, .navigationFinished(v)): return v == viewport?.viewVersion
         case let (.mouseDown, .nativeDelivered(_, buttons, v)): return buttons == 1 && v == viewport?.viewVersion
         case let (.mouseUp, .nativeDelivered(_, buttons, v)): return buttons == 0 && v == viewport?.viewVersion
         case let (.move, .nativeDelivered(_, buttons, v)), let (.scroll, .nativeDelivered(_, buttons, v)), let (.insertText, .nativeDelivered(_, buttons, v)), let (.key, .nativeDelivered(_, buttons, v)):

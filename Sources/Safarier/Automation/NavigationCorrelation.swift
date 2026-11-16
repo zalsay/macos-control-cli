@@ -30,6 +30,17 @@ struct NavigationCorrelation {
         self.epoch == epoch && current === navigation
     }
 
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE && SAFARIER_INTERNAL_TEST_APP
+    /// History API callbacks can carry a distinct WKNavigation. They update the
+    /// committed document's URL without replacing or completing its full load.
+    func acceptsLoadSameDocument(_ navigation: AnyObject, epoch: UInt64, type: Int,
+                                 response: URL?, request: URL?, current: URL?) -> Bool {
+        guard matches(navigation, epoch: epoch), committed, pending == nil,
+              [1, 2].contains(type), let response, let request, request == current else { return false }
+        return InternalNavigationPolicy.sameOrigin(response, request)
+    }
+    #endif
+
     mutating func noteFinished(_ navigation: AnyObject, epoch: UInt64) -> Bool {
         guard matches(navigation, epoch: epoch), pending == nil else { return false }
         finished = true

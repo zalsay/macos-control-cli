@@ -112,6 +112,7 @@ public enum AutomationResult: Equatable, Sendable, CustomStringConvertible, Cust
     case sessionOpened(sessionID: String, target: AutomationTargetIdentity, viewport: AutomationViewport)
     case interactiveLaunched(profileID: UUID)
     case nativeDelivered(sequence: UInt64, buttons: Int, viewVersion: UInt64)
+    case navigationSubmitted(viewVersion: UInt64)
     case navigationFinished(viewVersion: UInt64)
     case snapshotWritten(path: String, viewport: AutomationViewport)
     case capabilities(AutomationCapabilities), stateRead(AutomationState), sessionClosed(CleanupReceipt)
@@ -358,6 +359,8 @@ public enum AutomationCodec {
             try AutomationJSONBoundary.exact(result, ["sequence","buttons","viewVersion"])
             struct Native: Decodable { let sequence: UInt64; let buttons: Int; let viewVersion: UInt64 }
             let n = try typed(Native.self,result); try validateButtons(n.buttons); value = .nativeDelivered(sequence: n.sequence, buttons: n.buttons, viewVersion: n.viewVersion)
+        case "navigationSubmitted":
+            try AutomationJSONBoundary.exact(result, ["viewVersion"]); struct Navigation: Decodable { let viewVersion: UInt64 }; value = .navigationSubmitted(viewVersion: try typed(Navigation.self,result).viewVersion)
         case "navigationFinished":
             try AutomationJSONBoundary.exact(result, ["viewVersion"]); struct Navigation: Decodable { let viewVersion: UInt64 }; value = .navigationFinished(viewVersion: try typed(Navigation.self,result).viewVersion)
         case "snapshotWritten":
@@ -403,6 +406,7 @@ public enum AutomationCodec {
             case .interactiveLaunched(let id): root["effect"] = "interactiveLaunched"; root["result"] = ["profileID": id.uuidString]
             case let .sessionOpened(sessionID, target, viewport): guard AutomationSessionToken.isCanonical(sessionID) else { throw AutomationError(code: .invalidRequest) }; try validateViewport(viewport, screenshot: false); root["effect"] = "sessionOpened"; root["result"] = ["sessionID":sessionID,"target":try object(target),"viewport":try object(viewport)]
             case let .nativeDelivered(sequence, buttons, viewVersion): try validateButtons(buttons); root["effect"] = "nativeDelivered"; root["result"] = ["sequence":sequence,"buttons":buttons,"viewVersion":viewVersion]
+            case .navigationSubmitted(let v): root["effect"] = "navigationSubmitted"; root["result"] = ["viewVersion":v]
             case .navigationFinished(let v): root["effect"] = "navigationFinished"; root["result"] = ["viewVersion":v]
             case let .snapshotWritten(path, viewport):
                 try validateViewport(viewport, screenshot: true)

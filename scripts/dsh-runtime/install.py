@@ -28,8 +28,8 @@ class RuntimeAnchor:
 # Reviewed for this one candidate only. Any runtime upgrade requires independent
 # review and a source change; review.json, argv and environment are never anchors.
 REVIEWED_ANCHOR = RuntimeAnchor(
-    manifest_sha256='34e57a58a7674ebe656b249ab9f3bd2ca0cef45bdb9eacbec88592a8a0ec57de',
-    image_sha256='8a4c22bb334a3c307f8494cda029b80cd6a49545789e5e6087b878eef464baeb',
+    manifest_sha256='b4f513bfec24a40c0f4d5cdb8181017f790ce7857a871e9a3ed5cd8165586c5a',
+    image_sha256='53fad47a4ffc8cd0a8e9989ae619d1cfbe34618f7c9d921f52086ae4c5e01a9a',
     node_version='24.19.0',
 )
 

@@ -181,17 +181,45 @@ static BBError validate_plist(const BBInventory *v,const char *bid,const char *l
  bool good=kind&&id&&exe&&CFGetTypeID(kind)==CFStringGetTypeID()&&CFGetTypeID(id)==CFStringGetTypeID()&&CFGetTypeID(exe)==CFStringGetTypeID()&&CFEqual(kind,CFSTR("APPL"))&&CFEqual(id,expectedID)&&CFEqual(exe,expectedExe);CFRelease(expectedID);CFRelease(expectedExe);e=good?BB_OK:BB_INVALID;
  done:if(plist)CFRelease(plist);if(data)CFRelease(data);free(bytes);close(fd);close(contents);return timely(d)?e:BB_EXPIRED;
 }
+#if SAFARIER_BOUND_LOCAL_CANDIDATE
+static uint64_t trace_now_ns(void) {
+ struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))return 0;
+ return (uint64_t)t.tv_sec*1000000000ULL+(uint64_t)t.tv_nsec;
+}
+static void trace_revalidation(const char *stage,uint64_t start,uint64_t deadline,BBError result) {
+ uint64_t now=trace_now_ns();
+ fprintf(stderr,"BUNDLE_CHECK_DIAG stage=%s elapsed_us=%llu remaining_us=%llu result=%d\n",stage,
+  (unsigned long long)(now>=start?(now-start)/1000:0),
+  (unsigned long long)(deadline>now?(deadline-now)/1000:0),(int)result);
+}
+#endif
 BBError bb_revalidate(BBInventory *pin,const char *bid,const char *leaf,uint64_t d){
  if(!pin)return BB_INVALID;char safe_bid[NAME_MAX+1],safe_leaf[NAME_MAX+1];if(!copy_component(safe_bid,bid)||!copy_component(safe_leaf,leaf))return BB_INVALID;bid=safe_bid;leaf=safe_leaf;BBInventory *first=NULL,*last=NULL;BBCodeIdentity code={0};BIImagePin mainpin={0};
+ #if SAFARIER_BOUND_LOCAL_CANDIDATE
+ const char *stage="inventoryBefore";uint64_t stage_start=trace_now_ns();
+ #define NEXT_STAGE(label) do { trace_revalidation(stage,stage_start,d,BB_OK);stage=(label);stage_start=trace_now_ns(); } while(0)
+ #else
+ #define NEXT_STAGE(label) do {} while(0)
+ #endif
  BBError e=bb_inventory(pin->path,d,&first);if(e!=BB_OK)goto done;if(!equal_inventory(pin,first)){e=BB_CHANGED;goto done;}
+ NEXT_STAGE("plist");
  e=validate_plist(first,bid,leaf,d);if(e!=BB_OK)goto done;
  char mainrel[PATH_MAX],mainpath[PATH_MAX];if(snprintf(mainrel,sizeof mainrel,"Contents/MacOS/%s",leaf)>=(int)sizeof mainrel||snprintf(mainpath,sizeof mainpath,"%s/%s",pin->path,mainrel)>=(int)sizeof mainpath){e=BB_INVALID;goto done;}
  const Record *main=find_record(first,mainrel);if(!main||main->dir){e=BB_INVALID;goto done;}
+ NEXT_STAGE("signature");
  e=bb_validate_signature(pin->path,bid,d,&code);if(e!=BB_OK)goto done;
+ NEXT_STAGE("mainPin");
  e=from_bi(bi_static_pin(mainpath,d,&mainpin));if(e!=BB_OK)goto done;
  if(!same_file(&mainpin.file,&main->file)||code.code_hash_len!=mainpin.code_hash_len||memcmp(code.code_hash,mainpin.code_hash,code.code_hash_len)){e=BB_INVALID;goto done;}
+ NEXT_STAGE("inventoryAfter");
  e=bb_inventory(pin->path,d,&last);if(e==BB_OK&&!equal_inventory(pin,last))e=BB_CHANGED;
- done:bb_free(first);bb_free(last);return timely(d)?e:BB_EXPIRED;
+ done:bb_free(first);bb_free(last);
+ BBError result=timely(d)?e:BB_EXPIRED;
+ #if SAFARIER_BOUND_LOCAL_CANDIDATE
+ trace_revalidation(stage,stage_start,d,result);
+ #endif
+ #undef NEXT_STAGE
+ return timely(d)?result:BB_EXPIRED;
 }
 
 BBError bb_expect_exact(const BBInventory *v,const BBExpected *expected,size_t count){

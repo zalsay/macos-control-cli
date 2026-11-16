@@ -210,7 +210,7 @@ def verify_swift_anchor(artifact):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--artifact', type=Path, default=ROOT / 'dist/releases/2026-11-10-unified-dsh-202325/runtime-artifact')
+    parser.add_argument('--artifact', type=Path, default=ROOT / 'dist/releases/2026-11-16-dsh-rc2/runtime-artifact')
     args = parser.parse_args()
     artifact = args.artifact.absolute()
     destination = ROOT / 'dist/releases'

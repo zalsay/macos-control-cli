@@ -17,6 +17,7 @@ struct ControlBrokerReply: Codable {
     var selection: SemanticDecision?
     var timingMs: UInt64?
     var effectVerified: Bool?
+    var navigationSubmitted: Bool?
     var state: AutomationState?
     var capabilities: AutomationCapabilities?
     var sequence: UInt64?
@@ -60,7 +61,9 @@ final class ControlBroker {
         let token: String, target: AutomationTargetIdentity
         var viewport: AutomationViewport
         var frameID: UUID?
-        var active = false, awaitingAck = false, uncertain = false
+        var active = false, awaitingAck = false
+        // Historical diagnostic only; each explicit request is admitted afresh.
+        var uncertain = false
         var semanticCancellation: ControlCancellation?
         init(token: String, target: AutomationTargetIdentity, viewport: AutomationViewport) { self.token = token; self.target = target; self.viewport = viewport }
     }
@@ -72,7 +75,6 @@ final class ControlBroker {
     private var sessions: [UUID: Session] = [:]
     private var cache: [UUID: CacheEntry] = [:]
     private var opening = false
-    private var openingUncertain = false
     private var stopping = false
     private var pendingAcknowledgements: [UUID: (Session, Bool)] = [:]
     #if SAFARIER_CONTROL_TESTING
@@ -117,7 +119,7 @@ final class ControlBroker {
     private func matches(_ action: AutomationAction, _ value: AutomationResult) -> Bool {
         switch (action, value) {
         case (.getState, .stateRead), (.screenshot, .snapshotWritten),
-             (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished),
+             (.navigate, .navigationSubmitted), (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished),
              (.move, .nativeDelivered), (.mouseDown, .nativeDelivered), (.mouseUp, .nativeDelivered),
              (.click, .nativeDelivered), (.insertText, .nativeDelivered), (.key, .nativeDelivered),
              (.cancel, .sessionClosed), (.closeSession, .sessionClosed): return true
@@ -164,7 +166,6 @@ final class ControlBroker {
         if wasOpen { opening = false }
         if !received {
             session.uncertain = true
-            if wasOpen || !sessions.values.contains(where: { $0 === session }) { openingUncertain = true }
         }
     }
     private func encode(_ reply: ControlBrokerReply) -> Data {
@@ -174,7 +175,7 @@ final class ControlBroker {
         var result = ControlBrokerReply(request.requestID, status: "ok")
         if case .status = request.operation { return result }
         if case .daemonStop = request.operation {
-            guard sessions.isEmpty, pendingAcknowledgements.isEmpty, !opening, !openingUncertain,
+            guard sessions.isEmpty, pendingAcknowledgements.isEmpty, !opening,
                   !cache.contains(where: { $0.key != request.requestID && $0.value.response == nil }) else { return response(request, "SESSION_BUSY") }
             stopping = true
             return result
@@ -184,21 +185,20 @@ final class ControlBroker {
             catch { return response(request, "UNAVAILABLE") }
         }
         if case let .connect(profileID) = request.operation {
-            guard !opening, !openingUncertain else { return response(request, openingUncertain ? "INDETERMINATE_RESULT" : "SESSION_BUSY") }
+            guard !opening else { return response(request, "SESSION_BUSY") }
             opening = true
             var waitingForAcknowledgement = false
             defer { if !waitingForAcknowledgement { opening = false } }
             do {
-                guard case let .sessionOpened(token, target, viewport) = try await exchange(request.requestID, .openSession(profileID: profileID), nil), target.profileID == profileID else { openingUncertain = true; return response(request, "INVALID_REPLY") }
+                guard case let .sessionOpened(token, target, viewport) = try await exchange(request.requestID, .openSession(profileID: profileID), nil), target.profileID == profileID else { return response(request, "INVALID_REPLY") }
                 let id = UUID(); let session = Session(token: token, target: target, viewport: viewport)
                 session.awaitingAck = true; sessions[id] = session; pendingAcknowledgements[request.requestID] = (session, true)
                 waitingForAcknowledgement = true
                 result.connection = id; result.viewport = viewport; return result
             } catch let error as AutomationError {
-                if error.sideEffects != .none || error.code == .indeterminateResult { openingUncertain = true }
                 return response(request, error.code.rawValue)
             } catch ControlAppleEventClient.Failure.unavailable { return response(request, "UNAVAILABLE") }
-            catch { openingUncertain = true; return response(request, "INDETERMINATE_RESULT") }
+            catch { return response(request, "INDETERMINATE_RESULT") }
         }
         let connection: UUID
         switch request.operation {
@@ -214,7 +214,7 @@ final class ControlBroker {
             NavigationDiagnostic.brokerAdmission(request, reserved: reserved, active: session.active, awaiting: session.awaitingAck, uncertain: session.uncertain)
         }
         #endif
-        guard reserved || (!session.active && !session.awaitingAck && !session.uncertain) else { return response(request, session.uncertain ? "INDETERMINATE_RESULT" : "SESSION_BUSY") }
+        guard reserved || (!session.active && !session.awaitingAck) else { return response(request, "SESSION_BUSY") }
         if reserved { session.semanticCancellation?.cancel() }
         if !reserved { session.active = true }
         defer { if !reserved { session.active = false } }
@@ -295,11 +295,12 @@ final class ControlBroker {
                 let frame = UUID(); session.frameID = frame; result.connection = connection; result.frame = frame; result.screenshotPath = path; result.viewport = viewport
                 result.ocr = await recognize(path,viewport)
                 guard sessions[connection] === session, session.frameID == frame, session.viewport == viewport else { return response(request,"TARGET_CHANGED") }
-            case let .navigationFinished(version):
+            case let .navigationSubmitted(version), let .navigationFinished(version):
                 let old = session.viewport
                 guard version > old.viewVersion else { session.uncertain = true; return response(request, "TARGET_CHANGED") }
                 session.viewport = AutomationViewport(viewportWidthPoints: old.viewportWidthPoints, viewportHeightPoints: old.viewportHeightPoints, pixelWidth: old.pixelWidth, pixelHeight: old.pixelHeight, scaleX: old.scaleX, scaleY: old.scaleY, pageZoom: old.pageZoom, viewVersion: version)
                 session.frameID = nil; result.viewVersion = version
+                if case .navigationSubmitted = value { result.navigationSubmitted = true; result.effectVerified = false }
             case let .nativeDelivered(sequence, buttons, version):
                 guard version == session.viewport.viewVersion else { session.uncertain = true; return response(request, "TARGET_CHANGED") }
                 result.sequence = sequence; result.buttons = buttons; result.viewVersion = version
@@ -309,7 +310,7 @@ final class ControlBroker {
                 let borrowedConfirmed = !receipt.cleaned && !receipt.terminatedOwnedRunner && retained?.target == session.target && retained?.confirmed == true
                 if borrowedConfirmed { result.retainedBrowser = retained }
                 if !(receipt.cleaned && receipt.terminatedOwnedRunner && retained == nil) && !borrowedConfirmed {
-                    result.status = "error"; result.error = "CLEANUP_UNCONFIRMED"; openingUncertain = true
+                    result.status = "error"; result.error = "CLEANUP_UNCONFIRMED"
                 }
                 if result.status == "ok" {
                     session.awaitingAck = true

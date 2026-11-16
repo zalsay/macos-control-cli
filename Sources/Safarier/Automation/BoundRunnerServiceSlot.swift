@@ -36,23 +36,21 @@ final class BoundRunnerServiceSlot {
         defer { preparing = false }
         let trace = registeredSession == nil ? nil : RegisteredPrepareTrace()
         defer { trace?.failureIfPending() }
-        trace?.begin(.identity)
-        try await context.validate()
-        trace?.success()
         let service: RunnerAutomationService
         if let registeredSession {
-            trace?.begin(.profile)
+            trace?.begin(.plan)
             guard let registeredLaunchPlan, spec.registeredInteractive, registeredSession.profile.id == profile.id else { throw AutomationError(code: .targetChanged) }
             // Compare the actual startup snapshot, including proxy/subscription, against
             // this generation's authenticated repository binding before touching the page.
-            try await context.validate(profile: registeredLaunchPlan.profile)
-            trace?.success(); trace?.begin(.plan)
+            // Plan validation already performs the full identity/resource/repository
+            // check and profile comparison; repeating those consumes the shared handoff deadline.
             try await context.validate(preparation: registeredLaunchPlan)
             trace?.success(); trace?.begin(.service)
             guard !closed, !Task.isCancelled else { throw AutomationError(code: .cancelled) }
             service = try registeredSession.makeRegisteredAutomationService(workspace: workspace, context: context)
             trace?.success(); trace?.begin(.commit)
         } else {
+            try await context.validate()
             let result = try await RunnerPreparation.prepareBoundLocal(profile: profile, spec: spec, workspace: workspace, context: context)
             resources = result.resources
             guard !closed, !Task.isCancelled else { throw AutomationError(code: .cancelled) }

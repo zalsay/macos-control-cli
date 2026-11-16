@@ -39,6 +39,22 @@ public final class AutomationChannel: @unchecked Sendable {
     func labelRegistration(_ role: RegistrationDiagnosticRole) {
         lock.lock(); registrationDiagnosticRole = role; lock.unlock()
     }
+    private func traceGenerationIO(_ operation: String, fd: Int32, requested: Int, result: Int, error: Int32) {
+        lock.lock(); let role = registrationDiagnosticRole; lock.unlock()
+        guard let role, role == .generationManager || role == .generationRunner else { return }
+        var info = stat()
+        let valid = fstat(fd, &info) == 0
+        let kind = valid ? Int(info.st_mode & S_IFMT) : -1
+        let socket = Self.socketDiagnostic(fd)
+        RootIdentityDiagnostic.emit("CHANNEL_IO_DIAG role=\(role.rawValue) operation=\(operation) fd=\(fd) requested=\(requested) result=\(result) errno=\(result < 0 ? error : 0) descriptorKind=\(kind) \(socket)")
+    }
+    private static func socketDiagnostic(_ fd: Int32) -> String {
+        var info = socket_fdinfo()
+        let size = Int32(MemoryLayout<socket_fdinfo>.size)
+        guard proc_pidfdinfo(getpid(), fd, PROC_PIDFDSOCKETINFO, &info, size) == size else { return "socketInfo=unavailable" }
+        // Kernel-provided opaque socket handles, not peer credentials or frame data.
+        return "socket=\(info.psi.soi_so) peerSocket=\(info.psi.soi_proto.pri_un.unsi_conn_so)"
+    }
 
     private let lock = NSLock()
     private var descriptor: Int32
@@ -429,6 +445,7 @@ public final class AutomationChannel: @unchecked Sendable {
             let count = buffer.count - job.offset
             let result = Darwin.write(fd, buffer.baseAddress!.advanced(by: job.offset), count)
             let writeError = errno
+            traceGenerationIO("write", fd: fd, requested: count, result: result, error: writeError)
             return (result, writeError)
         }
     }
@@ -461,8 +478,10 @@ public final class AutomationChannel: @unchecked Sendable {
                             try data.withUnsafeMutableBytes { buffer in
                                 while offset < count {
                                     let result = Darwin.read(fd, buffer.baseAddress!.advanced(by: offset), count - offset)
-                                    if result < 0 && errno == EINTR { continue }
-                                    if result < 0 { throw ChannelError.systemCall(errno) }
+                                    let readError = errno
+                                    self.traceGenerationIO(boundary ? "readHeader" : "readBody", fd: fd, requested: count - offset, result: result, error: readError)
+                                    if result < 0 && readError == EINTR { continue }
+                                    if result < 0 { throw ChannelError.systemCall(readError) }
                                     if result == 0 {
                                         if boundary && offset == 0 { return }
                                         throw ChannelError.truncatedFrame

@@ -58,6 +58,8 @@ sfa authorize --request  # 仅用户明确要求授权时执行一次，由用�
 
 须已有同位置且通过身份校验的唯一 Manager；该命令不启动 App/环境/daemon，不发送 `SFAu/requ` 业务事件，仅向系统查询或申请这个精确事件范围。等待人工提示不套控制代次90秒期限；不要让外部 driver 用短超时反复重试。返回 JSON 的 `status` 为 `allowed`、`consent_required`、`not_permitted`、`target_changed` 或 `unavailable`，含 `statusDescription`、`osStatus`（未调用时可为 null）、`businessEventSent:false`。仅 `allowed` 退出码为0，其他结果为1，参数错误为64。系统未许可不等于已证实用户刚点拒绝；目标变更时不得使用本次授权结果。
 
+默认只读查询在进入权限调用后最多等待5秒；系统权限 API 未及时返回时输出 `unavailable`、`osStatus:-1712`，表示授权状态未知，不代表已授权或拒绝。底层 API 无法取消，迟到结果会被丢弃；命令不自动重试，也不转为申请授权。该期限不包含原有的 Manager 身份核验时间，不适用于 `--request` 的人工同意等待。
+
 权限归属由 macOS TCC 决定，不因 `sfa` 名称固定而跨宿主共享。此前 Copis 缺少 NSAppleEventsUsageDescription 是历史诊断；用户现已在同一 Copis/DSH 宿主实测返回 `allowed`，不再将该缺失描述为当前状态。没有提示或仍未许可时保存结果并停止；不要借 Codex、另一终端或测试 SwiftHost 的授权代替 Copis，也不要重置 TCC。授权成功只证明权限及本次目标身份检查通过，不代表连接、页面控制或业务验收成功。
 
 ## 3. 建立短回合，观察页面
@@ -95,7 +97,8 @@ ctl observe --connection "$CONNECTION_UUID"
 ```
 
 `type` 的 `--text` 与 `--text-stdin` 二选一。先通过已支持的原生动作定位输入框；只输入用户授权内容。页面变化后用新截图判断结果，原生回执不等于业务效果成功。
-链接单击需要等待导航时使用 `click ... --count 1 --wait-navigation`；也可用 `ctl navigate --connection "$CONNECTION_UUID" --url "$URL"`。完成后获取新 frame。动作预算不足时不发新输入。
+显式导航现有浏览器使用 `ctl navigate --connection "$CONNECTION_UUID" --url "$URL"`。浏览器接受请求后返回 `navigationSubmitted: true`、`effectVerified: false`，不等待页面加载完成、不自动重试，也不确认搜索或业务效果。旧 frame 随提交失效；agent 应调用 `observe` 获取新 frame，自行判断页面是否到达目标，必要时再次观察。加载过程中允许 `observe` 和 `release`；加载失败不会补发导航完成回执。通道断开、身份或目标校验失败仍返回错误，不能据此自动重复导航。
+链接单击确实需要等待导航时使用 `click ... --count 1 --wait-navigation`，Enter 的 `--wait-navigation` 同样保留显式等待语义。动作预算不足时不发新输入。
 可选语义点击：
 
 ```sh
@@ -133,6 +136,7 @@ release 成功应含 `controlReleased`：`inputReleased`、`artifactsCleaned`、
 - 不全局输入、不 DOM 合成输入、不用 PID 路由。身份拒绝时检查实际 App 路径、唯一 Manager、授权与 workspace/profile 一致性，以实际错误为准，不修改门禁。
 - `RUNNER_EXITED` 不能单独证明进程已退出；generation 身份采样失败也可映射为此错误。保存原始结果，结合实际进程状态与本次连接阶段日志定位，不盲重连。
 - TIMEOUT、INDETERMINATE 或其他结果不确定时保存原始输出，不盲重试输入或生命周期动作。release 已发出后不再用 disconnect“兜底”。
+- daemon 不因历史 `uncertain` 或丢失 ACK 持续拦截后续显式命令或新 connect；原请求仍如实返回错误，不自动重放。每次执行仍由 Manager/Runner 核验 Agent 开关、身份、目标及期限，正在执行或仍待 ACK 的请求仍受并发门禁限制。daemon stop 成功仅表示本地请求已排空，不能代替 release 的四项交还证明。
 - 新系统权限提示、验证码或需要人工介入时交用户处理；不擅改权限或抢回前台。记录观察事实，不能仅凭窗口/鼠标没变化就断言用户无干扰。
 
 ### 控制请求诊断日志

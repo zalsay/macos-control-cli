@@ -91,8 +91,8 @@ struct DshControlledRuntime {
     }
 
     static let reviewedAnchor: Anchor? = Anchor(
-        imageSHA256: "8a4c22bb334a3c307f8494cda029b80cd6a49545789e5e6087b878eef464baeb",
-        manifestSHA256: "34e57a58a7674ebe656b249ab9f3bd2ca0cef45bdb9eacbec88592a8a0ec57de",
+        imageSHA256: "53fad47a4ffc8cd0a8e9989ae619d1cfbe34618f7c9d921f52086ae4c5e01a9a",
+        manifestSHA256: "b4f513bfec24a40c0f4d5cdb8181017f790ce7857a871e9a3ed5cd8165586c5a",
         nodeSHA256: "27db838bb204ef7c21df2931f5656e4c8fb32e6e947f363a402b49714d32b5b1",
         nodeTeamID: "HX7739G8FX"
     )

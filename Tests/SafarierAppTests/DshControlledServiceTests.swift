@@ -147,6 +147,30 @@ final class DshControlledServiceTests: XCTestCase {
         guard case .failed = service.status else { return XCTFail("stop must not report successful cleanup") }
     }
 
+    func testStartAndRestartUseFixedPort() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("dsh-port-test-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("entry.sh")
+        let report = root.appendingPathComponent("arguments")
+        try "printf '%s\\n' \"$*\" >> '\(report.path)'\necho \"dsh web: http://127.0.0.1:$4/?token=test\"\nexec /bin/sleep 60\n".write(to: script, atomically: true, encoding: .utf8)
+        let lease = Lease(script)
+        let service = DshService(controlledProvider: { lease }, homeURL: root)
+        defer { service.stop() }
+        for launch in 1...2 {
+            if launch == 1 { service.start() } else { service.restart() }
+            for _ in 0..<300 {
+                if case .running = service.status { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            guard case .running(let url) = service.status else { return XCTFail("child did not start: \(service.status)") }
+            XCTAssertEqual(url.host, "127.0.0.1")
+            XCTAssertEqual(url.port, 61919)
+            XCTAssertEqual(try String(contentsOf: report, encoding: .utf8).split(separator: "\n").map(String.init),
+                           Array(repeating: "web --no-open --port 61919", count: launch))
+        }
+    }
+
     actor Gate {
         var continuation: CheckedContinuation<Void, Never>?
         var didEnter = false

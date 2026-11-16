@@ -48,7 +48,7 @@ import SafarierCore
         broker.acknowledgement(try XCTUnwrap(ack), received: true)
         return connection
     }
-    func testDisconnectAckControlsStopAndLostAckFailsClosed() async throws {
+    func testDisconnectWaitsForAckButLostAckDoesNotBlockStop() async throws {
         for received in [true, false] {
             let fixture = Fixture(), broker = fixture.broker()
             let connection = try await connect(fixture, broker)
@@ -60,14 +60,13 @@ import SafarierCore
             XCTAssertEqual(before.error, "SESSION_BUSY")
             broker.acknowledgement(ackID, received: received)
             let (after, _) = try await send(broker, request(.daemonStop))
-            XCTAssertEqual(after.status, received ? "ok" : "error")
-            if !received { XCTAssertEqual(after.error, "SESSION_BUSY") }
+            XCTAssertEqual(after.status, "ok")
             let (state, _) = try await send(broker, request(.state(connection: connection)))
-            XCTAssertEqual(state.error, received ? "SESSION_BUSY" : "SESSION_NOT_FOUND")
+            XCTAssertEqual(state.error, "SESSION_BUSY")
             XCTAssertEqual(fixture.closeCalls, 1)
         }
     }
-    func testCancelAckControlsStopAndLostAckFailsClosed() async throws {
+    func testCancelWaitsForAckButLostAckDoesNotBlockStop() async throws {
         for received in [true, false] {
             let fixture = Fixture(), broker = fixture.broker()
             let connection = try await connect(fixture, broker)
@@ -83,8 +82,7 @@ import SafarierCore
             XCTAssertEqual(before.error, "SESSION_BUSY")
             broker.acknowledgement(ackID, received: received)
             let (after, _) = try await send(broker, request(.daemonStop))
-            XCTAssertEqual(after.status, received ? "ok" : "error")
-            if !received { XCTAssertEqual(after.error, "SESSION_BUSY") }
+            XCTAssertEqual(after.status, "ok")
             XCTAssertEqual(fixture.closeCalls, 1)
         }
     }
@@ -96,7 +94,7 @@ import SafarierCore
         XCTAssertEqual(closed.error, "CLEANUP_UNCONFIRMED")
         XCTAssertNil(ack)
         let (stop, _) = try await send(broker, request(.daemonStop))
-        XCTAssertEqual(stop.error, "SESSION_BUSY")
+        XCTAssertEqual(stop.status, "ok")
     }
     func testConcurrentAndRepeatedDisconnectUsesOneCloseAndKeepsOriginalAck() async throws {
         let fixture = Fixture(), broker = fixture.broker()
@@ -199,8 +197,7 @@ import SafarierCore
             let delivered = try await server.value
             XCTAssertEqual(delivered, acknowledge)
             let (stop, _) = try await send(broker, request(.daemonStop))
-            XCTAssertEqual(stop.status, acknowledge ? "ok" : "error")
-            if !acknowledge { XCTAssertEqual(stop.error, "SESSION_BUSY") }
+            XCTAssertEqual(stop.status, "ok")
         }
     }
 }

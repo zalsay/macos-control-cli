@@ -36,6 +36,22 @@ import SafarierCore
         XCTAssertEqual(reply.status, "consent_required")
         XCTAssertEqual(reply.osStatus, -1744)
     }
+    func testReadOnlyQueryReturnsBeforeStalledPermissionAndIgnoresLateAllowed() async throws {
+        let start = ContinuousClock.now
+        let reply = await ControlAuthorization.perform(request: false, targetCurrent: { true }) { _ in
+            // Model the uncancellable system call returning after the query budget.
+            try? await Task.sleep(for: .milliseconds(6500))
+            return (0, false)
+        }
+        XCTAssertLessThan(start.duration(to: .now), .seconds(6))
+        XCTAssertEqual(reply.status, "unavailable")
+        XCTAssertEqual(reply.osStatus, -1712)
+        let json = try JSONSerialization.jsonObject(with: reply.jsonData()) as! [String: Any]
+        XCTAssertEqual(json["businessEventSent"] as? Bool, false)
+        // A late native result must not resume the query a second time.
+        try await Task.sleep(for: .seconds(2))
+        XCTAssertEqual(reply.status, "unavailable")
+    }
     func testExplicitRequestCallsOnceAndReturnsAllowedWithoutBusinessEvent() async throws {
         var calls: [Bool] = []
         let reply = await ControlAuthorization.perform(request: true, targetCurrent: { true }) { ask in
@@ -46,6 +62,14 @@ import SafarierCore
         let json = try JSONSerialization.jsonObject(with: reply.jsonData()) as! [String: Any]
         XCTAssertEqual(json["businessEventSent"] as? Bool, false)
         XCTAssertFalse((json["statusDescription"] as! String).isEmpty)
+    }
+    func testExplicitConsentWaitIsNotCutOffByReadOnlyDeadline() async throws {
+        let reply = await ControlAuthorization.perform(request: true, targetCurrent: { true }) { _ in
+            try? await Task.sleep(for: .milliseconds(5500))
+            return (0, false)
+        }
+        XCTAssertEqual(reply.status, "allowed")
+        XCTAssertEqual(reply.osStatus, 0)
     }
     func testStatusMappingDoesNotRetryDeniedOrUnknown() async {
         for (code, status): (Int32, String) in [(-1743, "not_permitted"), (-1744, "consent_required"), (-600, "unavailable")] {
@@ -66,10 +90,12 @@ import SafarierCore
         XCTAssertTrue(json["osStatus"] is NSNull)
     }
     func testChangedTargetAfterPromptOrInsideCOverridesAllowed() async {
-        var checks = 0
-        let reply = await ControlAuthorization.perform(request: true, targetCurrent: { checks += 1; return checks == 1 }) { _ in (0, false) }
-        XCTAssertEqual(checks, 2); XCTAssertEqual(reply.status, "target_changed")
-        let inner = await ControlAuthorization.perform(request: true, targetCurrent: { true }) { _ in (0, true) }
-        XCTAssertEqual(inner.status, "target_changed")
+        for request in [false, true] {
+            var checks = 0
+            let reply = await ControlAuthorization.perform(request: request, targetCurrent: { checks += 1; return checks == 1 }) { _ in (0, false) }
+            XCTAssertEqual(checks, 2); XCTAssertEqual(reply.status, "target_changed")
+            let inner = await ControlAuthorization.perform(request: request, targetCurrent: { true }) { _ in (0, true) }
+            XCTAssertEqual(inner.status, "target_changed")
+        }
     }
 }
