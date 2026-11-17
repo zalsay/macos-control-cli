@@ -16,6 +16,7 @@ struct ControlBrokerReply: Codable {
     var ocr: SemanticOCRResult?
     var selection: SemanticDecision?
     var timingMs: UInt64?
+    var sent: Bool?
     var effectVerified: Bool?
     var navigationSubmitted: Bool?
     var state: AutomationState?
@@ -61,6 +62,15 @@ final class ControlBroker {
         let token: String, target: AutomationTargetIdentity
         var viewport: AutomationViewport
         var frameID: UUID?
+        var frames: [(id: UUID, viewport: AutomationViewport)] = []
+        func rememberFrame(_ viewport: AutomationViewport) -> UUID {
+            let id = UUID()
+            frames.append((id, viewport))
+            if frames.count > 32 { frames.removeFirst(frames.count - 32) }
+            frameID = id
+            return id
+        }
+        func frameViewport(_ id: UUID) -> AutomationViewport? { frames.first { $0.id == id }?.viewport }
         var active = false, awaitingAck = false
         // Historical diagnostic only; each explicit request is admitted afresh.
         var uncertain = false
@@ -106,20 +116,26 @@ final class ControlBroker {
 
     private func response(_ request: ControlRequest, _ code: String) -> ControlBrokerReply { ControlBrokerReply(request.requestID, status: "error", error: code) }
     private func point(_ x: Double, _ y: Double, frame: UUID, session: Session) throws -> ViewportPoint {
-        guard session.frameID == frame, let p = ControlRuntime.nativePoint(x: x, y: y, viewport: session.viewport) else { throw ControlRuntime.Failure.unsafe }
+        guard let viewport = session.frameViewport(frame), let p = ControlRuntime.nativePoint(x: x, y: y, viewport: viewport) else { throw ControlRuntime.Failure.unsafe }
         return p
     }
-    private func exchange(_ id: UUID, _ action: AutomationAction, _ token: String?) async throws -> AutomationResult {
-        let reply = try await sender(AutomationRequest(version: 1, requestID: id, sessionID: token, action: action))
+    private func exchange(_ id: UUID, _ action: AutomationAction, _ token: String?, expectedViewVersion: UInt64? = nil) async throws -> AutomationResult {
+        let reply = try await sender(AutomationRequest(version: 1, requestID: id, sessionID: token, action: action, expectedViewVersion: expectedViewVersion))
         switch reply.outcome {
         case .success(let result): return result
         case .failure(let error): throw error
         }
     }
+    private func adoptViewport(_ viewport: AutomationViewport, session: Session) {
+        // A screenshot describes the current page; changes are observations, not
+        // evidence that a previous input failed or that its frame is unusable.
+        session.viewport = viewport
+    }
     private func matches(_ action: AutomationAction, _ value: AutomationResult) -> Bool {
         switch (action, value) {
         case (.getState, .stateRead), (.screenshot, .snapshotWritten),
              (.navigate, .navigationSubmitted), (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished),
+             (.navigateByInput, .navigationSubmitted), (.navigateByInput, .nativeDelivered),
              (.move, .nativeDelivered), (.mouseDown, .nativeDelivered), (.mouseUp, .nativeDelivered),
              (.click, .nativeDelivered), (.insertText, .nativeDelivered), (.key, .nativeDelivered),
              (.cancel, .sessionClosed), (.closeSession, .sessionClosed): return true
@@ -145,14 +161,8 @@ final class ControlBroker {
         guard !stopping else { return (encode(response(request, "SESSION_BUSY")), nil) }
         let reserved: Bool
         switch request.operation { case .cancel, .disconnect, .release, .daemonStop: reserved = true; default: reserved = false }
-        let capacity: Int
-        if case .daemonStop = request.operation { capacity = AutomationLimits.replayEntries + 1 }
-        else { capacity = reserved ? AutomationLimits.replayEntries : AutomationLimits.replayEntries - 2 }
-        guard cache.count < capacity else { return (encode(response(request, "REPLAY_WINDOW_FULL")), nil) }
         cache[request.requestID] = CacheEntry(request: canonical, response: nil)
-        let isRelease: Bool
-        if case .release = request.operation { isRelease = true } else { isRelease = false }
-        let reply = await perform(request, reserved: reserved && !isRelease)
+        let reply = await perform(request, reserved: reserved)
         let data = encode(reply)
         cache[request.requestID]?.response = data
         return (data, pendingAcknowledgements[request.requestID] == nil ? nil : request.requestID)
@@ -161,9 +171,8 @@ final class ControlBroker {
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         NavigationDiagnostic.emitID(requestID, "broker.ack", received ? "received" : "lost")
         #endif
-        guard let (session, wasOpen) = pendingAcknowledgements.removeValue(forKey: requestID) else { return }
+        guard let (session, _) = pendingAcknowledgements.removeValue(forKey: requestID) else { return }
         session.awaitingAck = pendingAcknowledgements.values.contains { $0.0 === session }
-        if wasOpen { opening = false }
         if !received {
             session.uncertain = true
         }
@@ -187,13 +196,11 @@ final class ControlBroker {
         if case let .connect(profileID) = request.operation {
             guard !opening else { return response(request, "SESSION_BUSY") }
             opening = true
-            var waitingForAcknowledgement = false
-            defer { if !waitingForAcknowledgement { opening = false } }
+            defer { opening = false }
             do {
                 guard case let .sessionOpened(token, target, viewport) = try await exchange(request.requestID, .openSession(profileID: profileID), nil), target.profileID == profileID else { return response(request, "INVALID_REPLY") }
                 let id = UUID(); let session = Session(token: token, target: target, viewport: viewport)
                 session.awaitingAck = true; sessions[id] = session; pendingAcknowledgements[request.requestID] = (session, true)
-                waitingForAcknowledgement = true
                 result.connection = id; result.viewport = viewport; return result
             } catch let error as AutomationError {
                 return response(request, error.code.rawValue)
@@ -214,7 +221,7 @@ final class ControlBroker {
             NavigationDiagnostic.brokerAdmission(request, reserved: reserved, active: session.active, awaiting: session.awaitingAck, uncertain: session.uncertain)
         }
         #endif
-        guard reserved || (!session.active && !session.awaitingAck) else { return response(request, "SESSION_BUSY") }
+        guard reserved || !session.active else { return response(request, "SESSION_BUSY") }
         if reserved { session.semanticCancellation?.cancel() }
         if !reserved { session.active = true }
         defer { if !reserved { session.active = false } }
@@ -230,8 +237,8 @@ final class ControlBroker {
                 recordScreenshotChild(parent: request.requestID, child: screenshotID)
                 guard case let .snapshotWritten(path, viewport) = try await exchange(screenshotID, .screenshot, session.token) else { session.uncertain=true; return response(request,"INVALID_REPLY") }
                 guard sessions[connection] === session, !cancellation.isCancelled else { return response(request,"TARGET_CHANGED") }
-                guard viewport == session.viewport else { session.uncertain=true; return response(request,"TARGET_CHANGED") }
-                let frame = UUID(); session.frameID = frame
+                adoptViewport(viewport, session: session)
+                let frame = session.rememberFrame(viewport)
                 let ocr = await recognize(path,viewport)
                 guard sessions[connection] === session, !cancellation.isCancelled, session.frameID == frame, session.viewport == viewport else { return response(request, "TARGET_CHANGED") }
                 let payload: Data
@@ -246,9 +253,9 @@ final class ControlBroker {
                 catch { return response(request, "JEV_INVALID_RESPONSE") }
                 let point = try self.point(Double(chosen.point.x),Double(chosen.point.y),frame:frame,session:session)
                 let value = try await exchange(request.requestID, .click(point:point,viewVersion:viewport.viewVersion,count:1), session.token)
-                guard sessions[connection] === session, case let .nativeDelivered(sequence,buttons,version) = value, version == viewport.viewVersion else { session.uncertain = true; return response(request,"INVALID_REPLY") }
+                guard sessions[connection] === session, case let .nativeDelivered(sequence,buttons,version) = value else { session.uncertain = true; return response(request,"INVALID_REPLY") }
                 result.sequence=sequence; result.buttons=buttons; result.viewVersion=version
-                result.selection=chosen; result.timingMs=(DispatchTime.now().uptimeNanoseconds-started)/1_000_000; result.effectVerified=false; return result
+                result.sent=true; result.selection=chosen; result.timingMs=(DispatchTime.now().uptimeNanoseconds-started)/1_000_000; result.effectVerified=false; return result
             } catch let error as AutomationError {
                 if error.sideEffects != .none || error.code == .indeterminateResult { session.uncertain=true }
                 return response(request,error.code.rawValue)
@@ -267,9 +274,9 @@ final class ControlBroker {
             case let .mouseDown(_, frame, x, y): action = .mouseDown(point: try point(x, y, frame: frame, session: session), viewVersion: session.viewport.viewVersion)
             case let .mouseUp(_, frame, x, y): action = .mouseUp(point: try point(x, y, frame: frame, session: session), viewVersion: session.viewport.viewVersion)
             case let .click(_, frame, x, y, count): action = .click(point: try point(x, y, frame: frame, session: session), viewVersion: session.viewport.viewVersion, count: count)
-            case let .type(_, frame, text): guard session.frameID == frame else { throw ControlRuntime.Failure.unsafe }; action = .insertText(text)
-            case let .press(_, frame, key, shift): guard session.frameID == frame else { throw ControlRuntime.Failure.unsafe }; action = .key(name: key, shift: shift)
-            case let .pressEnterAndWait(_, frame): guard session.frameID == frame else { throw ControlRuntime.Failure.unsafe }; action = .navigateByInput(input: .enter, viewVersion: session.viewport.viewVersion)
+            case let .type(_, frame, text): guard session.frameViewport(frame) != nil else { throw ControlRuntime.Failure.unsafe }; action = .insertText(text)
+            case let .press(_, frame, key, shift): guard session.frameViewport(frame) != nil else { throw ControlRuntime.Failure.unsafe }; action = .key(name: key, shift: shift)
+            case let .pressEnterAndWait(_, frame): guard session.frameViewport(frame) != nil else { throw ControlRuntime.Failure.unsafe }; action = .navigateByInput(input: .enter, viewVersion: session.viewport.viewVersion)
             case let .clickAndWait(_, frame, x, y): action = .navigateByInput(input: .click(point: try point(x, y, frame: frame, session: session)), viewVersion: session.viewport.viewVersion)
             default: return response(request, "INVALID_REQUEST")
             }
@@ -288,22 +295,24 @@ final class ControlBroker {
             guard matches(action, value) else { session.uncertain = true; return response(request, "INVALID_REPLY") }
             switch value {
             case let .stateRead(state):
-                guard state.target == session.target, state.viewVersion == session.viewport.viewVersion else { session.uncertain = true; return response(request, "TARGET_CHANGED") }
+                let old = session.viewport
+                let current = AutomationViewport(viewportWidthPoints: old.viewportWidthPoints, viewportHeightPoints: old.viewportHeightPoints, pixelWidth: old.pixelWidth, pixelHeight: old.pixelHeight, scaleX: old.scaleX, scaleY: old.scaleY, pageZoom: old.pageZoom, viewVersion: state.viewVersion)
+                guard state.target == session.target else { session.uncertain = true; return response(request, "TARGET_CHANGED") }
+                adoptViewport(current, session: session)
                 result.state = state
             case let .snapshotWritten(path, viewport):
-                guard viewport == session.viewport else { session.uncertain = true; return response(request, "TARGET_CHANGED") }
-                let frame = UUID(); session.frameID = frame; result.connection = connection; result.frame = frame; result.screenshotPath = path; result.viewport = viewport
+                adoptViewport(viewport, session: session)
+                let frame = session.rememberFrame(viewport); result.connection = connection; result.frame = frame; result.screenshotPath = path; result.viewport = viewport
                 result.ocr = await recognize(path,viewport)
                 guard sessions[connection] === session, session.frameID == frame, session.viewport == viewport else { return response(request,"TARGET_CHANGED") }
             case let .navigationSubmitted(version), let .navigationFinished(version):
                 let old = session.viewport
-                guard version > old.viewVersion else { session.uncertain = true; return response(request, "TARGET_CHANGED") }
                 session.viewport = AutomationViewport(viewportWidthPoints: old.viewportWidthPoints, viewportHeightPoints: old.viewportHeightPoints, pixelWidth: old.pixelWidth, pixelHeight: old.pixelHeight, scaleX: old.scaleX, scaleY: old.scaleY, pageZoom: old.pageZoom, viewVersion: version)
-                session.frameID = nil; result.viewVersion = version
+                result.viewVersion = version
                 if case .navigationSubmitted = value { result.navigationSubmitted = true; result.effectVerified = false }
             case let .nativeDelivered(sequence, buttons, version):
-                guard version == session.viewport.viewVersion else { session.uncertain = true; return response(request, "TARGET_CHANGED") }
                 result.sequence = sequence; result.buttons = buttons; result.viewVersion = version
+                result.sent = true; result.effectVerified = false
             case let .sessionClosed(receipt):
                 result.cleaned = receipt.cleaned; result.terminatedOwnedRunner = receipt.terminatedOwnedRunner
                 let retained = receipt.retainedBrowser

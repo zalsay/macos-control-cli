@@ -24,6 +24,16 @@ typedef struct { char path[PATH_MAX]; struct stat st; BIFileSnapshot file; uint8
 struct BBInventory { char path[PATH_MAX]; int rootfd; struct stat root; uint8_t root_metadata[32]; size_t count; uint64_t total, metadata_total; Record entries[BB_MAX_ENTRIES]; uint8_t digest[32]; };
 static bool timely(uint64_t d) { struct timespec t; if(clock_gettime(CLOCK_MONOTONIC,&t)) return false; uint64_t n=(uint64_t)t.tv_sec*1000000000ULL+(uint64_t)t.tv_nsec; return d>n && d-n<=5000000000ULL; }
 static bool same_stat(const struct stat *a,const struct stat *b) { return a->st_dev==b->st_dev && a->st_ino==b->st_ino && a->st_mode==b->st_mode && a->st_uid==b->st_uid && a->st_gid==b->st_gid && a->st_nlink==b->st_nlink && a->st_size==b->st_size && a->st_mtimespec.tv_sec==b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec==b->st_mtimespec.tv_nsec && a->st_ctimespec.tv_sec==b->st_ctimespec.tv_sec && a->st_ctimespec.tv_nsec==b->st_ctimespec.tv_nsec && a->st_birthtimespec.tv_sec==b->st_birthtimespec.tv_sec && a->st_birthtimespec.tv_nsec==b->st_birthtimespec.tv_nsec && a->st_flags==b->st_flags; }
+/* Ancestor siblings may change without changing this mapping. Keep identity,
+ * ownership, mode and flags stable; the bundle root remains fully pinned. */
+static bool same_ancestor(const struct stat *a,const struct stat *b) { return a->st_dev==b->st_dev && a->st_ino==b->st_ino && a->st_mode==b->st_mode && a->st_uid==b->st_uid && a->st_gid==b->st_gid && a->st_birthtimespec.tv_sec==b->st_birthtimespec.tv_sec && a->st_birthtimespec.tv_nsec==b->st_birthtimespec.tv_nsec && a->st_flags==b->st_flags; }
+static bool ancestor_acl(int fd,uint8_t out[32]) {
+ errno=0;acl_t acl=acl_get_fd_np(fd,ACL_TYPE_EXTENDED);int saved=errno;
+ if(!acl && saved!=ENOENT)return false;
+ CC_SHA256_CTX c;CC_SHA256_Init(&c);uint8_t present=acl?1:0;CC_SHA256_Update(&c,&present,1);
+ if(acl){ssize_t len=0;char *value=acl_to_text(acl,&len);if(!value||len<0||len>65536){if(value)acl_free(value);acl_free(acl);return false;}CC_SHA256_Update(&c,value,(CC_LONG)len);acl_free(value);acl_free(acl);}
+ CC_SHA256_Final(out,&c);return true;
+}
 static bool matches_file(const struct stat *s,const BIFileSnapshot *f) { return (uint64_t)s->st_dev==f->dev && (uint64_t)s->st_ino==f->ino && (uint64_t)s->st_nlink==f->nlink && (uint32_t)s->st_uid==f->uid && (uint32_t)s->st_gid==f->gid && (uint32_t)s->st_mode==f->mode && (uint64_t)s->st_size==f->size && s->st_mtimespec.tv_sec==f->mtime_sec && s->st_mtimespec.tv_nsec==f->mtime_nsec && s->st_ctimespec.tv_sec==f->ctime_sec && s->st_ctimespec.tv_nsec==f->ctime_nsec; }
 static bool same_file(const BIFileSnapshot *a,const BIFileSnapshot *b) { return a->size==b->size && a->dev==b->dev && a->ino==b->ino && a->nlink==b->nlink && a->uid==b->uid && a->gid==b->gid && a->mode==b->mode && a->mtime_sec==b->mtime_sec && a->mtime_nsec==b->mtime_nsec && a->ctime_sec==b->ctime_sec && a->ctime_nsec==b->ctime_nsec && !memcmp(a->sha256,b->sha256,32); }
 static BBError from_bi(BIError e) { switch(e) { case BI_OK:return BB_OK; case BI_EXPIRED:return BB_EXPIRED; case BI_CHANGED:return BB_CHANGED; case BI_IO:return BB_IO; default:return BB_INVALID; } }
@@ -78,21 +88,32 @@ static BBError metadata_hash(int fd,uint64_t deadline,uint8_t out[32],uint64_t *
 static bool good_dir(const struct stat *s) { return S_ISDIR(s->st_mode) && s->st_uid==geteuid() && !(s->st_mode&0022); }
 /* Open and recheck every absolute mapping; no symlink and no writable ancestor. */
 static BBError open_root(const char *path,uint64_t d,int *out,struct stat *root) {
- char buf[PATH_MAX]; int fds[128]; struct stat st[128], after; char *parts[127]; size_t n=0, opened=0; BBError e=BB_INVALID;
+ char buf[PATH_MAX]; int fds[128]; struct stat st[128], after; uint8_t acls[128][32],acl_after[32]; char *parts[127]; size_t n=0, opened=0; BBError e=BB_INVALID;
  if(!path)return BB_INVALID;size_t path_len=strnlen(path,sizeof buf);if(path_len<2||path_len==sizeof buf||path[0]!='/'||path[path_len-1]=='/')return BB_INVALID;
  memcpy(buf,path+1,path_len); char *p=buf; while(*p){ if(n==127)return BB_INVALID; parts[n++]=p; char *slash=strchr(p,'/'); if(!slash)break; *slash=0;p=slash+1; if(!*p)return BB_INVALID; }
  for(size_t i=0;i<n;i++)if(!name_ok(parts[i]))return BB_INVALID;
  if(!timely(d))return BB_EXPIRED;
  fds[0]=open("/",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC); if(fds[0]<0)return BB_IO; opened=1;
- if(fstat(fds[0],&st[0])){e=BB_IO;goto done;}
+ if(fstat(fds[0],&st[0])||!ancestor_acl(fds[0],acls[0])){e=BB_IO;goto done;}
  for(size_t i=0;i<n;i++) {
   if(!timely(d)){e=BB_EXPIRED;goto done;}
   if(!S_ISDIR(st[i].st_mode) || (st[i].st_uid!=0 && st[i].st_uid!=geteuid()) || (st[i].st_mode&0022))goto done;
   int fd=openat(fds[i],parts[i],O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC); if(fd<0){e=BB_IO;goto done;} fds[opened++]=fd;
-  if(fstat(fd,&st[i+1])){e=BB_IO;goto done;}
+  if(fstat(fd,&st[i+1])||(i+1<n&&!ancestor_acl(fd,acls[i+1]))){e=BB_IO;goto done;}
  }
  if(!good_dir(&st[n]))goto done;
- for(size_t i=0;i<=n;i++) { if(!timely(d)){e=BB_EXPIRED;goto done;} if(fstat(fds[i],&after)||!same_stat(&after,&st[i])){e=BB_CHANGED;goto done;} if(i && (fstatat(fds[i-1],parts[i-1],&after,AT_SYMLINK_NOFOLLOW)||!same_stat(&after,&st[i]))){e=BB_CHANGED;goto done;} }
+ for(size_t i=0;i<=n;i++) {
+  if(!timely(d)){e=BB_EXPIRED;goto done;}
+  bool root=i==n;
+  if(!root&&!ancestor_acl(fds[i],acl_after)){e=BB_IO;goto done;}
+  if(fstat(fds[i],&after)||(root?!same_stat(&after,&st[i]):(!same_ancestor(&after,&st[i])||memcmp(acls[i],acl_after,32))) ||
+     (i && (fstatat(fds[i-1],parts[i-1],&after,AT_SYMLINK_NOFOLLOW)||(root?!same_stat(&after,&st[i]):!same_ancestor(&after,&st[i]))))) {
+   #if SAFARIER_BOUND_LOCAL_CANDIDATE
+   fprintf(stderr,"BUNDLE_CHANGE_DIAG source=%s\n",root?"root_mapping":"ancestor_mapping");
+   #endif
+   e=BB_CHANGED;goto done;
+  }
+ }
  *root=st[n]; *out=fds[n]; opened--; e=BB_OK;
  done: while(opened)close(fds[--opened]); return e;
 }
@@ -201,7 +222,11 @@ BBError bb_revalidate(BBInventory *pin,const char *bid,const char *leaf,uint64_t
  #else
  #define NEXT_STAGE(label) do {} while(0)
  #endif
- BBError e=bb_inventory(pin->path,d,&first);if(e!=BB_OK)goto done;if(!equal_inventory(pin,first)){e=BB_CHANGED;goto done;}
+ BBError e=bb_inventory(pin->path,d,&first);if(e!=BB_OK)goto done;if(!equal_inventory(pin,first)){
+ #if SAFARIER_BOUND_LOCAL_CANDIDATE
+ fprintf(stderr,"BUNDLE_CHANGE_DIAG source=inventory_before_pin\n");
+ #endif
+ e=BB_CHANGED;goto done;}
  NEXT_STAGE("plist");
  e=validate_plist(first,bid,leaf,d);if(e!=BB_OK)goto done;
  char mainrel[PATH_MAX],mainpath[PATH_MAX];if(snprintf(mainrel,sizeof mainrel,"Contents/MacOS/%s",leaf)>=(int)sizeof mainrel||snprintf(mainpath,sizeof mainpath,"%s/%s",pin->path,mainrel)>=(int)sizeof mainpath){e=BB_INVALID;goto done;}
@@ -212,7 +237,15 @@ BBError bb_revalidate(BBInventory *pin,const char *bid,const char *leaf,uint64_t
  e=from_bi(bi_static_pin(mainpath,d,&mainpin));if(e!=BB_OK)goto done;
  if(!same_file(&mainpin.file,&main->file)||code.code_hash_len!=mainpin.code_hash_len||memcmp(code.code_hash,mainpin.code_hash,code.code_hash_len)){e=BB_INVALID;goto done;}
  NEXT_STAGE("inventoryAfter");
- e=bb_inventory(pin->path,d,&last);if(e==BB_OK&&!equal_inventory(pin,last))e=BB_CHANGED;
+ e=bb_inventory(pin->path,d,&last);
+ #if SAFARIER_BOUND_LOCAL_CANDIDATE
+ if(e==BB_CHANGED)fprintf(stderr,"BUNDLE_CHANGE_DIAG source=inventory_after_scan\n");
+ #endif
+ if(e==BB_OK&&!equal_inventory(pin,last)){
+ #if SAFARIER_BOUND_LOCAL_CANDIDATE
+ fprintf(stderr,"BUNDLE_CHANGE_DIAG source=inventory_after_pin\n");
+ #endif
+ e=BB_CHANGED;}
  done:bb_free(first);bb_free(last);
  BBError result=timely(d)?e:BB_EXPIRED;
  #if SAFARIER_BOUND_LOCAL_CANDIDATE

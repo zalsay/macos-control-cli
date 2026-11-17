@@ -1,6 +1,7 @@
 import AppKit
 import WebKit
 import SafarierCore
+
 #if SAFARIER_BOUND_LOCAL_CANDIDATE && SAFARIER_INTERNAL_TEST_APP
 import ObjectiveC
 import SafarierObjCSupport
@@ -46,6 +47,7 @@ enum InternalNavigationPolicy {
         let defaultPort = scheme == "https" ? 443 : 80
         return (a.port ?? defaultPort) == (b.port ?? defaultPort)
     }
+
 }
 #endif
 
@@ -70,6 +72,8 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
     private var epoch: UInt64 = 0
     private var invalidated = false
     private var navigating = false
+    private var ordinaryClickActive = false
+    private var controlReleasePreparing = false
     private var navigationSubmitted = false
     private var navigation: WKNavigation?
     private var correlation = NavigationCorrelation()
@@ -80,108 +84,6 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
     private var boundContext: RunnerBinderContext?
     private var registeredGeneration: UUID?
     private var registeredBorrowed = false
-    private var registeredURL: URL?
-    private var registeredNavigationURL: URL?
-    #if SAFARIER_INTERNAL_TEST_APP
-    struct RegisteredFrameSnapshot {
-        let view: NSObject
-        let handle: NSObject
-        let document: NSUUID
-        let url: URL
-    }
-    private final class FrameSnapshotReply {
-        var closed = false
-        var received = false
-        var object: AnyObject?
-    }
-    static func registeredFrameSnapshot(view: NSObject, source: URL, deadline: ContinuousClock.Instant,
-                                        valid: @escaping @MainActor () -> Bool) async throws -> RegisteredFrameSnapshot {
-        func check() throws {
-            guard !Task.isCancelled, ContinuousClock.now < deadline, valid() else { throw AutomationError(code: .targetChanged) }
-        }
-        try check()
-        var handleObject: AnyObject?
-        guard SFRGetObject(view, "_mainFrame", &handleObject, nil).rawValue == 0,
-              let handle = handleObject as? NSObject else { throw AutomationError(code: .targetChanged) }
-        let reply = FrameSnapshotReply()
-        defer { reply.closed = true }
-        let status = SFRCallWithObjectCompletion(view, "_frameInfoFromHandle:completionHandler:", handle, { object in
-            Task { @MainActor in
-                guard !reply.closed, !reply.received else { return }
-                reply.object = object as AnyObject?; reply.received = true
-            }
-        }, nil)
-        guard status.rawValue == 0 else { throw AutomationError(code: .targetChanged) }
-        while !reply.received {
-            try check()
-            try await Task.sleep(nanoseconds: 5_000_000)
-            try check()
-        }
-        try check()
-        guard let frame = reply.object else { throw AutomationError(code: .targetChanged) }
-        var frameView: AnyObject?, requestObject: AnyObject?, documentObject: AnyObject?
-        var main: ObjCBool = false
-        guard SFRGetObject(frame, "webView", &frameView, nil).rawValue == 0, frameView === view,
-              SFRGetBool(frame, "isMainFrame", &main, nil).rawValue == 0, main.boolValue,
-              SFRGetObject(frame, "request", &requestObject, nil).rawValue == 0,
-              let request = requestObject as? NSURLRequest, request.url == source,
-              SFRGetObject(frame, "_documentIdentifier", &documentObject, nil).rawValue == 0,
-              let document = documentObject as? NSUUID else { throw AutomationError(code: .targetChanged) }
-        var latestHandle: AnyObject?
-        guard SFRGetObject(view, "_mainFrame", &latestHandle, nil).rawValue == 0,
-              let latestHandle = latestHandle as? NSObject, latestHandle.isEqual(handle) else { throw AutomationError(code: .targetChanged) }
-        try check()
-        return RegisteredFrameSnapshot(view: view, handle: handle, document: document, url: source)
-    }
-
-    @MainActor final class RegisteredNativePermit {
-        let source: URL
-        let epoch: UInt64
-        var action: WKNavigationAction?
-        var decision: ((WKNavigationActionPolicy) -> Void)?
-        private(set) var sameDocumentSequence: UInt64 = 0
-        private(set) var sameDocumentURL: URL?
-        // A same-URL replace may precede the actual navigation; retain its sequence but keep waiting.
-        var sameDocumentReady: Bool { sameDocumentURL != nil && sameDocumentURL != source }
-        var sourceSnapshot: RegisteredFrameSnapshot?
-        var allowsFullNavigation: Bool { !released && sameDocumentSequence == 0 }
-        func recordSameDocument(view: NSObject?, expectedView: NSObject, epoch: UInt64, abi: Bool,
-                                type: Int, request: URL?, current: URL?, baseline: RegisteredFrameSnapshot) -> Bool {
-            guard !released, action == nil, decision == nil, epoch == self.epoch, abi, [1, 2].contains(type),
-                  view === expectedView, baseline.view === expectedView, baseline.url == source,
-                  let request, request == current, InternalNavigationPolicy.sameOrigin(source, request), sameDocumentSequence < UInt64.max else { return false }
-            sameDocumentSequence += 1; sameDocumentURL = request
-            return true
-        }
-        func acceptsSameDocument(snapshot: RegisteredFrameSnapshot, baseline: RegisteredFrameSnapshot,
-                                 sequence: UInt64, epoch: UInt64, current: URL?, deadline: ContinuousClock.Instant) -> Bool {
-            guard !released, action == nil, decision == nil, epoch == self.epoch, !Task.isCancelled,
-                  ContinuousClock.now < deadline, sameDocumentReady, sequence > 0, sequence == sameDocumentSequence,
-                  let target = sameDocumentURL, current == target, snapshot.url == target, baseline.url == source,
-                  snapshot.view === baseline.view, snapshot.handle.isEqual(baseline.handle),
-                  snapshot.document.isEqual(baseline.document), InternalNavigationPolicy.sameOrigin(source, target) else { return false }
-            return true
-        }
-        private(set) var released = false
-        private var inputWatchdog: Task<Void, Never>?
-        func watchInput(until deadline: ContinuousClock.Instant, expired: @escaping @MainActor () -> Void) {
-            inputWatchdog = Task { @MainActor [weak self] in
-                do { try await Task.sleep(until: deadline, clock: .continuous) } catch { return }
-                guard let self, !self.released else { return }
-                expired()
-            }
-        }
-        func cancelInputWatchdog() { inputWatchdog?.cancel(); inputWatchdog = nil }
-        func releaseForNavigation() {
-            cancelInputWatchdog()
-            released = true
-            decide(.allow)
-        }
-        init(source: URL, epoch: UInt64) { self.source = source; self.epoch = epoch }
-        func decide(_ policy: WKNavigationActionPolicy) { let completion = decision; decision = nil; completion?(policy) }
-    }
-    private var registeredNativePermit: RegisteredNativePermit?
-    #endif
     private var controlReleasePrepared = false
     private var boundFixture: URL?
     private var boundNavigationDelegate: BoundFixtureNavigationDelegate?
@@ -295,12 +197,10 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
         try await context.validate()
         guard context.profileID == session.profile.id,
               session.registeredTargetValid(controller, monitor: monitor),
-              controller.session === session, controller.webView.window === controller.window,
-              let url = controller.webView.url else {
+              controller.session === session, controller.webView.window === controller.window else {
             RegisteredAdmissionDiagnostic.check(false, .attachTarget)
             throw AutomationError(code: .interactionRequired)
         }
-        guard RegisteredAdmissionDiagnostic.check(!controller.webView.isLoading, .loading) else { throw AutomationError(code: .interactionRequired) }
         let target = AutomationTargetIdentity(profileID: session.profile.id,
             runnerInstanceID: context.runnerInstanceID, windowID: controller.registeredWindowID,
             pageID: controller.registeredPageID)
@@ -313,87 +213,12 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
         page.boundContext = context
         page.registeredBorrowed = true
         page.registeredGeneration = generation
-        page.registeredURL = url
         page.configureRegisteredInput(input)
-        let delegate = BoundFixtureNavigationDelegate(fixture: url, context: context, expectedWebView: controller.webView,
-            event: { [weak page] event in page?.handleNavigation(event) }, blocked: { [weak page] in page?.block(.unknown) }, registered: true)
-        #if SAFARIER_INTERNAL_TEST_APP
-        delegate.retiredNavigation = { [weak page] navigation in page?.correlation.isRetired(navigation) == true }
-        delegate.redirectMatches = { [weak page] navigation in
-            guard let page else { return false }
-            return page.correlation.matches(navigation, epoch: page.navigationEpoch)
-        }
-        delegate.nativePermitPresent = { [weak page] in page?.registeredNativePermit != nil }
-        #if SAFARIER_BOUND_LOCAL_CANDIDATE
-        delegate.sameDocumentPermitSnapshot = { [weak page] sourceURL, targetURL in
-            guard let page else { return (false, false, false, false) }
-            if page.registeredNavigationURL != nil {
-                return (false, false, sourceURL.map { page.boundNavigationDelegate?.isAcceptedResponseURL($0) == true } ?? false, false)
-            }
-            guard let permit = page.registeredNativePermit else { return (false, false, false, false) }
-            return (true, page.epoch == permit.epoch, sourceURL != nil && sourceURL == permit.source,
-                    targetURL != nil && targetURL != permit.source)
-        }
-        delegate.sameDocumentCandidate = { [weak page] callbackView, navigation, type, request, current in
-            guard let page, page.navigating, !page.invalidated,
-                  let ownedView = page.webView, callbackView === ownedView, navigation != nil,
-                  (try? context.checkLive()) != nil, (try? context.validateRegisteredTarget(page.identity)) != nil,
-                  (try? page.checkedOwnedObjects()) != nil else {
-                page?.block(.unknown, reason: "registered.sameDocumentRejected")
-                return
-            }
-            if page.registeredNavigationURL != nil {
-                guard let root = page.navigation, let delegate = page.boundNavigationDelegate,
-                      page.correlation.acceptsLoadSameDocument(root, epoch: page.navigationEpoch, type: type,
-                          response: delegate.acceptedResponseURL, request: request, current: current),
-                      let request, delegate.noteLoadSameDocument(request) else {
-                    page.block(.unknown, reason: "registered.loadSameDocumentRejected")
-                    return
-                }
-                registeredNativeTrace("load.same_document.accepted", epoch: page.epoch)
-                return
-            }
-            guard let permit = page.registeredNativePermit, let baseline = permit.sourceSnapshot,
-                  page.epoch == permit.epoch,
-                  permit.recordSameDocument(view: callbackView, expectedView: ownedView, epoch: page.epoch,
-                      abi: BoundFixtureNavigationDelegate.sameDocumentABI, type: type, request: request,
-                      current: current, baseline: baseline) else {
-                page.block(.unknown, reason: "registered.sameDocumentRejected")
-                return
-            }
-        }
-        #endif
-        delegate.nativePolicy = { [weak page] action, decision in
-            var identityChecked = false, identityValid = false
-            guard let page, let permit = page.registeredNativePermit, permit.allowsFullNavigation,
-                  permit.action == nil, permit.decision == nil, page.navigating,
-                  page.epoch == permit.epoch, !page.invalidated,
-                  let webView = page.webView, action.sourceFrame.webView === webView,
-                  action.sourceFrame.isMainFrame, action.targetFrame?.isMainFrame == true,
-                  action.targetFrame?.webView === webView, action.sourceFrame.request.url == permit.source,
-                  let url = action.request.url, InternalNavigationPolicy.isWebURL(url), !action.shouldPerformDownload,
-                  ({ identityChecked = true; identityValid = (try? context.validateRegisteredTarget(page.identity)) != nil; return identityValid })() else {
-                let permit = page?.registeredNativePermit
-                let webView = page?.webView
-                let target = action.targetFrame
-                let ms = DispatchTime.now().uptimeNanoseconds / 1_000_000
-                fputs("REGISTERED_NATIVE_DIAG phase=policy.rejected monotonic_ms=\(ms) epoch=\(permit?.epoch ?? 0) permitPresent=\(permit != nil) released=\(permit?.released == true) actionEmpty=\(permit != nil && permit?.action == nil) decisionEmpty=\(permit != nil && permit?.decision == nil) navigating=\(page?.navigating == true) epochMatches=\(permit != nil && page?.epoch == permit?.epoch) invalidated=\(page?.invalidated == true) sourceOwned=\(webView != nil && action.sourceFrame.webView === webView) sourceMain=\(action.sourceFrame.isMainFrame) targetPresent=\(target != nil) targetMain=\(target?.isMainFrame == true) targetOwned=\(webView != nil && target?.webView === webView) sourceMatches=\(permit != nil && action.sourceFrame.request.url == permit?.source) webURL=\(action.request.url.map { InternalNavigationPolicy.isWebURL($0) } ?? false) download=\(action.shouldPerformDownload) identityChecked=\(identityChecked) identityValid=\(identityValid)\n", stderr)
-                return false
-            }
-            permit.action = action; permit.decision = decision
-            registeredNativeTrace("policy.accepted", epoch: permit.epoch)
-            return true
-        }
-        delegate.hasPendingContinuation = { [weak page] in page?.correlation.hasPendingContinuation == true }
-        #endif
-        page.boundNavigationDelegate = delegate
-        controller.cancelPageRetry()
-        controller.webView.navigationDelegate = delegate
-        session.onAutomationUIBlocked = { [weak page] request in page?.block(request) }
+        // Registered control borrows the user's normal browser delegates. Page
+        // redirects, history and UI are browser events, not control failures.
         do {
             try context.validateRegisteredTarget(target)
             try await context.validate()
-            guard controller.webView.url == url, !controller.webView.isLoading else { throw AutomationError(code: .targetChanged) }
             try session.presentRegisteredControl(controller: controller, generation: generation, input: input)
             try input.startRegistered()
             try await input.waitUntilReady()
@@ -589,14 +414,6 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
             try boundContext.checkLive()
             if registeredGeneration != nil {
                 try boundContext.validateRegisteredTarget(identity)
-                guard let current = webView?.url else { throw AutomationError(code: .targetChanged) }
-                #if SAFARIER_INTERNAL_TEST_APP
-                guard navigationSubmitted ? boundNavigationDelegate?.acceptsCurrentURL(current, previous: registeredURL) == true : current == registeredURL else {
-                    throw AutomationError(code: .targetChanged)
-                }
-                #else
-                guard current == registeredURL else { throw AutomationError(code: .targetChanged) }
-                #endif
                 return try checkedOwnedObjects()
             }
             #if SAFARIER_INTERNAL_TEST_APP
@@ -613,6 +430,17 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
     }
 
     private func checkedOwnedObjects() throws -> (BrowserSession, BrowserWindowController, BrowserWebView, NSWindow) {
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredGeneration != nil {
+            guard !invalidated, let session, let controller, let webView, let window,
+                  session.openControllers.contains(where: { $0 === controller }),
+                  controller.session === session, controller.webView === webView,
+                  controller.window === window, webView.window === window else {
+                throw AutomationError(code: .targetChanged)
+            }
+            return (session, controller, webView, window)
+        }
+        #endif
         guard !invalidated, let session, let controller, let webView, let window,
               session.executionPolicy == .automationBackground,
               session.openControllers.contains(where: { $0 === controller }),
@@ -659,12 +487,20 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
     }
 
     private func viewportValue(version: UInt64) throws -> AutomationViewport {
-        let width = Double(bounds.width), height = Double(bounds.height), factor = Double(scale)
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredGeneration != nil { input?.refreshRegisteredGeometry() }
+        let currentBounds = registeredGeneration != nil ? (webView?.bounds ?? bounds) : bounds
+        let currentScale = registeredGeneration != nil ? (window?.backingScaleFactor ?? scale) : scale
+        let currentZoom = registeredGeneration != nil ? (webView?.pageZoom ?? zoom) : zoom
+        #else
+        let currentBounds = bounds, currentScale = scale, currentZoom = zoom
+        #endif
+        let width = Double(currentBounds.width), height = Double(currentBounds.height), factor = Double(currentScale)
         guard width.isFinite, height.isFinite, factor.isFinite, width > 0, height > 0, factor > 0,
               width * factor <= Double(AutomationLimits.screenshotMaxEdge),
               height * factor <= Double(AutomationLimits.screenshotMaxEdge) else { throw AutomationError(code: .targetChanged) }
         let pixelWidth = Int((width * factor).rounded()), pixelHeight = Int((height * factor).rounded())
-        let value = AutomationViewport(viewportWidthPoints: width, viewportHeightPoints: height, pixelWidth: pixelWidth, pixelHeight: pixelHeight, scaleX: Double(pixelWidth) / width, scaleY: Double(pixelHeight) / height, pageZoom: Double(zoom), viewVersion: version)
+        let value = AutomationViewport(viewportWidthPoints: width, viewportHeightPoints: height, pixelWidth: pixelWidth, pixelHeight: pixelHeight, scaleX: Double(pixelWidth) / width, scaleY: Double(pixelHeight) / height, pageZoom: Double(currentZoom), viewVersion: version)
         guard NativeInputPreflight.viewportValid(value) else { throw AutomationError(code: .targetChanged) }
         return value
     }
@@ -680,25 +516,32 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
     func perform(_ action: AutomationAction, expectedViewport: AutomationViewport) async throws -> AutomationResult {
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         if registeredGeneration != nil {
+            guard !controlReleasePreparing, !controlReleasePrepared else { throw AutomationError(code: .sessionBusy) }
             guard let boundContext else { throw AutomationError(code: .targetChanged) }
             try await boundContext.validate()
             try boundContext.validateRegisteredTarget(identity)
+            guard let input else { throw AutomationError(code: .targetChanged) }
+            guard version == expectedViewport.viewVersion else { throw AutomationDocumentChanged.stale }
             switch action {
             case .navigate(let url):
-                return try await navigateRegistered(url, expectedViewport: expectedViewport)
-            case .navigateByInput(let trigger, let oldVersion):
-                #if SAFARIER_INTERNAL_TEST_APP
-                return try await navigateRegisteredByInput(trigger, oldVersion: oldVersion, expectedViewport: expectedViewport)
-                #else
-                throw AutomationError(code: .uiPolicyUnavailable)
-                #endif
-            #if SAFARIER_INTERNAL_TEST_APP
-            case .insertText, .key:
-                guard !boundPointerHeld, !navigating, let input, let webView else { throw AutomationError(code: .targetChanged) }
-                return try await performInternalText(action, context: boundContext, input: input, webView: webView, viewport: expectedViewport)
-            #endif
+                guard let webView, !Task.isCancelled else { throw AutomationError(code: .targetChanged) }
+                guard webView.load(URLRequest(url: url)) != nil else { throw AutomationError(code: .backendUnavailable, sideEffects: .possible) }
+                return .navigationSubmitted(viewVersion: version)
+            case .navigateByInput(let trigger, _):
+                let nativeAction: AutomationAction
+                switch trigger {
+                case .enter: nativeAction = .key(name: .enter, shift: false)
+                case .click(let point): nativeAction = .click(point: point, viewVersion: version, count: 1)
+                }
+                return try await input.perform(nativeAction, viewVersion: version)
             default:
-                break
+                let delivered = try await input.perform(action, viewVersion: version)
+                switch action {
+                case .mouseDown: boundPointerHeld = true
+                case .mouseUp: boundPointerHeld = false
+                default: break
+                }
+                return delivered
             }
         } else
         if let boundContext {
@@ -752,8 +595,11 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
             return try await navigate(nil, nativeTrigger: trigger, oldVersion: oldVersion, expectedViewport: expectedViewport)
         }
         #endif
-        guard !navigating, try viewport() == expectedViewport, let input else { throw AutomationError(code: .targetChanged) }
+        guard !navigating else { throw AutomationNavigationInProgress.busy }
+        guard try viewport() == expectedViewport, let input else { throw AutomationError(code: .targetChanged) }
         let currentEpoch = epoch
+        if case .click = action { ordinaryClickActive = true }
+        defer { ordinaryClickActive = false }
         let result = try await input.perform(action, viewVersion: expectedViewport.viewVersion)
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         if boundContext != nil {
@@ -765,250 +611,13 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
         }
         try await boundContext?.validate()
         #endif
-        guard !Task.isCancelled, epoch == currentEpoch, try viewport() == expectedViewport else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
+        guard !Task.isCancelled else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
+        if epoch != currentEpoch || version != expectedViewport.viewVersion {
+            guard version > expectedViewport.viewVersion, !invalidated else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
+            _ = try checkedOwnedObjects()
+        } else if try viewport() != expectedViewport { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
         return result
     }
-
-    #if SAFARIER_BOUND_LOCAL_CANDIDATE
-    #if SAFARIER_INTERNAL_TEST_APP
-    private func navigateRegisteredByInput(_ trigger: AutomationNavigationInput, oldVersion: UInt64,
-                                           expectedViewport: AutomationViewport) async throws -> AutomationResult {
-        var traceEpoch = epoch
-        do {
-        guard let context = boundContext, let source = registeredURL, let webView, let window, let oldInput = input,
-              registeredGeneration != nil, !navigating, !boundPointerHeld, oldVersion == version, version < UInt64.max,
-              expectedViewport.viewVersion == version + 1, try viewport(version: expectedViewport.viewVersion) == expectedViewport,
-              webView.url == source, oldInput.activityReady, !oldInput.activityClosed else { throw AutomationError(code: .targetChanged) }
-        if case let .click(point) = trigger, !(try viewport()).contains(point) { throw AutomationError(code: .outOfBounds) }
-        if case .enter = trigger {
-            registeredNativeTrace("eligibility.before", epoch: epoch)
-            try await requireInternalTextEligibility(context: context, input: oldInput, webView: webView,
-                viewport: try viewport(), epoch: epoch, deadline: ContinuousClock.now + .seconds(AutomationLimits.actionSeconds))
-            registeredNativeTrace("eligibility.after", epoch: epoch)
-        }
-        registeredNativeTrace("identity.before", epoch: epoch)
-        try await context.validate()
-        try context.validateRegisteredTarget(identity)
-        registeredNativeTrace("identity.after", epoch: epoch)
-        guard !Task.isCancelled, try viewport() == viewportValue(version: version), webView.url == source else { throw AutomationError(code: .targetChanged) }
-        navigating = true; epoch &+= 1
-        let generation = epoch, deadline = ContinuousClock.now + .seconds(AutomationLimits.navigationSeconds)
-        traceEpoch = generation
-        let permit = RegisteredNativePermit(source: source, epoch: generation)
-        registeredNativePermit = permit; navigationOutcome = nil
-        registeredNativeTrace("permit_created", epoch: generation)
-        do {
-            let inputDeadline = min(deadline, ContinuousClock.now + .seconds(AutomationLimits.actionSeconds))
-            func sameDocumentStateValid() -> Bool {
-                guard !Task.isCancelled, !invalidated, navigating, epoch == generation,
-                      registeredNativePermit === permit, self.input === oldInput, self.webView === webView,
-                      ContinuousClock.now < inputDeadline,
-                      (try? context.checkLive()) != nil, (try? context.validateRegisteredTarget(identity)) != nil,
-                      (try? checkedOwnedObjects()) != nil,
-                      (try? viewportValue(version: expectedViewport.viewVersion)) == expectedViewport else { return false }
-                return webView.url == (permit.sameDocumentURL ?? source)
-            }
-            guard BoundFixtureNavigationDelegate.sameDocumentABI else { throw AutomationError(code: .targetChanged) }
-            registeredNativeTrace("source_snapshot.before", epoch: generation)
-            permit.sourceSnapshot = try await Self.registeredFrameSnapshot(view: webView, source: source, deadline: inputDeadline, valid: sameDocumentStateValid)
-            registeredNativeTrace("source_snapshot.after", epoch: generation)
-            guard sameDocumentStateValid() else { throw AutomationError(code: .targetChanged) }
-            try await context.validate()
-            guard sameDocumentStateValid() else { throw AutomationError(code: .targetChanged) }
-            let action: AutomationAction
-            switch trigger {
-            case .enter: action = .key(name: .enter, shift: false)
-            case let .click(point): action = .click(point: point, viewVersion: oldVersion, count: 1)
-            }
-            permit.watchInput(until: inputDeadline) { [weak self, weak permit] in
-                guard let self, let permit, self.registeredNativePermit === permit else { return }
-                registeredNativeTrace("watchdog.expired", epoch: permit.epoch)
-                self.block(.unknown, reason: "registered.watchdog")
-            }
-            defer { permit.cancelInputWatchdog() }
-            registeredNativeTrace("native.perform.before", epoch: generation)
-            _ = try await oldInput.perform(action, viewVersion: oldVersion)
-            guard sameDocumentStateValid() else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-            try await context.validate()
-            guard sameDocumentStateValid() else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-            registeredNativeTrace("native.perform.after", epoch: generation)
-            registeredNativeTrace("action_wait.before", epoch: generation)
-            while permit.action == nil && !permit.sameDocumentReady {
-                guard !Task.isCancelled, !invalidated, epoch == generation, ContinuousClock.now < inputDeadline else {
-                    throw AutomationError(code: .timeout, sideEffects: .possible)
-                }
-                try await Task.sleep(nanoseconds: 10_000_000)
-                guard sameDocumentStateValid() else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-            }
-            registeredNativeTrace("action_wait.after", epoch: generation)
-            if permit.sameDocumentReady {
-                guard sameDocumentStateValid(), let baseline = permit.sourceSnapshot else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                registeredNativeTrace("same_document.close.before", epoch: generation)
-                oldInput.closeActivity()
-                try await oldInput.waitUntilClosed()
-                registeredNativeTrace("same_document.close.after", epoch: generation)
-                guard sameDocumentStateValid(), oldInput.buttonMask == 0, oldInput.activityStatus == .OK,
-                      !oldInput.requiresOwnedTargetDestruction else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                var finalURL: URL?
-                var acceptedSequence: UInt64 = 0
-                while finalURL == nil {
-                    guard sameDocumentStateValid() else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                    if !permit.sameDocumentReady {
-                        try await Task.sleep(nanoseconds: 10_000_000)
-                        guard sameDocumentStateValid() else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                        continue
-                    }
-                    guard let candidate = permit.sameDocumentURL else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                    let sequence = permit.sameDocumentSequence
-                    do {
-                        let snapshot = try await Self.registeredFrameSnapshot(view: webView, source: candidate, deadline: inputDeadline, valid: sameDocumentStateValid)
-                        guard sameDocumentStateValid() else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                        try await context.validate()
-                        guard sameDocumentStateValid() else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                        // A newer callback during the asynchronous frame query supersedes this snapshot.
-                        if sequence != permit.sameDocumentSequence { continue }
-                        guard permit.acceptsSameDocument(snapshot: snapshot, baseline: baseline, sequence: sequence,
-                            epoch: epoch, current: webView.url, deadline: inputDeadline) else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                        finalURL = candidate; acceptedSequence = sequence
-                        registeredNativeTrace("same_document.snapshot.accepted", epoch: generation)
-                    } catch {
-                        if sameDocumentStateValid(), sequence != permit.sameDocumentSequence { continue }
-                        throw error
-                    }
-                }
-                guard let finalURL else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                let next = try NativePageInput.prepareRegistered(webView: webView, window: window, context: context,
-                                                                  target: identity, viewVersion: expectedViewport.viewVersion)
-                configureRegisteredInput(next)
-                func nextStateValid() -> Bool {
-                    !Task.isCancelled && !invalidated && navigating && epoch == generation &&
-                    registeredNativePermit === permit && input === next && self.webView === webView &&
-                    permit.sameDocumentSequence == acceptedSequence && permit.sameDocumentURL == finalURL &&
-                    webView.url == finalURL && ContinuousClock.now < inputDeadline &&
-                    (try? context.checkLive()) != nil && (try? context.validateRegisteredTarget(identity)) != nil &&
-                    (try? checkedOwnedObjects()) != nil &&
-                    (try? viewportValue(version: expectedViewport.viewVersion)) == expectedViewport
-                }
-                input = next; try next.startRegistered(); try await next.waitUntilReady()
-                guard nextStateValid() else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                registeredNativeTrace("same_document.input.ready", epoch: generation)
-                try await context.validate(); try context.validateRegisteredTarget(identity)
-                guard nextStateValid() else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-                permit.releaseForNavigation(); registeredNativePermit = nil; registeredURL = finalURL
-                version = expectedViewport.viewVersion; navigating = false
-                guard try viewport() == expectedViewport else { throw AutomationError(code: .targetChanged) }
-                registeredNativeTrace("same_document.finished", epoch: generation)
-                return .navigationFinished(viewVersion: version)
-            }
-            guard let request = permit.action, let target = request.request.url, permit.decision != nil,
-                  let delegate = boundNavigationDelegate else { throw AutomationError(code: .targetChanged, sideEffects: .possible) }
-            registeredNativeTrace("input.close.before", epoch: generation)
-            oldInput.closeActivity()
-            try await oldInput.waitUntilClosed()
-            registeredNativeTrace("input.close.after", epoch: generation)
-            guard !Task.isCancelled, !invalidated, epoch == generation, oldInput.buttonMask == 0,
-                  oldInput.activityStatus == .OK, !oldInput.requiresOwnedTargetDestruction else {
-                throw AutomationError(code: .targetChanged, sideEffects: .possible)
-            }
-            try await context.validate(); try context.validateRegisteredTarget(identity)
-            try delegate.beginNativeNavigation(target)
-            registeredNavigationURL = target
-            registeredNativeTrace("policy.release.before", epoch: generation)
-            permit.releaseForNavigation()
-            registeredNativeTrace("policy.release.after", epoch: generation)
-            registeredNativeTrace("navigation.wait.before", epoch: generation)
-            while navigationOutcome == nil {
-                guard !Task.isCancelled, !invalidated, epoch == generation, ContinuousClock.now < deadline else {
-                    throw AutomationError(code: .timeout, sideEffects: .possible)
-                }
-                try await context.validate(); try context.validateRegisteredTarget(identity)
-                _ = try checkedOwnedObjects()
-                try await Task.sleep(nanoseconds: 10_000_000)
-            }
-            registeredNativeTrace("navigation.wait.after", epoch: generation)
-            guard case .finished? = navigationOutcome, let actual = navigation, let finalURL = webView.url,
-                  delegate.canFinishExplicitNavigation(finalURL), correlation.finish(actual, epoch: navigationEpoch),
-                  delegate.finishExplicitNavigation(finalURL), !invalidated, epoch == generation else {
-                throw AutomationError(code: .targetChanged, sideEffects: .possible)
-            }
-            registeredURL = finalURL; registeredNavigationURL = nil; registeredNativePermit = nil
-            navigation = nil; navigationOutcome = nil
-            let next = try NativePageInput.prepareRegistered(webView: webView, window: window, context: context,
-                                                              target: identity, viewVersion: expectedViewport.viewVersion)
-            configureRegisteredInput(next)
-            input = next; try next.startRegistered(); try await next.waitUntilReady()
-            try await context.validate(); try context.validateRegisteredTarget(identity)
-            guard !Task.isCancelled, !invalidated, epoch == generation else { throw AutomationError(code: .targetChanged) }
-            version = expectedViewport.viewVersion; navigating = false
-            guard try viewport() == expectedViewport else { throw AutomationError(code: .targetChanged) }
-            return .navigationFinished(viewVersion: version)
-        } catch {
-            permit.decide(.cancel); registeredNativePermit = nil; block(.unknown, reason: "registered.catch"); throw error
-        }
-        } catch {
-            registeredNativeTrace("catch", epoch: traceEpoch, result: registeredNativeError(error))
-            throw error
-        }
-    }
-    #endif
-    private func navigateRegistered(_ url: URL, expectedViewport: AutomationViewport) async throws -> AutomationResult {
-        #if SAFARIER_INTERNAL_TEST_APP
-        guard let context = boundContext, registeredGeneration != nil, !navigating, !boundPointerHeld,
-              let oldInput = input, let webView, let window, version < UInt64.max,
-              expectedViewport.viewVersion == version + 1,
-              try viewport(version: expectedViewport.viewVersion) == expectedViewport else {
-            throw AutomationError(code: .targetChanged)
-        }
-        try context.validateRegisteredTarget(identity)
-        try await context.validate()
-        guard !Task.isCancelled, try viewport(version: expectedViewport.viewVersion) == expectedViewport else {
-            throw AutomationError(code: .targetChanged)
-        }
-        navigating = true
-        epoch &+= 1
-        let currentEpoch = epoch
-        do {
-            oldInput.closeActivity()
-            try await oldInput.waitUntilClosed()
-            guard !oldInput.requiresOwnedTargetDestruction, oldInput.buttonMask == 0,
-                  oldInput.activityStatus == .OK, !Task.isCancelled else { throw AutomationError(code: .targetChanged) }
-            try await context.validate()
-            try context.validateRegisteredTarget(identity)
-            _ = try checkedOwnedObjects()
-            guard !Task.isCancelled, epoch == currentEpoch, !invalidated else { throw AutomationError(code: .targetChanged) }
-            // The activity belongs to the view/window, so it can observe the
-            // next document while WebKit is still loading it.
-            let next = try NativePageInput.prepareRegistered(webView: webView, window: window, context: context,
-                                                              target: identity, viewVersion: expectedViewport.viewVersion)
-            configureRegisteredInput(next)
-            input = next
-            try next.startRegistered()
-            try await next.waitUntilReady()
-            try await context.validate()
-            try context.validateRegisteredTarget(identity)
-            guard !Task.isCancelled, !invalidated, epoch == currentEpoch,
-                  try viewport(version: expectedViewport.viewVersion) == expectedViewport,
-                  let delegate = boundNavigationDelegate else { throw AutomationError(code: .targetChanged) }
-            try delegate.beginExplicitNavigation(url)
-            registeredNavigationURL = url
-            navigationOutcome = nil
-            navigationSubmitted = true
-            guard let submitted = webView.load(URLRequest(url: url)) else {
-                throw AutomationError(code: .backendUnavailable, sideEffects: .possible)
-            }
-            navigation = submitted
-            navigationEpoch = correlation.begin(submitted)
-            version = expectedViewport.viewVersion
-            return .navigationSubmitted(viewVersion: version)
-        } catch {
-            block(.unknown)
-            throw error
-        }
-        #else
-        throw AutomationError(code: .uiPolicyUnavailable)
-        #endif
-    }
-    #endif
 
     #if SAFARIER_BOUND_LOCAL_CANDIDATE
     /// Only redacted fixed-fixture observations cross the JS boundary.
@@ -1105,12 +714,22 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
         }
         let currentEpoch = epoch
         let deadline = ContinuousClock.now + .seconds(AutomationLimits.actionSeconds)
-        try await requireInternalTextEligibility(context: context, input: input, webView: webView, viewport: viewport,
-                                                 epoch: currentEpoch, deadline: deadline)
+        do {
+            try await requireInternalTextEligibility(context: context, input: input, webView: webView, viewport: viewport,
+                                                     epoch: currentEpoch, deadline: deadline)
+        } catch {
+            if epoch != currentEpoch && version > viewport.viewVersion { throw AutomationDocumentChanged.stale }
+            throw error
+        }
         let delivered = try await input.perform(action, viewVersion: viewport.viewVersion)
         do {
             try await validateFormContext(context: context, input: input, webView: webView, viewport: viewport, epoch: currentEpoch, deadline: deadline)
         } catch {
+            if epoch != currentEpoch, version > viewport.viewVersion, !invalidated {
+                try await context.validate()
+                _ = try checkedOwnedObjects()
+                return delivered
+            }
             context.beginClosing()
             block(.unknown)
             throw AutomationError(code: .targetChanged, sideEffects: .possible)
@@ -1264,16 +883,29 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
     #endif
 
     func captureSnapshot(expectedViewport: AutomationViewport) async throws -> RunnerAutomationPageSnapshot {
+        guard version == expectedViewport.viewVersion else { throw AutomationDocumentChanged.stale }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredGeneration != nil {
+            guard let input else { throw AutomationError(code: .targetChanged) }
+            _ = try checkedObjects()
+            let snapshot = try await input.captureSnapshot(viewVersion: version)
+            return RunnerAutomationPageSnapshot(png: snapshot.png, viewport: snapshot.viewport)
+        }
+        #endif
         guard (!navigating || navigationSubmitted), try viewport() == expectedViewport, let input else { throw AutomationError(code: .targetChanged) }
-        #if SAFARIER_BOUND_LOCAL_CANDIDATE
-        try await boundContext?.validate()
-        #endif
         let currentEpoch = epoch
-        let snapshot = try await input.captureSnapshot(viewVersion: expectedViewport.viewVersion)
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         try await boundContext?.validate()
         #endif
-        guard !Task.isCancelled, epoch == currentEpoch, try viewport() == expectedViewport, snapshot.viewport == expectedViewport else { throw AutomationError(code: .targetChanged) }
+        guard epoch == currentEpoch, version == expectedViewport.viewVersion else { throw AutomationDocumentChanged.stale }
+        let snapshot: NativePageInput.Snapshot
+        do { snapshot = try await input.captureSnapshot(viewVersion: expectedViewport.viewVersion) }
+        catch { if epoch != currentEpoch { throw AutomationDocumentChanged.stale }; throw error }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        try await boundContext?.validate()
+        #endif
+        guard epoch == currentEpoch, version == expectedViewport.viewVersion else { throw AutomationDocumentChanged.stale }
+        guard !Task.isCancelled, try viewport() == expectedViewport, snapshot.viewport == expectedViewport else { throw AutomationError(code: .targetChanged) }
         return RunnerAutomationPageSnapshot(png: snapshot.png, viewport: snapshot.viewport)
     }
 
@@ -1701,87 +1333,8 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
     }
     #endif
 
-    #if SAFARIER_BOUND_LOCAL_CANDIDATE && SAFARIER_INTERNAL_TEST_APP
-    private func registeredCallbackRejected(_ reason: StaticString, candidate: WKNavigation?) {
-        let ms = DispatchTime.now().uptimeNanoseconds / 1_000_000
-        let matches = candidate.map { correlation.matches($0, epoch: navigationEpoch) } ?? false
-        fputs("REGISTERED_NATIVE_DIAG phase=callback.rejected monotonic_ms=\(ms) reason=\(reason) epoch=\(epoch) navigationEpoch=\(navigationEpoch) candidatePresent=\(candidate != nil) candidateMatches=\(matches) navigating=\(navigating) registeredURLPresent=\(registeredNavigationURL != nil)\n", stderr)
-        block(.unknown, reason: reason)
-    }
-    #endif
-
     private func handleNavigation(_ event: BrowserAutomationNavigationEvent) {
         guard !invalidated else { return }
-        #if SAFARIER_BOUND_LOCAL_CANDIDATE
-        if registeredGeneration != nil {
-            #if SAFARIER_INTERNAL_TEST_APP
-            switch event {
-            case let .started(candidate), let .committed(candidate), let .finished(candidate), let .failed(candidate, _, _):
-                if let candidate, correlation.isRetired(candidate) { return }
-            case .processTerminated, .closed: break
-            }
-            guard navigating, registeredNavigationURL != nil else { registeredCallbackRejected("registered.state", candidate: nil); return }
-            switch event {
-            case .processTerminated:
-                registeredCallbackRejected("registered.processTerminated", candidate: nil)
-            case .closed:
-                registeredCallbackRejected("registered.closed", candidate: nil)
-            case let .started(candidate):
-                if let permit = registeredNativePermit, permit.released {
-                    guard let candidate, permit.epoch == epoch, permit.decision == nil else { registeredCallbackRejected("registered.started.permit", candidate: candidate); return }
-                    navigation = candidate
-                    navigationEpoch = correlation.begin(candidate)
-                    registeredNativePermit = nil
-                    return
-                }
-                guard let candidate, correlation.matches(candidate, epoch: navigationEpoch), navigationOutcome == nil else { registeredCallbackRejected("registered.started.correlation", candidate: candidate); return }
-            case let .committed(candidate):
-                guard let candidate, let url = webView?.url,
-                      boundNavigationDelegate?.isAcceptedResponseURL(url) == true, navigationOutcome == nil,
-                      correlation.noteCommitted(candidate, epoch: navigationEpoch) else { registeredCallbackRejected("registered.committed", candidate: candidate); return }
-            case let .finished(candidate):
-                guard let candidate, let url = webView?.url,
-                      boundNavigationDelegate?.isAcceptedResponseURL(url) == true, navigationOutcome == nil,
-                      correlation.noteFinished(candidate, epoch: navigationEpoch) else { registeredCallbackRejected("registered.finished", candidate: candidate); return }
-                if navigationSubmitted {
-                    guard let delegate = boundNavigationDelegate, delegate.finishExplicitNavigation(url),
-                          correlation.finish(candidate, epoch: navigationEpoch) else {
-                        registeredCallbackRejected("registered.submitted.finished", candidate: candidate); return
-                    }
-                    registeredURL = url
-                    registeredNavigationURL = nil
-                    navigation = nil
-                    navigationSubmitted = false
-                    navigating = false
-                } else {
-                    navigationOutcome = .finished
-                }
-            case let .failed(candidate, error, provisional):
-                if let candidate, correlation.isRetired(candidate) { return }
-                guard let candidate, correlation.matches(candidate, epoch: navigationEpoch), navigationOutcome == nil else { registeredCallbackRejected("registered.failed", candidate: candidate); return }
-                if navigationSubmitted {
-                    // Loading failure is page state for observe, not a failed
-                    // completion receipt for an already submitted command.
-                    guard let url = webView?.url, let delegate = boundNavigationDelegate,
-                          delegate.endSubmittedNavigation(url, previous: registeredURL),
-                          correlation.finish(candidate, epoch: navigationEpoch) else {
-                        registeredCallbackRejected("registered.submitted.failed", candidate: candidate); return
-                    }
-                    registeredURL = url
-                    registeredNavigationURL = nil
-                    navigation = nil
-                    navigationSubmitted = false
-                    navigating = false
-                } else {
-                    navigationOutcome = .failed(error, provisional: provisional)
-                }
-            }
-            #else
-            block(.unknown)
-            #endif
-            return
-        }
-        #endif
         switch event {
         case .processTerminated, .closed:
             block(.unknown)
@@ -1898,8 +1451,6 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
 
     private func block(_ request: BackgroundUIRequest, reason: StaticString = "unknown") {
         #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
-        registeredNativePermit?.decide(.cancel)
-        registeredNativePermit = nil
         let nativeDecision = detachNativeNavigationDecision()
         let ms = DispatchTime.now().uptimeNanoseconds / 1_000_000
         fputs("NAV_DIAG phase=block monotonic_ms=\(ms) reason=\(reason) request=\(request.rawValue) invalidated=\(invalidated)\n", stderr)
@@ -1931,6 +1482,14 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
     }
 
     func quiesceInput() {
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredGeneration != nil {
+            // Stop accepting new work; borrowed cleanup performs any required
+            // mouse-up before releasing the activity on this same target.
+            controlReleasePreparing = true
+            return
+        }
+        #endif
         #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
         if nativeNavigationPermit != nil { block(.unknown); return }
         #endif
@@ -1939,15 +1498,23 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
 
     func prepareControlRelease() async throws {
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
-        guard !controlReleasePrepared, !invalidated, (!navigating || navigationSubmitted), !boundPointerHeld,
-              let context = boundContext, let input, input.buttonMask == 0,
+        guard !controlReleasePrepared, !invalidated, (!navigating || navigationSubmitted),
+              let context = boundContext, let input,
               !input.requiresOwnedTargetDestruction else { throw AutomationError(code: .sessionBusy) }
+        if registeredGeneration == nil && (boundPointerHeld || input.buttonMask != 0) { throw AutomationError(code: .sessionBusy) }
+        controlReleasePreparing = true
+        defer { controlReleasePreparing = false }
         #if SAFARIER_INTERNAL_TEST_APP
-        guard registeredNativePermit == nil, nativeNavigationPermit == nil, pendingContinuation == nil,
+        guard nativeNavigationPermit == nil, pendingContinuation == nil,
               !correlation.hasPendingContinuation else { throw AutomationError(code: .sessionBusy) }
         #endif
         _ = try checkedObjects()
         try await context.validate()
+        if registeredGeneration != nil {
+            try await input.releaseRegisteredButtonIfHeld()
+            boundPointerHeld = false
+            try await input.drain()
+        }
         guard !Task.isCancelled, self.input === input, !invalidated, (!navigating || navigationSubmitted),
               !boundPointerHeld, input.buttonMask == 0 else { throw AutomationError(code: .cancelled) }
         input.closeActivity()
@@ -1974,9 +1541,6 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
         try context.checkLive()
         let (session, controller, _, _) = try checkedObjects()
         if let generation = registeredGeneration {
-            #if SAFARIER_INTERNAL_TEST_APP
-            guard registeredNativePermit == nil else { throw AutomationError(code: .sessionBusy) }
-            #endif
             try context.validateRegisteredTarget(identity)
             guard session.restoreRegisteredControl(controller: controller, generation: generation, input: input) else {
                 throw AutomationError(code: .uiPolicyUnavailable)
@@ -2008,7 +1572,6 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
         self.input = nil
         boundContext = nil
         registeredGeneration = nil
-        registeredURL = nil
         #else
         throw AutomationError(code: .uiPolicyUnavailable)
         #endif
@@ -2027,10 +1590,6 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         if registeredBorrowed && registeredGeneration == nil { return false }
         if let generation = registeredGeneration {
-            #if SAFARIER_INTERNAL_TEST_APP
-            registeredNativePermit?.decide(.cancel)
-            registeredNativePermit = nil
-            #endif
             invalidated = true
             epoch &+= 1
             correlation.invalidate()
@@ -2045,8 +1604,7 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
             boundContext = nil
             boundNavigationDelegate = nil
             registeredGeneration = nil
-            registeredURL = nil
-            self.session = nil
+                self.session = nil
             self.controller = nil
             webView = nil
             window = nil
@@ -2113,7 +1671,6 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
 @MainActor
 private final class BoundFixtureNavigationDelegate: NSObject, WKNavigationDelegate {
     private let fixture: URL
-    private let registered: Bool
     private let context: RunnerBinderContext
     private weak var expectedWebView: WKWebView?
     private let event: (BrowserAutomationNavigationEvent) -> Void
@@ -2127,80 +1684,11 @@ private final class BoundFixtureNavigationDelegate: NSObject, WKNavigationDelega
     private var initialActionPending = false
     var nativePolicy: ((WKNavigationAction, @escaping (WKNavigationActionPolicy) -> Void) -> Bool)?
     var nativePermitPresent: (() -> Bool)?
-    #if SAFARIER_BOUND_LOCAL_CANDIDATE
-    var sameDocumentPermitSnapshot: ((URL?, URL?) -> (present: Bool, epochMatches: Bool, sourceMatches: Bool, targetDiffersFromSource: Bool))?
-    var sameDocumentCandidate: ((WKWebView?, WKNavigation?, Int, URL?, URL?) -> Void)?
-    #endif
     var retiredNavigation: ((WKNavigation) -> Bool)?
     var redirectMatches: ((WKNavigation) -> Bool)?
     var reserveContinuation: ((WKNavigationAction) -> Bool)?
     var confirmProvisionalRedirect: ((WKNavigation) -> Bool)?
     var hasPendingContinuation: (() -> Bool)?
-
-    #if SAFARIER_BOUND_LOCAL_CANDIDATE
-    private var sameDocumentABIReported = false
-    private static let sameDocumentSelector = NSSelectorFromString("_webView:navigation:didSameDocumentNavigation:")
-    static let sameDocumentABI: Bool = {
-        guard let proto = objc_getProtocol("WKNavigationDelegatePrivate") else { return false }
-        let descriptor = protocol_getMethodDescription(proto, sameDocumentSelector, false, true)
-        guard descriptor.name != nil, let protocolTypes = descriptor.types,
-              String(cString: protocolTypes) == "v40@0:8@16@24q32",
-              let implementation = class_getInstanceMethod(BoundFixtureNavigationDelegate.self, sameDocumentSelector),
-              let implementationTypes = method_getTypeEncoding(implementation) else { return false }
-        return String(cString: implementationTypes) == String(cString: protocolTypes)
-    }()
-
-    override func responds(to aSelector: Selector!) -> Bool {
-        if aSelector == Self.sameDocumentSelector {
-            let supported = registered && Self.sameDocumentABI
-            if registered && !sameDocumentABIReported {
-                sameDocumentABIReported = true
-                fputs("REGISTERED_SAME_DOCUMENT_DIAG phase=abi monotonic_ms=\(DispatchTime.now().uptimeNanoseconds / 1_000_000) supported=\(supported)\n", stderr)
-            }
-            return supported
-        }
-        return super.responds(to: aSelector)
-    }
-
-    @objc(_webView:navigation:didSameDocumentNavigation:)
-    private func observeSameDocument(_ callbackWebView: WKWebView?, navigation: AnyObject?, type: Int) {
-        var frameObject: AnyObject?, requestObject: AnyObject?
-        var frameStatus = -1, userStatus = -1, requestStatus = -1
-        var userInitiated: ObjCBool = false
-        let nav = navigation as? WKNavigation
-        if let nav {
-            frameStatus = Int(SFRGetObject(nav, "_initiatingFrame", &frameObject, nil).rawValue)
-            userStatus = Int(SFRGetBool(nav, "_isUserInitiated", &userInitiated, nil).rawValue)
-            requestStatus = Int(SFRGetObject(nav, "_request", &requestObject, nil).rawValue)
-        }
-        let frame = frameObject as? WKFrameInfo
-        var frameViewObject: AnyObject?, frameRequestObject: AnyObject?
-        var sourceObject: AnyObject?, targetObject: AnyObject?, currentObject: AnyObject?
-        var frameViewStatus = -1, frameMainStatus = -1, frameRequestStatus = -1, sourceStatus = -1
-        var targetStatus = -1, currentStatus = -1
-        var sourceMain: ObjCBool = false
-        if let frame {
-            frameViewStatus = Int(SFRGetObject(frame, "webView", &frameViewObject, nil).rawValue)
-            frameMainStatus = Int(SFRGetBool(frame, "isMainFrame", &sourceMain, nil).rawValue)
-            frameRequestStatus = Int(SFRGetObject(frame, "request", &frameRequestObject, nil).rawValue)
-        }
-        if let request = frameRequestObject as? NSURLRequest { sourceStatus = Int(SFRGetObject(request, "URL", &sourceObject, nil).rawValue) }
-        if let request = requestObject as? NSURLRequest { targetStatus = Int(SFRGetObject(request, "URL", &targetObject, nil).rawValue) }
-        if let callbackWebView { currentStatus = Int(SFRGetObject(callbackWebView, "URL", &currentObject, nil).rawValue) }
-        let sourceURL = sourceObject as? URL
-        let targetURL = targetObject as? URL
-        let currentURL = currentObject as? URL
-        let snapshot = sameDocumentPermitSnapshot?(sourceURL, targetURL) ?? (present: false, epochMatches: false, sourceMatches: false, targetDiffersFromSource: false)
-        let navClass = navigation == nil ? "none" : (nav != nil ? "WKNavigation" : "other")
-        let callbackViewOwned = callbackWebView != nil && expectedWebView === callbackWebView
-        let sourceOwned = expectedWebView != nil && (frameViewObject as? WKWebView) === expectedWebView
-        fputs("REGISTERED_SAME_DOCUMENT_DIAG phase=callback monotonic_ms=\(DispatchTime.now().uptimeNanoseconds / 1_000_000) type=\(type) callbackViewPresent=\(callbackWebView != nil) callbackViewOwned=\(callbackViewOwned) navPresent=\(navigation != nil) navClass=\(navClass) framePresent=\(frame != nil) sourceOwned=\(sourceOwned) sourceMain=\(sourceMain.boolValue) sourceMatches=\(snapshot.sourceMatches) targetDiffersFromSource=\(snapshot.targetDiffersFromSource) currentURLmatchesRequest=\(currentURL != nil && targetURL != nil && currentURL == targetURL) userInitiated=\(userInitiated.boolValue) permitPresent=\(snapshot.present) epochMatches=\(snapshot.epochMatches) frameStatus=\(frameStatus) userStatus=\(userStatus) requestStatus=\(requestStatus) frameViewStatus=\(frameViewStatus) frameMainStatus=\(frameMainStatus) frameRequestStatus=\(frameRequestStatus) sourceStatus=\(sourceStatus) targetStatus=\(targetStatus) currentStatus=\(currentStatus)\n", stderr)
-        if registered {
-            let frameValid = frameStatus == 0 && (frameObject == nil || (frame != nil && sourceOwned && sourceMain.boolValue && snapshot.sourceMatches))
-            sameDocumentCandidate?(callbackWebView, frameValid && requestStatus == 0 && targetStatus == 0 && currentStatus == 0 ? nav : nil, type, targetURL, currentURL)
-        }
-    }
-    #endif
 
     private func isWebURL(_ url: URL) -> Bool {
         InternalNavigationPolicy.isWebURL(url)
@@ -2239,25 +1727,6 @@ private final class BoundFixtureNavigationDelegate: NSObject, WKNavigationDelega
     func isAcceptedResponseURL(_ url: URL) -> Bool {
         explicitURL != nil && finalResponseURL == url && allowedURLs.contains(url) && isWebURL(url)
     }
-    var acceptedResponseURL: URL? {
-        guard let finalResponseURL, isAcceptedResponseURL(finalResponseURL) else { return nil }
-        return finalResponseURL
-    }
-    func noteLoadSameDocument(_ url: URL) -> Bool {
-        guard let response = acceptedResponseURL, InternalNavigationPolicy.sameOrigin(response, url) else { return false }
-        allowedURLs.insert(url)
-        finalResponseURL = url
-        retryKnownGET = false
-        return true
-    }
-    func endSubmittedNavigation(_ current: URL, previous: URL?) -> Bool {
-        guard explicitURL != nil, acceptsCurrentURL(current, previous: previous),
-              (try? context.checkLive()) != nil else { return false }
-        explicitURL = nil
-        redirectPending = false
-        initialActionPending = false
-        return true
-    }
     func canFinishExplicitNavigation(_ url: URL) -> Bool { isAcceptedResponseURL(url) }
     func finishExplicitNavigation(_ url: URL) -> Bool {
         guard canFinishExplicitNavigation(url) else { return false }
@@ -2267,9 +1736,8 @@ private final class BoundFixtureNavigationDelegate: NSObject, WKNavigationDelega
         return true
     }
     #endif
-    init(fixture: URL, context: RunnerBinderContext, expectedWebView: WKWebView, event: @escaping (BrowserAutomationNavigationEvent) -> Void, blocked: @escaping () -> Void, registered: Bool = false) {
-        self.fixture = fixture; self.context = context; self.expectedWebView = expectedWebView; self.event = event; self.blocked = blocked; self.registered = registered
-        self.admitted = registered
+    init(fixture: URL, context: RunnerBinderContext, expectedWebView: WKWebView, event: @escaping (BrowserAutomationNavigationEvent) -> Void, blocked: @escaping () -> Void) {
+        self.fixture = fixture; self.context = context; self.expectedWebView = expectedWebView; self.event = event; self.blocked = blocked
     }
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard webView === expectedWebView else { decisionHandler(.cancel); context.beginClosing(); blocked(); return }
@@ -2279,24 +1747,11 @@ private final class BoundFixtureNavigationDelegate: NSObject, WKNavigationDelega
             decisionHandler(.cancel); context.beginClosing(); blocked(); return
         }
         if admitted {
-            #if SAFARIER_BOUND_LOCAL_CANDIDATE
-            var contextLive = false
-            guard ({ contextLive = (try? context.checkLive()) != nil; return contextLive })(), let frame = action.targetFrame,
-                  let url = action.request.url, !action.shouldPerformDownload else {
-                if registered {
-                    let ms = DispatchTime.now().uptimeNanoseconds / 1_000_000
-                    fputs("REGISTERED_NATIVE_DIAG phase=actionAdmission monotonic_ms=\(ms) contextLive=\(contextLive) targetPresent=\(action.targetFrame != nil) urlPresent=\(action.request.url != nil) download=\(action.shouldPerformDownload)\n", stderr)
-                }
-                logCancel("actionAdmission", mainFrame: action.targetFrame?.isMainFrame == true)
-                decisionHandler(.cancel); context.beginClosing(); blocked(); return
-            }
-            #else
             guard (try? context.checkLive()) != nil, let frame = action.targetFrame,
                   let url = action.request.url, !action.shouldPerformDownload else {
                 logCancel("actionAdmission", mainFrame: action.targetFrame?.isMainFrame == true)
                 decisionHandler(.cancel); context.beginClosing(); blocked(); return
             }
-            #endif
             if !frame.isMainFrame {
                 guard InternalNavigationPolicy.allowsFrameURL(url) else {
                     logCancel("subframeURL", mainFrame: false)
@@ -2350,7 +1805,7 @@ private final class BoundFixtureNavigationDelegate: NSObject, WKNavigationDelega
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
         guard webView === expectedWebView else { decisionHandler(.cancel); context.beginClosing(); blocked(); return }
         #if SAFARIER_INTERNAL_TEST_APP
-        if admitted, let url = response.response.url, (registered || url != fixture) {
+        if admitted, let url = response.response.url, url != fixture {
             let disposition = (response.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
             guard (try? context.checkLive()) != nil, response.canShowMIMEType,
                   !(response.isForMainFrame && disposition.hasPrefix("attachment")),

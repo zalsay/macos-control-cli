@@ -26,14 +26,14 @@ enum RegistrationFrame {
     }
 }
 
-/// Never evict accepted epochs: reaching the bound closes this root instead of
-/// letting an old generation nonce become valid again.
+/// Never evict accepted epochs or admit an old generation nonce again.
+/// Production roots have no count limit; explicit capacities remain available to callers.
 struct RegistrationEpochHistory {
     private var accepted = Set<UUID>()
-    private let capacity: Int
-    init(capacity: Int = 4096) { self.capacity = capacity }
+    private let capacity: Int?
+    init(capacity: Int? = nil) { self.capacity = capacity }
     mutating func accept(_ epoch: UUID) -> Bool {
-        guard capacity > 0, accepted.count < capacity, !accepted.contains(epoch) else { return false }
+        guard capacity.map({ $0 > 0 && accepted.count < $0 }) ?? true, !accepted.contains(epoch) else { return false }
         accepted.insert(epoch)
         return true
     }

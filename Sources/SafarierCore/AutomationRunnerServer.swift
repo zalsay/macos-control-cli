@@ -234,7 +234,7 @@ public actor AutomationRunnerServer {
         do {
             guard !stopped, seamPhase == phase, context.channel === channel else { throw FixtureContextFailure.wrongPhase }
             if let requestID { guard tasks[requestID] != nil, ordinary.contains(requestID) || reserved.contains(requestID) else { throw FixtureContextFailure.wrongPhase } }
-            let d = try deadline ?? FrameDeadline(lifetimeStart: context.lifetimeStart)
+            let d = try deadline ?? FrameDeadline(lifetimeStart: context.lifetimeStart, registeredInteractive: context.registrationNonce != nil)
             try await withTaskCancellationHandler(operation: {
                 try await context.check(deadline: d, establishPeer: establishPeer, requirePeer: !establishPeer)
             }, onCancel: { context.revocation.revoke() })
@@ -343,7 +343,10 @@ public actor AutomationRunnerServer {
                     }
                     let frame: Data
                     do {
-                        guard let received = try await AutomationChannelDeadline.run(channel: channel, seconds: idleSeconds, operation: { try await receive() }) else {
+                        let receivedFrame: Data?
+                        if fixtureContext?.registrationNonce != nil { receivedFrame = try await receive() }
+                        else { receivedFrame = try await AutomationChannelDeadline.run(channel: channel, seconds: idleSeconds, operation: { try await receive() }) }
+                        guard let received = receivedFrame else {
                             #if SAFARIER_BOUND_LOCAL_CANDIDATE
                             hoverFailure("server.read_eof", "eof")
                             #endif
@@ -433,7 +436,7 @@ public actor AutomationRunnerServer {
         do {
             let admission: SealedWriteAdmission?
             if let context = fixtureContext {
-                let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart)
+                let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart, registeredInteractive: context.registrationNonce != nil)
                 admission = try mintWrite(bytes, deadline: deadline, cap: min(idleSeconds, 2), kind: .diagnostic)
             } else { admission = nil }
             try await fixtureCheck("diagnostic-presend", phase: 6, deadline: admission?.deadline)
@@ -470,7 +473,7 @@ public actor AutomationRunnerServer {
             #endif
             let admission: SealedWriteAdmission?
             if let context = fixtureContext {
-                let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart)
+                let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart, registeredInteractive: context.registrationNonce != nil)
                 admission = try mintWrite(bytes, deadline: deadline, cap: idleSeconds, kind: .response(requestID))
             } else { admission = nil }
             NavigationDiagnostic.emit(request, "runner.reply.queued", NavigationDiagnostic.result(outcome))
@@ -624,17 +627,22 @@ extension AutomationRunnerServer {
             }
             let now = DispatchTime.now().uptimeNanoseconds
             guard now >= deadline.lifetimeStart, now - deadline.lifetimeStart < UInt64(AutomationLimits.generationSeconds * 1_000_000_000) else { throw HarnessError.deadline }
-            let timer = DispatchSource.makeTimerSource(queue: .global())
-            let (lifeEnd, overflow) = deadline.lifetimeStart.addingReportingOverflow(UInt64(AutomationLimits.generationSeconds * 1_000_000_000))
-            guard !overflow else { throw HarnessError.invalidClock }
-            seamLifetimeEnd = lifeEnd
-            timer.schedule(deadline: DispatchTime(uptimeNanoseconds: lifeEnd))
-            let ownedChannel = channel, revocation = fixtureContext?.revocation
-            timer.setEventHandler { [weak self] in
-                revocation?.revoke(); ownedChannel.close()
-                Task { await self?.seamExpired() }
+            if fixtureContext?.registrationNonce != nil {
+                // A registered browser stays connected until explicitly released or the channel fails.
+                seamLifetimeEnd = UInt64.max
+            } else {
+                let timer = DispatchSource.makeTimerSource(queue: .global())
+                let (lifeEnd, overflow) = deadline.lifetimeStart.addingReportingOverflow(UInt64(AutomationLimits.generationSeconds * 1_000_000_000))
+                guard !overflow else { throw HarnessError.invalidClock }
+                seamLifetimeEnd = lifeEnd
+                timer.schedule(deadline: DispatchTime(uptimeNanoseconds: lifeEnd))
+                let ownedChannel = channel, revocation = fixtureContext?.revocation
+                timer.setEventHandler { [weak self] in
+                    revocation?.revoke(); ownedChannel.close()
+                    Task { await self?.seamExpired() }
+                }
+                seamLifetimeTimer = timer; timer.resume()
             }
-            seamLifetimeTimer = timer; timer.resume()
             // Installation already made pre-hello checks; peer last-use cannot be asserted yet.
             guard let hello = try await deadline.run(channel: channel, operation: { try await lease.receive() }) else { throw V1SeamError.eof }
             guard seamPhase == 1, !stopped else { throw V1SeamError.invalidPhase }
@@ -853,7 +861,12 @@ private actor FixtureContext {
         try revocation.check(); try Task.checkCancellation()
         guard !released, deadline.lifetimeStart == lifetimeStart else { throw FixtureContextFailure.lifetime }
         _ = try deadline.remaining(); try channel.requireOpen(before: deadline.cutoffNanoseconds())
-        trace?.success(); trace?.begin(.selfIdentity)
+        trace?.success()
+        // The authenticated registered channel pins this process and its peer.
+        // Disk/package validation belongs to startup, not every request/reply.
+        if registrationNonce != nil, peerPinned, !establishPeer,
+           expectedProfile == nil, expectedPreparation == nil { return }
+        trace?.begin(.selfIdentity)
         try bridge.checkSelf(deadline: deadline)
         trace?.success(); trace?.begin(.resources)
         try bridge.checkResources(deadline: deadline)
@@ -867,7 +880,6 @@ private actor FixtureContext {
             trace?.success(); trace?.begin(.parentSecond)
             try bridge.checkActualParent(parent, deadline: deadline)
             trace?.success()
-            if establishPeer { peerPinned = true }
         } else if requirePeer { throw FixtureContextFailure.noPeer }
         let ms = min(2999, Int((try deadline.remaining() * 1000).rounded(.down)))
         guard ms > 0 else { throw HarnessError.deadline }
@@ -884,6 +896,8 @@ private actor FixtureContext {
         try revocation.check(); try Task.checkCancellation(); _ = try deadline.remaining()
         guard !released else { throw FixtureContextFailure.revoked }
         try channel.requireOpen(before: deadline.cutoffNanoseconds())
+        // Publish the pin only after every initial validation has succeeded.
+        if establishPeer { peerPinned = true }
         trace?.success()
     }
     func release() async {
@@ -961,7 +975,7 @@ actor ControllerGenerationContext {
     fileprivate nonisolated let revocation: FixtureRevocation
     nonisolated let lifetimeStart: UInt64
     private let startupCutoff: UInt64
-    private let registrationNonce: String?
+    nonisolated let registrationNonce: String?
     private let expectedSpec: RunnerLaunchSpec
     private let actualArgs: [String]
     private let environment: [String: String]
@@ -1103,6 +1117,11 @@ actor ControllerGenerationContext {
     private func checkAfterSpawnImpl(deadline d: FrameDeadline) async throws {
         try checkOpen(d)
         guard attachAttempted, let originalOwner = owner, let originalBirth = birth else { throw FixtureContextFailure.wrongPhase }
+        if registrationNonce != nil, bootstrapPhase == .clientAttached, peerPinned {
+            guard client != nil, binding != nil else { throw FixtureContextFailure.wrongPhase }
+            guard originalOwner.isRunning else { throw AutomationError(code: .runnerExited) }
+            return
+        }
         let fresh = try bridge.ownedChildMetadata(originalOwner, deadline: d)
         guard KernelIdentityBridge.sameProcessIdentity(originalBirth, fresh) else { throw IdentityBridgeError.rejected }
         let requirePeer = peerPinned
@@ -1201,7 +1220,7 @@ actor ControllerGenerationContext {
                 #endif
                 return nil
             }
-            let d = try FrameDeadline(lifetimeStart: lifetimeStart, controller: ControllerDeadlineSeal(cutoff: callerCutoff))
+            let d = try FrameDeadline(lifetimeStart: lifetimeStart, controller: ControllerDeadlineSeal(cutoff: callerCutoff), registeredInteractive: registrationNonce != nil)
             try checkOpen(d)
             let admission = SealedWriteAdmission(binding: binding, frame: frame, deadline: d,
                                                  cutoff: try d.cutoffNanoseconds(),
@@ -1279,7 +1298,7 @@ actor ControllerGenerationContext {
             guard bootstrapPhase == .clientAttached, peerPinned, client === candidate, candidate.fixtureContext === self else { throw FixtureContextFailure.wrongPhase }
             let cutoff = try await candidate.inboundPendingDeadline(context: self, id: id, generation: generation, reply: reply)
             guard bootstrapPhase == .clientAttached, peerPinned, client === candidate else { throw FixtureContextFailure.wrongPhase }
-            let d = try FrameDeadline(lifetimeStart: lifetimeStart, controller: ControllerDeadlineSeal(cutoff: cutoff))
+            let d = try FrameDeadline(lifetimeStart: lifetimeStart, controller: ControllerDeadlineSeal(cutoff: cutoff), registeredInteractive: registrationNonce != nil)
             try await checkAfterSpawnImpl(deadline: d)
             guard bootstrapPhase == .clientAttached, peerPinned, client === candidate else { throw FixtureContextFailure.wrongPhase }
             let freshCutoff = try await candidate.inboundPendingDeadline(context: self, id: id, generation: generation, reply: reply)
@@ -1374,11 +1393,11 @@ public final class RunnerBinderContext: @unchecked Sendable {
         guard active, !closing, loan.check(), context.channel.isLocallyOpen() else { throw FixtureContextFailure.revoked }
         try context.revocation.check()
         let now = DispatchTime.now().uptimeNanoseconds
-        guard now >= context.lifetimeStart, now - context.lifetimeStart < UInt64(AutomationLimits.generationSeconds * 1_000_000_000) else { throw FixtureContextFailure.lifetime }
+        guard now >= context.lifetimeStart, context.registrationNonce != nil || now - context.lifetimeStart < UInt64(AutomationLimits.generationSeconds * 1_000_000_000) else { throw FixtureContextFailure.lifetime }
     }
     public func validate() async throws {
         try checkLive()
-        let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart)
+        let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart, registeredInteractive: context.registrationNonce != nil)
         do { try await context.check(deadline: deadline, establishPeer: false, requirePeer: true); try checkLive() }
         catch { beginClosing(); throw error }
     }
@@ -1387,20 +1406,20 @@ public final class RunnerBinderContext: @unchecked Sendable {
     public func validatePermissionSecond() async throws { try await validatePermission(checkpoint: .second) }
     private func validatePermission(checkpoint: BinderValidationTrace.Checkpoint) async throws {
         try checkLive()
-        let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart)
+        let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart, registeredInteractive: context.registrationNonce != nil)
         do { try await context.check(deadline: deadline, establishPeer: false, requirePeer: true, trace: BinderValidationTrace(checkpoint: checkpoint)); try checkLive() }
         catch { beginClosing(); throw error }
     }
     #endif
     public func validate(profile: Profile) async throws {
         try checkLive()
-        let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart)
+        let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart, registeredInteractive: context.registrationNonce != nil)
         do { try await context.check(deadline: deadline, establishPeer: false, requirePeer: true, expectedProfile: profile); try checkLive() }
         catch { beginClosing(); throw error }
     }
     public func validate(preparation: RunnerPreparationPlan) async throws {
         try checkLive()
-        let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart)
+        let deadline = try FrameDeadline(lifetimeStart: context.lifetimeStart, registeredInteractive: context.registrationNonce != nil)
         do { try await context.check(deadline: deadline, establishPeer: false, requirePeer: true, expectedPreparation: preparation); try checkLive() }
         catch { beginClosing(); throw error }
     }

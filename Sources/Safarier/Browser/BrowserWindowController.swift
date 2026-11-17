@@ -153,68 +153,36 @@ final class NonActivatingBrowserWindow: NSWindow {
 @MainActor final class RegisteredPresentationLease {
     let id = UUID()
     let window: NonActivatingBrowserWindow
-    let originalPolicy: NSApplication.ActivationPolicy
-    let originalManual: Bool
-    let originalIgnoresMouseEvents: Bool
-    let originalTabbingMode: NSWindow.TabbingMode
-    private let readPolicy: () -> NSApplication.ActivationPolicy
-    private let setPolicy: (NSApplication.ActivationPolicy) -> Bool
-    private let isActive: () -> Bool
     private var restored = false
     private var presentationAttempted = false
 
-    init(window: NonActivatingBrowserWindow,
-         readPolicy: @escaping () -> NSApplication.ActivationPolicy = { NSApp.activationPolicy() },
-         setPolicy: @escaping (NSApplication.ActivationPolicy) -> Bool = { NSApp.setActivationPolicy($0) },
-         isActive: @escaping () -> Bool = { NSApp.isActive }) {
-        self.window = window; self.readPolicy = readPolicy; self.setPolicy = setPolicy; self.isActive = isActive
-        originalPolicy = readPolicy(); originalManual = window.manualInteractionEnabled
-        originalIgnoresMouseEvents = window.ignoresMouseEvents; originalTabbingMode = window.tabbingMode
-    }
+    init(window: NonActivatingBrowserWindow) { self.window = window }
 
     func acquire() -> Bool {
-        guard !restored, window.controlLeaseID == nil, !isActive(),
-              !window.isKeyWindow, !window.isMainWindow else { return false }
+        guard !restored, window.controlLeaseID == nil else { return false }
         window.controlLeaseID = id
-        window.controlLeaseReady = false
-        window.setManualInteractionEnabled(false)
-        window.ignoresMouseEvents = true; window.tabbingMode = .disallowed
-        // AppKit returns false for a no-op policy assignment. Skip only an already matching policy.
-        let switched = readPolicy() == .accessory || setPolicy(.accessory)
-        window.controlLeaseReady = switched && readPolicy() == .accessory && !isActive() &&
-            !window.canBecomeKey && !window.canBecomeMain && !window.isKeyWindow && !window.isMainWindow
-        return window.controlLeaseReady
+        window.controlLeaseReady = true
+        return true
     }
 
     func present() -> Bool {
         guard !presentationAttempted, !restored, window.controlLeaseID == id,
-              window.controlLeaseReady, readPolicy() == .accessory, !isActive(),
-              !window.isKeyWindow, !window.isMainWindow, !window.manualInteractionEnabled,
-              window.ignoresMouseEvents, NSEvent.pressedMouseButtons == 0,
-              BrowserWindowController.registeredWindowOnCurrentScreen(window) else { return false }
+              window.controlLeaseReady else { return false }
         presentationAttempted = true
-        // Startup already presented this window. Attach must preserve its stacking order.
-        return window.controlLeaseID == id && window.controlLeaseReady &&
-            readPolicy() == .accessory && !isActive() && !window.isKeyWindow && !window.isMainWindow &&
-            !window.canBecomeKey && !window.canBecomeMain && NSEvent.pressedMouseButtons == 0 &&
-            BrowserWindowController.registeredWindowOnCurrentScreen(window)
+        return true
     }
 
     func restore(inputDrained: Bool) -> Bool {
-        guard inputDrained, !restored, window.controlLeaseID == id,
-              !window.manualInteractionEnabled, window.ignoresMouseEvents else { return false }
-        // Match retained-browser handoff: restore app policy before enabling
-        // manual interaction. Never activate, make key, or move global focus.
-        guard (readPolicy() == originalPolicy || setPolicy(originalPolicy)), readPolicy() == originalPolicy,
-              !isActive(), !window.isKeyWindow, !window.isMainWindow else { return false }
-        window.setManualInteractionEnabled(originalManual)
-        window.tabbingMode = originalTabbingMode
-        window.ignoresMouseEvents = originalIgnoresMouseEvents
-        window.controlLeaseReady = false; window.controlLeaseID = nil
+        guard inputDrained, !restored, window.controlLeaseID == id else { return false }
+        window.enableManualInteraction()
+        window.ignoresMouseEvents = false
+        guard window.manualInteractionEnabled, !window.ignoresMouseEvents else { return false }
+        window.controlLeaseReady = false
+        window.controlLeaseID = nil
         restored = true
-        return window.manualInteractionEnabled == originalManual &&
-            window.tabbingMode == originalTabbingMode && window.ignoresMouseEvents == originalIgnoresMouseEvents
+        return true
     }
+
 }
 #endif
 
@@ -357,36 +325,16 @@ final class BrowserWindowController: NSObject, NSWindowDelegate, NSToolbarDelega
     typealias RegisteredWindowState = RegisteredPresentationLease
 
     func validateRegisteredAdmission(allowLoading: Bool = false, allowTabGroup: Bool = false) throws {
-        guard let app = NSApp else { RegisteredAdmissionDiagnostic.check(false, .appMissing); throw AutomationError(code: .interactionRequired) }
-        guard RegisteredAdmissionDiagnostic.check(!app.isActive, .appActive),
-              RegisteredAdmissionDiagnostic.check(!window.isKeyWindow, .windowKey),
-              RegisteredAdmissionDiagnostic.check(!window.isMainWindow, .windowMain),
-              RegisteredAdmissionDiagnostic.check(Self.registeredWindowOnCurrentScreen(window), .windowScreen),
-              RegisteredAdmissionDiagnostic.check(window.windowNumber > 0, .windowNumber),
-              RegisteredAdmissionDiagnostic.check(window.attachedSheet == nil, .sheet),
-              RegisteredAdmissionDiagnostic.check((window.tabbedWindows?.count ?? 1) == 1 || (allowTabGroup && window.tabGroup?.selectedWindow === window && window.tabGroup?.isOverviewVisible == false), .tabGroup),
-              RegisteredAdmissionDiagnostic.check(NSEvent.pressedMouseButtons == 0, .mouseButtons),
-              RegisteredAdmissionDiagnostic.check(allowLoading || !webView.isLoading, .loading),
-              RegisteredAdmissionDiagnostic.check(webView.window === window, .webViewWindow),
-              RegisteredAdmissionDiagnostic.check(webView.navigationDelegate === self, .navigationDelegate),
-              RegisteredAdmissionDiagnostic.check(webView.uiDelegate === self, .uiDelegate),
-              RegisteredAdmissionDiagnostic.check(onAutomationNavigation == nil, .automationNavigation),
-              RegisteredAdmissionDiagnostic.check(allowLoading || !isShowingStartPage, .startPage),
-              RegisteredAdmissionDiagnostic.check(!wantsAddressFocus, .addressFocus) else {
-            throw AutomationError(code: .interactionRequired)
-        }
-        // Protocol conformance alone is not evidence of an edit: WKContentView
-        // commonly conforms even when the user is only browsing.
-        if Self.registeredResponderHasEditingConflict(window.firstResponder) {
-            RegisteredAdmissionDiagnostic.check(false, .editing)
-            throw AutomationError(code: .interactionRequired)
-        }
+        guard NSApp != nil, window.windowNumber > 0, webView.window === window,
+              webView.navigationDelegate === self, webView.uiDelegate === self,
+              onAutomationNavigation == nil else { throw AutomationError(code: .interactionRequired) }
+
     }
 
     func beginRegisteredControl(allowTabGroup: Bool = false) throws -> RegisteredWindowState {
         try validateRegisteredAdmission(allowTabGroup: allowTabGroup)
         guard let owned = window as? NonActivatingBrowserWindow,
-              owned.controlLeaseID == nil, !window.ignoresMouseEvents else { RegisteredAdmissionDiagnostic.check(false, .windowLease); throw AutomationError(code: .interactionRequired) }
+              owned.controlLeaseID == nil else { RegisteredAdmissionDiagnostic.check(false, .windowLease); throw AutomationError(code: .interactionRequired) }
         let state = RegisteredWindowState(window: owned)
         let acquired = state.acquire()
         traceRegisteredPresentation("acquire", confirmed: acquired)
@@ -411,24 +359,13 @@ final class BrowserWindowController: NSObject, NSWindowDelegate, NSToolbarDelega
 
     static func registeredPresentationValid(window: NSWindow, webView: BrowserWebView, leaseID: UUID) -> Bool {
         guard let owned = window as? NonActivatingBrowserWindow else { return false }
-        return owned.controlLeaseID == leaseID && owned.controlLeaseReady &&
-            !owned.manualInteractionEnabled && NSApp.activationPolicy() == .accessory && !NSApp.isActive &&
-            registeredWindowOnCurrentScreen(owned) && !owned.canBecomeKey && !owned.canBecomeMain &&
-            !owned.isKeyWindow && !owned.isMainWindow && owned.ignoresMouseEvents &&
-            owned.tabbingMode == .disallowed && webView.window === owned
-    }
-
-    static func registeredResponderHasEditingConflict(_ responder: NSResponder?) -> Bool {
-        if let text = responder as? NSTextView, text.isFieldEditor { return true }
-        if let client = responder as? any NSTextInputClient, client.hasMarkedText() { return true }
-        return false
+        return owned.controlLeaseID == leaseID && owned.controlLeaseReady && webView.window === owned
     }
 
     func restoreRegisteredControl(_ state: RegisteredWindowState, input: NativePageInput) -> Bool {
         guard input.window === window, input.webView === webView,
               input.activityClosed, input.activityStatus == .OK, input.buttonMask == 0,
-              !input.requiresOwnedTargetDestruction, window.ignoresMouseEvents,
-              webView.window === window else { return false }
+              !input.requiresOwnedTargetDestruction, webView.window === window else { return false }
         guard state.window === window else { return false }
         let restored = state.restore(inputDrained: true)
         traceRegisteredPresentation("restore", confirmed: restored)

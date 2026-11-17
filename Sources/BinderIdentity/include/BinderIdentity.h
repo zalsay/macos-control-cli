@@ -52,7 +52,7 @@ enum { BI_F_UNAVAILABLE=1ULL<<0, BI_F_SIZE=1ULL<<1, BI_F_DEV=1ULL<<2,
  BI_F_RUID=1ULL<<12, BI_F_EUID=1ULL<<13, BI_F_BIRTH=1ULL<<14,
  BI_F_STATUS=1ULL<<15, BI_F_FLAGS=1ULL<<16, BI_F_PATH=1ULL<<17,
  BI_F_TOKEN=1ULL<<18, BI_F_HASH_LENGTH=1ULL<<19, BI_F_HASH=1ULL<<20,
- BI_F_CONTENT=1ULL<<21 };
+ BI_F_CONTENT=1ULL<<21, BI_F_ACL=1ULL<<22 };
 #define BI_DEPTH_NA UINT32_MAX
 typedef struct { BIStage stage; uint64_t fields; uint32_t depth; } BIDiagnostic;
 BIError bi_snapshot_diagnostic(const char *, uint64_t, BIFileSnapshot *, BIDiagnostic *);

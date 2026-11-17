@@ -80,7 +80,14 @@ public enum ControlCLIParser {
             guard let target = values["--target"], !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, target.unicodeScalars.count <= 512, target.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else { throw ControlError.invalidRequest }
             op = .clickTarget(connection:try uuid("--connection"),target:target)
         case "navigate":
-            try require(["--connection","--url"]); guard let raw = values["--url"], let url = URL(string:raw), let scheme = url.scheme?.lowercased(), ["http","https"].contains(scheme), let host = url.host, !host.isEmpty, host != ".", url.user == nil, url.password == nil, host.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil else { throw ControlError.invalidRequest }; op = .navigate(connection:try uuid("--connection"),url:url)
+            try require(["--connection", "--url"])
+            guard let raw = values["--url"], !raw.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+                  let url = URL(string: raw), let scheme = url.scheme, !scheme.isEmpty else { throw ControlError.invalidRequest }
+            if ["http", "https"].contains(scheme.lowercased()) {
+                guard let host = url.host, !host.isEmpty, host != ".",
+                      host.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil else { throw ControlError.invalidRequest }
+            }
+            op = .navigate(connection: try uuid("--connection"), url: url)
         case "move", "mouseDown", "mouseUp", "click":
             let keys: Set<String> = ["--connection","--frame","--x","--y"]
             let waitFlags: Set<String> = command == "click" && flags.contains("--wait-navigation") ? ["--wait-navigation"] : []
@@ -90,6 +97,9 @@ public enum ControlCLIParser {
         case "type":
             if flags.contains("--text-stdin") { try require(["--connection","--frame"], flags:["--text-stdin"]); op = .typeFromStdin(connection:try uuid("--connection"),frame:try uuid("--frame")) }
             else { try require(["--connection","--frame","--text"]); guard let text = values["--text"], text.utf8.count <= AutomationLimits.textBytes else { throw ControlError.invalidRequest }; op = .type(connection:try uuid("--connection"),frame:try uuid("--frame"),text:text) }
+        case "back":
+            try require(["--connection", "--frame"])
+            op = .press(connection: try uuid("--connection"), frame: try uuid("--frame"), key: .backspace, shift: false)
         case "press":
             if flags.contains("--wait-navigation") {
                 try require(["--connection","--frame","--key"], flags:["--wait-navigation"])

@@ -56,15 +56,15 @@ sfa authorize            # 默认只查，不弹权限提示
 sfa authorize --request  # 仅用户明确要求授权时执行一次，由用户本人点系统提示
 ```
 
-须已有同位置且通过身份校验的唯一 Manager；该命令不启动 App/环境/daemon，不发送 `SFAu/requ` 业务事件，仅向系统查询或申请这个精确事件范围。等待人工提示不套控制代次90秒期限；不要让外部 driver 用短超时反复重试。返回 JSON 的 `status` 为 `allowed`、`consent_required`、`not_permitted`、`target_changed` 或 `unavailable`，含 `statusDescription`、`osStatus`（未调用时可为 null）、`businessEventSent:false`。仅 `allowed` 退出码为0，其他结果为1，参数错误为64。系统未许可不等于已证实用户刚点拒绝；目标变更时不得使用本次授权结果。
+须已有同位置且通过身份校验的唯一 Manager；该命令不启动 App/环境/daemon，不发送 `SFAu/requ` 业务事件，仅向系统查询或申请这个精确事件范围。等待人工提示不套单次控制操作期限；不要让外部 driver 用短超时反复重试。返回 JSON 的 `status` 为 `allowed`、`consent_required`、`not_permitted`、`target_changed` 或 `unavailable`，含 `statusDescription`、`osStatus`（未调用时可为 null）、`businessEventSent:false`。仅 `allowed` 退出码为0，其他结果为1，参数错误为64。系统未许可不等于已证实用户刚点拒绝；目标变更时不得使用本次授权结果。
 
 默认只读查询在进入权限调用后最多等待5秒；系统权限 API 未及时返回时输出 `unavailable`、`osStatus:-1712`，表示授权状态未知，不代表已授权或拒绝。底层 API 无法取消，迟到结果会被丢弃；命令不自动重试，也不转为申请授权。该期限不包含原有的 Manager 身份核验时间，不适用于 `--request` 的人工同意等待。
 
 权限归属由 macOS TCC 决定，不因 `sfa` 名称固定而跨宿主共享。此前 Copis 缺少 NSAppleEventsUsageDescription 是历史诊断；用户现已在同一 Copis/DSH 宿主实测返回 `allowed`，不再将该缺失描述为当前状态。没有提示或仍未许可时保存结果并停止；不要借 Codex、另一终端或测试 SwiftHost 的授权代替 Copis，也不要重置 TCC。授权成功只证明权限及本次目标身份检查通过，不代表连接、页面控制或业务验收成功。
 
-## 3. 建立短回合，观察页面
+## 3. 建立连接，观察页面
 
-先准备好任务与证据保存位置，再 connect。控制代次最多90秒且不可续期；观察和动作都算在内，留出及时 release 的时间，不在连接后等待人工讨论。普通动作预算10秒；代次的剩余时间也可能更短。导航请求在单一60秒导航预算内最多3次尝试，只有初始打开、地址栏打开或已注册页面显式导航的安全 GET，且未重定向的主帧临时网络失败才允许第2、3次尝试，退避分别为0.5秒和1秒；已提交页面、POST、原生 click/Enter 重放、登录/验证码/证书失败、取消、目标或身份变化、以及结果不确定的情况都不重试。
+已注册浏览器的控制连接不再按90秒代次或60秒空闲自动到期，也不再按剩余代次预算拒绝新命令。单次启动、IPC 与系统调用仍有超时；超时不能解释为网页未执行。sfa 不自动重放输入或导航，agent 根据回执及 observe 决定后续操作，完成后主动 release。
 
 ```sh
 SF_RUNTIME="$(mktemp -d "$HOME/sfc-XXXXXXXX")"
@@ -79,8 +79,8 @@ ctl observe --connection "$CONNECTION_UUID" > "$SF_EVIDENCE/observe.json"
 
 每步检查退出码和 JSON `status`；失败时不要继续粘贴后续命令。control 默认使用当前实际 bundle，无需手写 `--app`；整轮保持同一 App 选择（不切换 `SF_APP`）与 `--runtime`。
 connect 返回 `connection` 与 `viewport`，没有 target；需要比较窗口身份时，`ctl state --connection "$CONNECTION_UUID"` 的 `state.target` 包含 profile/runnerInstance/window/page 四项 identity。
-observe 返回 `frame`、`screenshotPath`、`viewport` 和可选 `ocr`。先查看截图；OCR unavailable 不等于截图失效。需保留证据时，在结束控制前复制 PNG 到独立 evidence，artifact 可能随清理删除。
-`frame` 绑定这次截图，输入坐标是该图的像素坐标；viewport 提供截图尺寸、页面视口与缩放信息。不要猜坐标或把屏幕全局坐标传入；导航后必须重新 observe。
+observe 返回 `frame`、`screenshotPath`、`viewport` 和可选 `ocr`。注册会话的截图文件保留最近32张，超出后轮换旧文件。先查看截图；OCR unavailable 不等于截图失效。需保留证据时，在结束控制前复制 PNG 到独立 evidence，artifact 可能随清理删除。
+`frame` 绑定这次截图，输入坐标是该图的像素坐标；viewport 提供截图尺寸、页面视口与缩放信息。不要把屏幕全局坐标传入。每个连接保留最近32个 frame，不因导航或文档版本变化立即废弃；坐标按所引用截图的 viewport 换算。agent 自行判断是否需要新截图。未知或已移出保留范围的 frame 返回 `INVALID_FRAME`，没有发送输入。
 
 ## 4. 按本轮截图进行原生操作
 
@@ -92,14 +92,20 @@ ctl click --connection "$CONNECTION_UUID" --frame "$FRAME_UUID" --x "$PIXEL_X" -
 ctl type --connection "$CONNECTION_UUID" --frame "$FRAME_UUID" --text "$TEXT"
 printf '%s' "$TEXT" | ctl type --connection "$CONNECTION_UUID" --frame "$FRAME_UUID" --text-stdin
 ctl press --connection "$CONNECTION_UUID" --frame "$FRAME_UUID" --key Tab
+ctl press --connection "$CONNECTION_UUID" --frame "$FRAME_UUID" --key PageDown
+ctl press --connection "$CONNECTION_UUID" --frame "$FRAME_UUID" --key PageUp
 ctl press --connection "$CONNECTION_UUID" --frame "$FRAME_UUID" --key Enter --wait-navigation
+ctl back --connection "$CONNECTION_UUID" --frame "$FRAME_UUID"
 ctl observe --connection "$CONNECTION_UUID"
 ```
 
 `type` 的 `--text` 与 `--text-stdin` 二选一。先通过已支持的原生动作定位输入框；只输入用户授权内容。页面变化后用新截图判断结果，原生回执不等于业务效果成功。
-显式导航现有浏览器使用 `ctl navigate --connection "$CONNECTION_UUID" --url "$URL"`。浏览器接受请求后返回 `navigationSubmitted: true`、`effectVerified: false`，不等待页面加载完成、不自动重试，也不确认搜索或业务效果。旧 frame 随提交失效；agent 应调用 `observe` 获取新 frame，自行判断页面是否到达目标，必要时再次观察。加载过程中允许 `observe` 和 `release`；加载失败不会补发导航完成回执。通道断开、身份或目标校验失败仍返回错误，不能据此自动重复导航。
-链接单击确实需要等待导航时使用 `click ... --count 1 --wait-navigation`，Enter 的 `--wait-navigation` 同样保留显式等待语义。动作预算不足时不发新输入。
-可选语义点击：
+显式导航现有浏览器使用 `ctl navigate --connection "$CONNECTION_UUID" --url "$URL"`。浏览器接受请求后返回 `navigationSubmitted: true`、`effectVerified: false`，不等待页面加载完成、不确认搜索或业务效果。agent 通过 `observe` 自行确认页面。页面重定向、历史变化、加载失败不撤销已提交回执，也不作为关闭控制通道的理由。
+普通原生输入返回 `sent: true`、`effectVerified: false`，表示事件已送出。已注册浏览器的 `click ... --wait-navigation` 和 `press ... --key Enter --wait-navigation` 保留命令兼容，只发送一次输入并返回投递事实，不再等待或断言导航发生。真实目标消失、系统调用或通信失败仍如实返回错误，不能据此自动重复动作。
+
+`press --key PageDown` / `PageUp` 向当前焦点发送原生向下/向上翻页键，名称区分大小写。先让需要滚动的正文区域获得焦点；实际是否滚动、滚动哪个容器由浏览器和页面处理，再用 `observe` 确认。两个按键不接受 `--shift` 或 `--wait-navigation`，不增加鼠标滚轮支持。
+
+`back` 是 `press --key Backspace` 的便捷别名，使用同一个按键投递和回执路径。焦点不在可编辑内容中时，由 Safarier 原生 Backspace 行为处理历史后退；输入框或可编辑内容获得焦点时仍执行退格删除。需要后退时，先通过观察确认焦点，必要时点击页面非编辑区域再发送。没有历史记录时不保证发生页面变化。sfa 不判断后退是否成功，agent 应通过后续 `observe`（需要时结合 `state`）确认。`back` 不接受 `--shift` 或 `--wait-navigation`。
 
 ```sh
 ctl click-target --connection "$CONNECTION_UUID" --target "页面上明确的目标文字"
@@ -119,24 +125,28 @@ ctl daemon stop
 ```
 
 release 成功应含 `controlReleased`：`inputReleased`、`artifactsCleaned`、`browserRetained`、`manualInteractionEnabled` 四项均 true，并记录真实 target。保留原始回执；daemon 退出或 socket 消失不能代替这四项证明。
-正常确认结束后可人工接续，也可对同一 profile 新 connect 开始独立90秒代次；不要重复 launch。旧 connection 不再使用，需要同窗口验收时比较新旧 target。
+
+已注册连接完成首次握手后，请求和回执不再重复扫描包资源、复核进程身份及读取绑定配置。普通命令的 Agent 开关由 Manager 检查，Runner 不再重复读取授权；release 不读取业务授权或配置。首次握手校验、连接失效/取消、请求关联与实际执行对象检查仍保留。
+
+已注册浏览器的 release 使用组合预算：等待已接收输入最多 10 秒、prepare 和 commit 各最多 10 秒、最终通道排空最多 4 秒，总预算 34 秒。Runner 的两阶段握手总期限为 20 秒，每个动作仍单独限时 10 秒。AppleEvent 接收端使用同一总预算，发送端另留 10 秒传输余量。这些期限限定执行和通信，不判断页面效果；任何阶段缺少真实确认仍返回失败。
+正常确认结束后可人工接续，也可对同一 profile 新 connect 开始新的控制连接；不要重复 launch。旧 connection 不再使用，需要同窗口验收时比较新旧 target。
 已有 persistent 环境沿用原 cookie/storage。borrowed cancel/disconnect 的 `retainedBrowser` 与 owned 临时页面的 `cleaned/terminatedOwnedRunner` 是不同证明，不把保留窗口误报为已销毁或已退出。
 
 ## 6. 示例：读取“视频号”可见播放量
 
 1. `sfa profile list` 找到用户授权的“视频号”环境并确认 UUID；已有 Runner 直接 connect，未运行才普通 launch，不创建替代副本或更改 cookie/profile。
-2. observe 保存截图/OCR，按实际可见页面选用原生导航，进入统计页。登录或验证码交用户处理，先结束或明确暂停控制，不让90秒代次跨越人工等待。
+2. observe 保存截图/OCR，按实际可见页面选用原生导航，进入统计页。登录或验证码交用户处理，由 agent 决定何时继续；完成任务后交还控制。
 3. 按用户指定的账号、作品或页面读取实际可见播放量，注明实际可见的标题、发布时间、统计区间及采集时间；未显示的信息注明不可见，不主动扩展到其他指标。未经核图的 OCR 数值标注为候选，无法确认不编造。
 4. 保存授权范围内的截图供核对，release 后保留窗口。只读任务不发布、点赞、评论或发送，不访问隐藏 API/凭据。
 
 ## 7. 遇到限制时
 
-- 90秒是每代控制期限，不是长期注册窗口的寿命。准备好再连接，正常确认结束后可新连接；不能延长或绕过期限。导航的重试最多两次，退避包含在导航的60秒内；未知输入和不确定结果不回放。
+- 已注册控制没有固定90秒寿命；仍需主动 release 并核对交还回执。单次请求超时或传输中断不等于页面未执行，不自动重放。
 - mouseDown/mouseUp 若使用，须在10秒 held 门限内配对；滚轮目前禁用。
 - 不全局输入、不 DOM 合成输入、不用 PID 路由。身份拒绝时检查实际 App 路径、唯一 Manager、授权与 workspace/profile 一致性，以实际错误为准，不修改门禁。
 - `RUNNER_EXITED` 不能单独证明进程已退出；generation 身份采样失败也可映射为此错误。保存原始结果，结合实际进程状态与本次连接阶段日志定位，不盲重连。
 - TIMEOUT、INDETERMINATE 或其他结果不确定时保存原始输出，不盲重试输入或生命周期动作。release 已发出后不再用 disconnect“兜底”。
-- daemon 不因历史 `uncertain` 或丢失 ACK 持续拦截后续显式命令或新 connect；原请求仍如实返回错误，不自动重放。每次执行仍由 Manager/Runner 核验 Agent 开关、身份、目标及期限，正在执行或仍待 ACK 的请求仍受并发门禁限制。daemon stop 成功仅表示本地请求已排空，不能代替 release 的四项交还证明。
+- daemon 不因历史 `uncertain` 或丢失 ACK 持续拦截后续显式命令或新 connect；原请求仍如实返回错误，不自动重放。普通命令由 Manager 检查 Agent 开关，Runner 复用已认证连接并核验实际执行目标及期限，正在执行或仍待 ACK 的请求仍受并发门禁限制。daemon stop 成功仅表示本地请求已排空，不能代替 release 的四项交还证明。
 - 新系统权限提示、验证码或需要人工介入时交用户处理；不擅改权限或抢回前台。记录观察事实，不能仅凭窗口/鼠标没变化就断言用户无干扰。
 
 ### 控制请求诊断日志

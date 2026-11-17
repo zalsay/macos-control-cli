@@ -40,6 +40,7 @@ import Darwin
     private let machine: AutomationSessionMachine
     private let permissionReader: PermissionReader
     private let targetReader: TargetReader
+    private let viewportReader: @MainActor () throws -> AutomationViewport?
     private let actionSink: ActionSink
     private let cleanupSink: CleanupSink
     private let borrowedCleanupReceipt: @MainActor () -> CleanupReceipt?
@@ -59,13 +60,14 @@ import Darwin
     private var schedulerBroken = false
     private var generation: UInt64 = 0
 
-    init(machine: AutomationSessionMachine, permissionReader: @escaping PermissionReader, targetReader: @escaping TargetReader, actionSink: @escaping ActionSink, cleanupSink: @escaping CleanupSink, borrowedCleanupReceipt: @escaping @MainActor () -> CleanupReceipt? = { nil }, now: @escaping Now = { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000 }, sleepUntil: @escaping SleepUntil = { deadline in
+    init(machine: AutomationSessionMachine, permissionReader: @escaping PermissionReader, targetReader: @escaping TargetReader, viewportReader: @escaping @MainActor () throws -> AutomationViewport? = { nil }, actionSink: @escaping ActionSink, cleanupSink: @escaping CleanupSink, borrowedCleanupReceipt: @escaping @MainActor () -> CleanupReceipt? = { nil }, now: @escaping Now = { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000 }, sleepUntil: @escaping SleepUntil = { deadline in
         let current = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
         let delay = max(0, deadline - current)
         guard delay.isFinite, delay < Double(UInt64.max) / 1_000_000_000 else { throw CancellationError() }
         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }) {
         self.machine = machine; self.permissionReader = permissionReader; self.targetReader = targetReader
+        self.viewportReader = viewportReader
         self.actionSink = actionSink; self.cleanupSink = cleanupSink; self.borrowedCleanupReceipt = borrowedCleanupReceipt; self.now = now; self.sleepUntil = sleepUntil
         scheduleDeadline()
     }
@@ -111,6 +113,13 @@ import Darwin
     }
     private func authorize(_ id: UUID, postTicket: AutomationSessionTicket?) {
         guard let call = calls[id] else { return }
+        // Manager checks the Agent switch before admitting registered commands.
+        // The native sink verifies the actual bound objects at execution time.
+        if machine.isRegisteredInteractive {
+            guard isLive(id, ticket: postTicket) else { return }
+            targetResult(id, value: machine.boundTarget, ticket: postTicket)
+            return
+        }
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         switch call.request.action {
         case .releaseControl, .commitControlRelease: NavigationDiagnostic.emit(call.request, "runner.permission.initial.before")
@@ -175,28 +184,32 @@ import Darwin
         if let ticket {
             guard machine.currentTicket == ticket else { return }
             let sink = actionSink, finalPermission = permissionReader, finalTarget = targetReader
+            let registered = machine.isRegisteredInteractive
             retainReader(id)
             call.worker = Task { @MainActor [weak self] in
                 var readerHeld = true
                 defer { if readerHeld { self?.releaseReader(id) } }
                 guard !Task.isCancelled, self?.isLive(id, ticket: ticket) == true else { return }
-                #if SAFARIER_BOUND_LOCAL_CANDIDATE
-                if let request = self?.calls[id]?.request {
-                    switch request.action {
-                    case .releaseControl, .commitControlRelease: NavigationDiagnostic.emit(request, "runner.permission.final.before")
-                    default: break
+                var allowed = true
+                if !registered {
+                    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+                    if let request = self?.calls[id]?.request {
+                        switch request.action {
+                        case .releaseControl, .commitControlRelease: NavigationDiagnostic.emit(request, "runner.permission.final.before")
+                        default: break
+                        }
                     }
-                }
-                #endif
-                let allowed = (try? await finalPermission()) ?? false
-                #if SAFARIER_BOUND_LOCAL_CANDIDATE
-                if let request = self?.calls[id]?.request {
-                    switch request.action {
-                    case .releaseControl, .commitControlRelease: NavigationDiagnostic.emit(request, "runner.permission.final.after", allowed ? "ok" : AutomationErrorCode.profileNotAllowed.rawValue)
-                    default: break
+                    #endif
+                    allowed = (try? await finalPermission()) ?? false
+                    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+                    if let request = self?.calls[id]?.request {
+                        switch request.action {
+                        case .releaseControl, .commitControlRelease: NavigationDiagnostic.emit(request, "runner.permission.final.after", allowed ? "ok" : AutomationErrorCode.profileNotAllowed.rawValue)
+                        default: break
+                        }
                     }
+                    #endif
                 }
-                #endif
                 self?.releaseReader(id); readerHeld = false
                 guard !Task.isCancelled, self?.isLive(id, ticket: ticket) == true else { return }
                 guard allowed else { self?.finalPermissionDenied(id, ticket: ticket); return }
@@ -214,6 +227,7 @@ import Darwin
                     let reply = try await sink(action, ticket)
                     switch action.action {
                     case .releaseControl, .commitControlRelease:
+                        if registered { break }
                         #if SAFARIER_BOUND_LOCAL_CANDIDATE
                         NavigationDiagnostic.emit(action, "runner.permission.post.before")
                         #endif
@@ -253,12 +267,27 @@ import Darwin
                         fputs("HOVER_CONTROLLER phase=sink.catch elapsed_ms=\(elapsed) code=\(code)\n", stderr)
                     }
                     #endif
+                    if self?.machine.isRegisteredInteractive == true, let actual = error as? AutomationError {
+                        self?.actionResult(ticket, reply: AutomationReply(requestID: action.requestID, outcome: .failure(actual)))
+                        return
+                    }
                     let effects: AutomationSideEffects
                     switch action.action { case .getState, .screenshot: effects = .none; default: effects = .possible }
                     self?.actionResult(ticket, reply: AutomationReply(requestID: action.requestID, outcome: .failure(AutomationError(code: .indeterminateResult, sideEffects: effects))))
                 }
             }
         } else {
+            if machine.currentTicket == nil, machine.state == .ready {
+                switch call.request.action {
+                case .releaseControl, .commitControlRelease, .cancel, .closeSession: break
+                default:
+                    do {
+                        if let current = try viewportReader(), !machine.synchronizeViewport(target: value, viewport: current) {
+                            finish(id, failure(call.request, .targetChanged)); process(machine.event(.targetChanged, at: now())); return
+                        }
+                    } catch { finish(id, failure(call.request, .targetChanged)); process(machine.event(.targetChanged, at: now())); return }
+                }
+            }
             process(machine.begin(call.request, permission: true, target: value, at: now()), origin: id)
         }
     }

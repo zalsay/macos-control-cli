@@ -5,7 +5,7 @@ import SafarierCore
 @testable import Safarier
 
 @MainActor final class ControlNavigationSubmissionTests: XCTestCase {
-    func testSubmissionInvalidatesOldFrameAndAllowsObserveAndRelease() async throws {
+    func testSubmissionRetainsFramesAndAllowsObserveAndRelease() async throws {
         let profile = UUID()
         let target = AutomationTargetIdentity(profileID: profile, runnerInstanceID: UUID(), windowID: UUID(), pageID: UUID())
         func viewport(_ version: UInt64) -> AutomationViewport {
@@ -44,8 +44,8 @@ import SafarierCore
         XCTAssertEqual(submitted.effectVerified, false)
         XCTAssertEqual(submitted.viewVersion, 2)
         let staleInput = try await send(.type(connection: connection, frame: oldFrame, text: "stale"))
-        XCTAssertEqual(staleInput.error, "INVALID_FRAME")
-        XCTAssertEqual(inputs, 0)
+        XCTAssertEqual(staleInput.status, "ok")
+        XCTAssertEqual(inputs, 1)
         let observed = try await send(.observe(connection: connection))
         XCTAssertEqual(observed.status, "ok")
         XCTAssertEqual(observed.viewport?.viewVersion, 2)

@@ -65,7 +65,7 @@ private final class RunnerSessionResources: @unchecked Sendable {
         #endif
         try requireTime()
         guard !Task.isCancelled, result.cleaned, page.identity == expected else { throw AutomationError(code: .targetChanged) }
-        _ = try page.viewport()
+        if ownership == .owned { _ = try page.viewport() }
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         trace("prepare.done")
         #endif
@@ -324,7 +324,8 @@ private final class RunnerSessionResources: @unchecked Sendable {
                 #if SAFARIER_BOUND_LOCAL_CANDIDATE
                 fputs("OPEN_DIAG phase=runner.page_factory.failure code=\(openingDiagnosticCode(error))\n", stderr)
                 #endif
-                self?.openingTasks.remove(taskID); self?.abortIfCurrent(generation, code: .backendUnavailable)
+                let code: AutomationErrorCode = (error as? AutomationError)?.code == .interactionRequired ? .interactionRequired : .backendUnavailable
+                self?.openingTasks.remove(taskID); self?.abortIfCurrent(generation, code: code)
             }
         }
     }
@@ -367,6 +368,7 @@ private final class RunnerSessionResources: @unchecked Sendable {
     }
     private func storeResult(_ generation: UUID, store: AutomationSnapshotStore) {
         guard openingUsable(generation), let current = opening else { cleanupOrphan(page: nil, identity: nil, store: store); return }
+        if pageOwnership == .borrowed { store.useRegisteredSessionLifetime() }
         current.store = store
         startPermission(generation, final: true)
     }
@@ -383,9 +385,10 @@ private final class RunnerSessionResources: @unchecked Sendable {
         do {
             guard page.identity.profileID == profileID, page.identity.runnerInstanceID == runnerInstanceID, page.identity == current.expectedIdentity else { abortOpening(.targetChanged); return }
             let viewport = try page.viewport(), token = try AutomationSessionToken.generate()
-            let machine = try AutomationSessionMachine.open(profileID: profileID, allowsBackgroundAutomation: true, humanProfileRunning: false, token: token, at: now()).get()
+            let machine = try AutomationSessionMachine.open(profileID: profileID, allowsBackgroundAutomation: true, humanProfileRunning: false, token: token, at: now(), registeredInteractive: pageOwnership == .borrowed).get()
             guard machine.bind(target: page.identity, viewport: viewport, at: now()).isEmpty, machine.state == .ready else { abortOpening(.targetChanged); return }
             let identity = page.identity
+            let registeredInteractive = pageOwnership == .borrowed
             guard openingUsable(generation) else { return }
             // Claim before transferring ownership: on cancellation Opening still
             // owns the page/store and abortOpening tracks their actual cleanup.
@@ -397,29 +400,48 @@ private final class RunnerSessionResources: @unchecked Sendable {
             let controller = RunnerAutomationController(machine: machine, permissionReader: { [permissionReader] in await permissionReader() }, targetReader: { [weak page] in
                 guard let page else { throw AutomationError(code: .targetChanged) }
                 return page.identity
-            }, actionSink: { [weak machine, weak page] request, ticket in
+            }, viewportReader: { [weak page] in try page?.viewport() }, actionSink: { [weak machine, weak page] request, ticket in
                 guard !Task.isCancelled, let machine, let page, machine.currentTicket == ticket, let expected = machine.boundViewport, page.identity == identity else { throw AutomationError(code: .targetChanged) }
                 let value: AutomationResult
                 switch request.action {
                 case .releaseControl:
+                    let releaseView = registeredInteractive ? nil : try page.viewport()
+                    if let releaseView {
+                        guard releaseView.viewVersion >= expected.viewVersion,
+                              releaseView.viewportWidthPoints == expected.viewportWidthPoints, releaseView.viewportHeightPoints == expected.viewportHeightPoints,
+                              releaseView.pixelWidth == expected.pixelWidth, releaseView.pixelHeight == expected.pixelHeight,
+                              releaseView.scaleX == expected.scaleX, releaseView.scaleY == expected.scaleY, releaseView.pageZoom == expected.pageZoom else { throw AutomationError(code: .targetChanged) }
+                    }
                     value = .controlReleasePrepared(try await resources.prepareRelease(identity))
-                    guard !Task.isCancelled, machine.currentTicket == ticket, page.identity == identity,
-                          try page.viewport() == expected else { throw AutomationError(code: .targetChanged) }
+                    guard !Task.isCancelled, machine.currentTicket == ticket, page.identity == identity else { throw AutomationError(code: .targetChanged) }
+                    if let releaseView, try page.viewport() != releaseView { throw AutomationError(code: .targetChanged) }
                 case .commitControlRelease(let transferID):
                     value = .controlReleased(try resources.commitRelease(transferID, identity: identity))
                 case .getState:
-                    guard try page.viewport() == expected else { throw AutomationError(code: .targetChanged) }
+                    if !registeredInteractive, try page.viewport() != expected { return AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .targetChanged))) }
                     value = .stateRead(try page.readState(sessionState: machine.state, expectedViewport: expected))
                 case .screenshot:
-                    guard try page.viewport() == expected else { throw AutomationError(code: .targetChanged) }
-                    let snapshot = try await page.captureSnapshot(expectedViewport: expected)
-                    guard !Task.isCancelled, machine.currentTicket == ticket, page.identity == identity, machine.boundViewport == expected, snapshot.viewport == expected else { throw AutomationError(code: .targetChanged) }
+                    if !registeredInteractive, try page.viewport() != expected { return AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .targetChanged))) }
+                    let snapshot: RunnerAutomationPageSnapshot
+                    do { snapshot = try await page.captureSnapshot(expectedViewport: expected) }
+                    catch AutomationDocumentChanged.stale {
+                        return AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .targetChanged)))
+                    }
+                    guard !Task.isCancelled, machine.currentTicket == ticket, page.identity == identity, machine.boundViewport == expected, (registeredInteractive || snapshot.viewport == expected) else { throw AutomationError(code: .targetChanged) }
+                    if !registeredInteractive, try page.viewport() != expected { return AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .targetChanged))) }
                     let path = try await Task.detached { try store.write(png: snapshot.png, viewport: snapshot.viewport) }.value
                     guard !Task.isCancelled, machine.currentTicket == ticket, page.identity == identity, machine.boundViewport == expected else { throw AutomationError(code: .targetChanged) }
+                    if !registeredInteractive, try page.viewport() != expected { return AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .targetChanged))) }
                     value = .snapshotWritten(path: path.path, viewport: snapshot.viewport)
                 default:
-                    if !request.action.isNavigation, try page.viewport() != expected { throw AutomationError(code: .targetChanged) }
-                    value = try await page.perform(request.action, expectedViewport: expected)
+                    if !registeredInteractive, !request.action.isNavigation, try page.viewport() != expected { return AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .targetChanged))) }
+                    do {
+                        value = try await page.perform(request.action, expectedViewport: expected)
+                    } catch AutomationNavigationInProgress.busy {
+                        return AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .sessionBusy)))
+                    } catch AutomationDocumentChanged.stale {
+                        return AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .targetChanged)))
+                    }
                     guard !Task.isCancelled, machine.currentTicket == ticket, page.identity == identity, machine.boundViewport == expected else { throw AutomationError(code: .targetChanged) }
                 }
                 return AutomationReply(requestID: request.requestID, outcome: .success(value))

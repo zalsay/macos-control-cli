@@ -32,8 +32,8 @@ private func hoverNativeFailureCode(_ failure: String?) -> String {
 final class NativePageInput {
     let webView: BrowserWebView
     let window: NSWindow
-    private let expectedBounds: NSRect
-    private let expectedFrame: NSRect
+    private var expectedBounds: NSRect
+    private var expectedFrame: NSRect
     private let windowNumber: Int
     private(set) var activityLease: AnyObject?
     private(set) var activityReady = false
@@ -46,9 +46,9 @@ final class NativePageInput {
     private var epoch: UInt64 = 0
     private var finishRequested = false
     private(set) var requiresOwnedTargetDestruction = false
-    private let expectedScale: CGFloat
-    private let expectedZoom: CGFloat
-    private let expectedViewVersion: UInt64
+    private var expectedScale: CGFloat
+    private var expectedZoom: CGFloat
+    private var expectedViewVersion: UInt64
     private var failure: String?
     private var position = NSPoint(x: 20, y: 20)
     private var sequence = 0
@@ -58,6 +58,21 @@ final class NativePageInput {
     private var deliverySequence: UInt64 = 0
     private var performing = false
     private var snapshotWaiter: SnapshotWaiter?
+    func advanceDocumentVersion(_ value: UInt64) {
+        guard value > expectedViewVersion else { return }
+        expectedViewVersion = value
+        snapshotWaiter?.finish(.failure(AutomationError(code: .targetChanged)))
+    }
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+    func refreshRegisteredGeometry() {
+        guard registeredTarget != nil else { return }
+        expectedBounds = webView.bounds
+        expectedFrame = window.frame
+        expectedScale = window.backingScaleFactor
+        expectedZoom = webView.pageZoom
+        if !expectedBounds.contains(position) { position = NSPoint(x: max(0, expectedBounds.midX), y: max(0, expectedBounds.midY)) }
+    }
+    #endif
     #if SAFARIER_BOUND_LOCAL_CANDIDATE
     private var boundContext: RunnerBinderContext?
     private var registeredTarget: AutomationTargetIdentity?
@@ -105,11 +120,7 @@ final class NativePageInput {
     static func prepareRegistered(webView: BrowserWebView, window: NSWindow, context: RunnerBinderContext,
                                   target: AutomationTargetIdentity, viewVersion: UInt64 = 1) throws -> NativePageInput {
         try context.validateRegisteredTarget(target)
-        guard RegisteredAdmissionDiagnostic.check(!NSApp.isActive, .inputAppActive),
-              RegisteredAdmissionDiagnostic.check(!window.isKeyWindow, .inputWindowKey),
-              RegisteredAdmissionDiagnostic.check(!window.isMainWindow, .inputWindowMain),
-              RegisteredAdmissionDiagnostic.check(webView.window === window, .inputWebViewWindow),
-              RegisteredAdmissionDiagnostic.check(window.windowNumber > 0, .inputWindowNumber) else {
+        guard webView.window === window, window.windowNumber > 0 else {
             throw AutomationError(code: .interactionRequired)
         }
         let input = NativePageInput(webView: webView, window: window, viewVersion: viewVersion)
@@ -256,6 +267,15 @@ final class NativePageInput {
             }
         }
         #endif
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredTarget != nil {
+            guard failure == nil, activityLease != nil, activityReady, !activityClosed,
+                  webView.window === window, window.windowNumber == windowNumber,
+                  webView.bounds.contains(point) else { failure = "registered input target unavailable"; return false }
+            guard recipient(windowPoint(point)) != nil else { failure = "page is not the native hit-test target"; return false }
+            return true
+        }
+        #endif
         guard failure == nil, activityLease != nil, !NSApplication.shared.isActive,
               !window.isKeyWindow, !window.isMainWindow, webView.window === window,
               window.windowNumber == windowNumber, window.frame == expectedFrame,
@@ -320,6 +340,14 @@ final class NativePageInput {
             failure = "native mouse delivery failed"
             revokeBoundOnNativeFailure()
         }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if status == .OK && registeredTarget != nil && event.type != .scrollWheel {
+            // SFRDispatchScopedMouseEvent synchronously calls the receiver and
+            // restores the scoped button-query hook before returning. WebContent
+            // processing is a page effect, not a native input lease.
+            pendingMouse = false
+        }
+        #endif
     }
 
     private func mouse(_ type: NSEvent.EventType, _ point: NSPoint, count: Int = 0) {
@@ -389,9 +417,37 @@ final class NativePageInput {
         release(end.x, end.y)
     }
 
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+    func releaseRegisteredButtonIfHeld() async throws {
+        guard registeredTarget != nil, buttonMask != 0 else { return }
+        guard !performing, failure == nil, activityLease != nil, activityReady, !activityClosed,
+              webView.window === window, window.windowNumber == windowNumber else {
+            throw AutomationError(code: .targetChanged)
+        }
+        refreshRegisteredGeometry()
+        let point = windowPoint(position)
+        guard let target = recipient(point), let event = NSEvent.mouseEvent(with: .leftMouseUp,
+                location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: windowNumber, context: nil, eventNumber: sequence + 1,
+                clickCount: 1, pressure: 0) else { throw AutomationError(code: .backendUnavailable) }
+        sequence += 1
+        buttonMask = 0
+        deliver(target, event)
+        if failure != nil {
+            buttonMask = 1
+            throw AutomationError(code: .backendUnavailable, sideEffects: .possible)
+        }
+    }
+    #endif
+
     func key(_ key: AutomationKey, shift: Bool = false) {
         guard NativeInputPreflight.keyAllowed(name: key, shift: shift) else { failure = "unsupported key combination"; return }
-        guard valid(position), let target = window.firstResponder as? NSView, target.isDescendant(of: webView) else { failure = "keyboard target unavailable"; return }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        let registered = registeredTarget != nil
+        #else
+        let registered = false
+        #endif
+        guard (registered || valid(position)), let target = window.firstResponder as? NSView, target.isDescendant(of: webView) else { failure = "keyboard target unavailable"; return }
         let mapping: (String, UInt16)
         switch key {
         case .backspace: mapping = ("\u{8}", 51)
@@ -405,6 +461,8 @@ final class NativePageInput {
         case .down: mapping = ("\u{f701}", 125)
         case .home: mapping = ("\u{f729}", 115)
         case .end: mapping = ("\u{f72b}", 119)
+        case .pageUp: mapping = ("\u{f72c}", 116)
+        case .pageDown: mapping = ("\u{f72d}", 121)
         }
         for type in [NSEvent.EventType.keyDown, .keyUp] {
             guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: shift ? .shift : [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: windowNumber, context: nil, characters: mapping.0, charactersIgnoringModifiers: mapping.0, isARepeat: false, keyCode: mapping.1) else { failure = "native key unavailable"; return }
@@ -414,7 +472,12 @@ final class NativePageInput {
         }
     }
     func type(_ text: String) {
-        guard valid(position), let target = window.firstResponder as? NSView, target.isDescendant(of: webView), let textClient = target as? NSTextInputClient else { failure = "text input unavailable"; return }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        let registered = registeredTarget != nil
+        #else
+        let registered = false
+        #endif
+        guard (registered || valid(position)), let target = window.firstResponder as? NSView, target.isDescendant(of: webView), let textClient = target as? NSTextInputClient else { failure = "text input unavailable"; return }
         textClient.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
     }
     func scroll(_ x: Double, _ y: Double, delta: Int32) {
@@ -537,8 +600,21 @@ final class NativePageInput {
         if boundContext != nil, case .move = action { diagnosticMove = true } else { diagnosticMove = false }
         if diagnosticMove { fputs("HOVER_NATIVE phase=perform.enter elapsed_ms=\(hoverNativeElapsedMs(diagnosticStart)) failure=\(hoverNativeFailureCode(failure)) pendingMouse=\(pendingMouse)\n", stderr) }
         #endif
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if let registeredTarget, let boundContext {
+            try boundContext.validateRegisteredTarget(registeredTarget)
+            guard registeredTargetValidator?() == true, activityLease != nil, activityReady, !activityClosed,
+                  webView.window === window, window.windowNumber == windowNumber else { throw AutomationError(code: .targetChanged) }
+            refreshRegisteredGeometry()
+        }
+        #endif
         do { try Task.checkCancellation() } catch { uncertainDispatch = true; revokeBoundOnNativeFailure(); closeActivity(); throw AutomationError(code: .cancelled) }
-        guard !performing, !pendingMouse, snapshotWaiter == nil else { throw AutomationError(code: .sessionBusy) }
+        guard !performing, snapshotWaiter == nil else { throw AutomationError(code: .sessionBusy) }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredTarget == nil && pendingMouse { throw AutomationError(code: .sessionBusy) }
+        #else
+        guard !pendingMouse else { throw AutomationError(code: .sessionBusy) }
+        #endif
         guard viewVersion == expectedViewVersion else { throw AutomationError(code: .targetChanged) }
         if case let .key(name, shift) = action, !NativeInputPreflight.keyAllowed(name: name, shift: shift) { throw AutomationError(code: .invalidRequest) }
         let width = Double(expectedBounds.width), height = Double(expectedBounds.height), scale = Double(expectedScale)
@@ -546,9 +622,18 @@ final class NativePageInput {
               width * scale <= Double(Int32.max), height * scale <= Double(Int32.max) else { throw AutomationError(code: .targetChanged) }
         let pixelWidth = Int((width * scale).rounded()), pixelHeight = Int((height * scale).rounded())
         let viewport = AutomationViewport(viewportWidthPoints: width, viewportHeightPoints: height, pixelWidth: pixelWidth, pixelHeight: pixelHeight, scaleX: Double(pixelWidth) / width, scaleY: Double(pixelHeight) / height, pageZoom: Double(expectedZoom), viewVersion: expectedViewVersion)
-        guard NativeInputPreflight.geometryMatches(viewport, width: width, height: height, scale: scale, zoom: Double(expectedZoom), version: viewVersion), valid(position) else { throw AutomationError(code: .targetChanged) }
+        guard NativeInputPreflight.geometryMatches(viewport, width: width, height: height, scale: scale, zoom: Double(expectedZoom), version: viewVersion) else { throw AutomationError(code: .targetChanged) }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredTarget == nil && !valid(position) { throw AutomationError(code: .targetChanged) }
+        #else
+        guard valid(position) else { throw AutomationError(code: .targetChanged) }
+        #endif
         func validate(_ point: ViewportPoint, _ version: UInt64) throws {
+            #if SAFARIER_BOUND_LOCAL_CANDIDATE
+            if registeredTarget == nil && version != viewVersion { throw AutomationError(code: .targetChanged) }
+            #else
             guard version == viewVersion else { throw AutomationError(code: .targetChanged) }
+            #endif
             guard viewport.contains(point) else { throw AutomationError(code: .outOfBounds) }
         }
         performing = true
@@ -588,13 +673,24 @@ final class NativePageInput {
         }
         do {
             if failure != nil { throw AutomationError(code: .backendUnavailable) }
+            #if SAFARIER_BOUND_LOCAL_CANDIDATE
+            if registeredTarget == nil && pendingMouse { try await drain() }
+            #else
             if pendingMouse { try await drain() }
+            #endif
             try Task.checkCancellation()
         } catch {
             #if SAFARIER_BOUND_LOCAL_CANDIDATE
             if diagnosticMove {
                 let code = (error as? AutomationError)?.code.rawValue ?? (error is CancellationError ? "cancelled" : "unknown")
                 fputs("HOVER_NATIVE phase=perform.failure elapsed_ms=\(hoverNativeElapsedMs(diagnosticStart)) code=\(code) failure=\(hoverNativeFailureCode(failure)) pendingMouse=\(pendingMouse)\n", stderr)
+            }
+            #endif
+            #if SAFARIER_BOUND_LOCAL_CANDIDATE
+            if registeredTarget != nil && !uncertainDispatch && !pendingMouse {
+                failure = nil
+                if error is CancellationError { throw AutomationError(code: .cancelled) }
+                throw error
             }
             #endif
             uncertainDispatch = true
@@ -605,7 +701,7 @@ final class NativePageInput {
         }
         guard deliverySequence < UInt64.max else { uncertainDispatch = true; revokeBoundOnNativeFailure(); closeActivity(); throw AutomationError(code: .backendUnavailable) }
         deliverySequence += 1
-        return .nativeDelivered(sequence: deliverySequence, buttons: Int(buttonMask), viewVersion: expectedViewVersion)
+        return .nativeDelivered(sequence: deliverySequence, buttons: Int(buttonMask), viewVersion: viewVersion)
     }
 
     @MainActor private final class SnapshotWaiter {
@@ -633,8 +729,21 @@ final class NativePageInput {
 
     func captureSnapshot(viewVersion: UInt64) async throws -> Snapshot {
         if Task.isCancelled { throw AutomationError(code: .cancelled) }
-        guard !performing, !pendingMouse else { throw AutomationError(code: .sessionBusy) }
-        guard viewVersion == expectedViewVersion, valid(position) else { throw AutomationError(code: .targetChanged) }
+        guard !performing else { throw AutomationError(code: .sessionBusy) }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredTarget == nil && pendingMouse { throw AutomationError(code: .sessionBusy) }
+        #else
+        guard !pendingMouse else { throw AutomationError(code: .sessionBusy) }
+        #endif
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredTarget != nil { refreshRegisteredGeometry() }
+        #endif
+        guard viewVersion == expectedViewVersion, activityLease != nil, !activityClosed, webView.window === window else { throw AutomationError(code: .targetChanged) }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredTarget == nil && !valid(position) { throw AutomationError(code: .targetChanged) }
+        #else
+        guard valid(position) else { throw AutomationError(code: .targetChanged) }
+        #endif
         let currentEpoch = epoch
         let width = expectedBounds.width * expectedScale, height = expectedBounds.height * expectedScale
         guard width.isFinite, height.isFinite, width > 0, height > 0,
@@ -665,7 +774,12 @@ final class NativePageInput {
             Task { @MainActor [weak waiter] in waiter?.finish(.failure(AutomationError(code: .cancelled))) }
         })
         if Task.isCancelled { throw AutomationError(code: .cancelled) }
-        guard epoch == currentEpoch, valid(position) else { throw AutomationError(code: .targetChanged) }
+        guard epoch == currentEpoch else { throw AutomationError(code: .targetChanged) }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if registeredTarget == nil && !valid(position) { throw AutomationError(code: .targetChanged) }
+        #else
+        guard valid(position) else { throw AutomationError(code: .targetChanged) }
+        #endif
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
               cgImage.width == Int(width.rounded()), cgImage.height == Int(height.rounded()),
               let png = NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:]),
@@ -684,7 +798,12 @@ final class NativePageInput {
         requiresOwnedTargetDestruction = NativeInputPreflight.requiresOwnedTargetDestruction(held: buttonMask != 0, pending: pendingMouse, uncertain: uncertainDispatch, previouslyRequired: requiresOwnedTargetDestruction)
         guard let token = activityLease else { activityClosed = true; return }
         var detail: NSString?
-        activityStatus = SFRFinishBackgroundPageActivity(token, { [weak self] in
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        let waitForPageUpdate = registeredTarget == nil
+        #else
+        let waitForPageUpdate = true
+        #endif
+        activityStatus = SFRFinishBackgroundPageActivity(token, waitForPageUpdate, { [weak self] in
             MainActor.assumeIsolated { self?.activityClosed = true }
         }, &detail)
         activityLease = nil

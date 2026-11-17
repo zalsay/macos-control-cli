@@ -1,6 +1,10 @@
 import Foundation
 import SafarierCore
 
+// Emitted only before a native input or new navigation has been submitted.
+enum AutomationNavigationInProgress: Error { case busy }
+enum AutomationDocumentChanged: Error { case stale }
+
 struct RunnerAutomationPageSnapshot: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     var description: String { "RunnerAutomationPageSnapshot(redacted)" }
     var debugDescription: String { description }

@@ -16,13 +16,15 @@ public struct AutomationReplayCache: CustomStringConvertible, CustomDebugStringC
     private var deadline: Double
     private var lastTime: Double
     private var expired: Bool
-    public init(startedAt: Double) {
+    private let expiresWhenIdle: Bool
+    public init(startedAt: Double, expiresWhenIdle: Bool = true) {
+        self.expiresWhenIdle = expiresWhenIdle
         self.deadline = startedAt + AutomationLimits.idleSeconds
         self.lastTime = startedAt
         self.expired = !startedAt.isFinite || !deadline.isFinite
     }
     private mutating func valid(_ now: Double) -> Bool {
-        guard !expired, now.isFinite, now >= lastTime, now < deadline else { expired = true; return false }
+        guard !expired, now.isFinite, now >= lastTime, (!expiresWhenIdle || now < deadline) else { expired = true; return false }
         lastTime = now
         return true
     }
@@ -35,7 +37,8 @@ public struct AutomationReplayCache: CustomStringConvertible, CustomDebugStringC
     // Replay identity follows decoded wire values, but page text and URL bytes
     // must not inherit Swift String's canonical Unicode equivalence.
     private static func matches(_ lhs: AutomationRequest, _ rhs: AutomationRequest) -> Bool {
-        guard lhs.version == rhs.version, lhs.requestID == rhs.requestID, lhs.sessionID == rhs.sessionID else { return false }
+        guard lhs.version == rhs.version, lhs.requestID == rhs.requestID, lhs.sessionID == rhs.sessionID,
+              lhs.expectedViewVersion == rhs.expectedViewVersion else { return false }
         switch (lhs.action, rhs.action) {
         case let (.insertText(a), .insertText(b)):
             return a.utf8.elementsEqual(b.utf8)
@@ -51,7 +54,7 @@ public struct AutomationReplayCache: CustomStringConvertible, CustomDebugStringC
             guard Self.matches(entry.request, request) else { return .rejected(.requestIDReused) }
             return entry.reply.map(Begin.replay) ?? .inFlight
         }
-        guard entries.count < AutomationLimits.replayEntries else { return .rejected(.replayWindowFull) }
+        guard !expiresWhenIdle || entries.count < AutomationLimits.replayEntries else { return .rejected(.replayWindowFull) }
         entries[request.requestID] = Entry(request: request, reply: nil)
         return .reserved
     }

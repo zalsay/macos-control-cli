@@ -29,18 +29,19 @@ final class RegisteredTabObservationTests: XCTestCase {
         var blocked = 0
         session.onAutomationUIBlocked = { _ in blocked += 1 }
         XCTAssertEqual(session.controllerPolicy(a), .interactive)
-        XCTAssertEqual(session.controllerPolicy(b), .automationBackground)
+        XCTAssertEqual(session.controllerPolicy(b), .interactive)
         XCTAssertTrue(session.routeControllerUI(.alert, controller: a, perform: { true }, deny: { false }))
-        XCTAssertFalse(session.routeControllerUI(.alert, controller: b, perform: { true }, deny: { false }))
-        XCTAssertEqual(blocked, 1)
+        XCTAssertTrue(session.routeControllerUI(.alert, controller: b, perform: { true }, deny: { false }))
+        XCTAssertEqual(blocked, 0)
         group.selectedWindow = a.window
-        XCTAssertTrue(flag.value)
-        XCTAssertFalse(session.registeredTargetValid(b, monitor: monitor))
+        XCTAssertFalse(flag.value)
+        XCTAssertTrue(session.registeredTargetValid(b, monitor: monitor))
         group.selectedWindow = b.window
-        XCTAssertFalse(session.registeredTargetValid(b, monitor: monitor))
+        XCTAssertTrue(session.registeredTargetValid(b, monitor: monitor))
         let c = session.makeRegisteredTestController()
         c.window.setFrameOrigin(NSPoint(x: -100000, y: -100000))
-        XCTAssertThrowsError(try session.selectRegisteredTarget(first: a, onRevoke: {}, onInvalidated: {}))
+        let (stillSelected, _) = try session.selectRegisteredTarget(first: a, onRevoke: {}, onInvalidated: {})
+        XCTAssertTrue(stillSelected === b)
     }
 
     func testSessionNewSeparateWindowSynchronouslyRevokesSelectedGeneration() throws {
@@ -57,8 +58,53 @@ final class RegisteredTabObservationTests: XCTestCase {
         session.setRegisteredPolicyTestTarget(a, monitor: monitor)
         XCTAssertFalse(flag.value)
         _ = session.makeRegisteredTestController()
-        XCTAssertTrue(flag.value)
+        XCTAssertFalse(flag.value)
         XCTAssertFalse(monitor.isValid())
+    }
+
+    func testRegisteredBrowserKeepsNormalDelegateAcrossLocalNavigationAndHistory() async throws {
+        _ = NSApplication.shared
+        let output = WebViewConfigurationFactory.Output(configuration: WKWebViewConfiguration(), report: PrivacyCapabilityReport(), executionPolicy: .interactive)
+        let session = BrowserSession(profile: Profile(name: "registered-local-navigation", mode: .ephemeral), output: output, outboundDescription: "offline", diagnostics: SPIDiagnostics())
+        let a = session.makeRegisteredTestController(), b = session.makeRegisteredTestController()
+        a.window.setFrameOrigin(NSPoint(x: -100000, y: -100000)); b.window.setFrameOrigin(NSPoint(x: -100000, y: -100000))
+        a.window.addTabbedWindow(b.window, ordered: .above)
+        let group = try XCTUnwrap(a.window.tabGroup); group.selectedWindow = a.window
+        let flag = TabRevocationFlag()
+        let (_, optionalMonitor) = try session.selectRegisteredTarget(first: a, onRevoke: { flag.mark() }, onInvalidated: {})
+        session.setRegisteredPolicyTestTarget(a, monitor: try XCTUnwrap(optionalMonitor))
+        var blocked = 0
+        session.onAutomationUIBlocked = { _ in blocked += 1 }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory); a.window.orderOut(nil); b.window.orderOut(nil) }
+        let first = directory.appendingPathComponent("first.html")
+        let redirect = directory.appendingPathComponent("redirect.html")
+        let last = directory.appendingPathComponent("last.html")
+        try "<title>first</title>".write(to: first, atomically: true, encoding: .utf8)
+        try "<meta http-equiv='refresh' content='0;url=last.html'><title>redirect</title>".write(to: redirect, atomically: true, encoding: .utf8)
+        try "<title>last</title>".write(to: last, atomically: true, encoding: .utf8)
+        func waitForURL(_ url: URL) async throws {
+            let end = ContinuousClock.now + .seconds(8)
+            while ContinuousClock.now < end {
+                if a.webView.url == url && !a.webView.isLoading { return }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTFail("local page did not load: \(url.lastPathComponent)")
+        }
+        XCTAssertTrue(a.webView.navigationDelegate === a)
+        XCTAssertTrue(a.webView.uiDelegate === a)
+        a.webView.loadFileURL(first, allowingReadAccessTo: directory)
+        try await waitForURL(first)
+        a.webView.loadFileURL(redirect, allowingReadAccessTo: directory)
+        try await waitForURL(last)
+        XCTAssertTrue(a.webView.canGoBack)
+        a.webView.goBack()
+        try await waitForURL(first)
+        XCTAssertTrue(a.webView.navigationDelegate === a)
+        XCTAssertTrue(a.webView.uiDelegate === a)
+        XCTAssertFalse(flag.value)
+        XCTAssertEqual(blocked, 0)
     }
 
     #if SAFARIER_NATIVE_INPUT_POLICY_TESTS
@@ -108,7 +154,7 @@ final class RegisteredTabObservationTests: XCTestCase {
         let cleaned = await session.quiesceAndRestoreRegisteredControl(controller: a, generation: generation, input: input)
         XCTAssertFalse(cleaned)
         XCTAssertTrue(input.requiresOwnedTargetDestruction)
-        XCTAssertEqual(session.executionPolicy, .automationBackground)
+        XCTAssertEqual(session.executionPolicy, .interactive)
         // No event or native activity was sent in this synthetic test.
         XCTAssertTrue(lease.restore(inputDrained: true))
     }
@@ -322,8 +368,7 @@ final class RegisteredTabObservationTests: XCTestCase {
         group.addWindow(extra)
         group.removeWindow(extra)
         XCTAssertGreaterThanOrEqual(members, 2)
-        var policy = NSApplication.ActivationPolicy.regular
-        let lease = RegisteredPresentationLease(window: a, readPolicy: { policy }, setPolicy: { policy = $0; return true }, isActive: { false })
+        let lease = RegisteredPresentationLease(window: a)
         XCTAssertTrue(lease.acquire())
         XCTAssertTrue(group.selectedWindow === a)
         XCTAssertTrue(a.tabGroup === group && b.tabGroup === group)

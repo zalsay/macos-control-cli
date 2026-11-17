@@ -10,22 +10,30 @@ enum ControlCLI {
       status | capabilities
       connect --profile PROFILE_UUID
       state|observe|cancel|disconnect|release --connection CONNECTION_UUID
-      navigate --connection CONNECTION_UUID --url HTTPS_OR_HTTP_URL
+      navigate --connection CONNECTION_UUID --url ABSOLUTE_URL
       move|mouseDown|mouseUp --connection CONNECTION_UUID --frame FRAME_UUID --x PIXEL_X --y PIXEL_Y
       click --connection CONNECTION_UUID --frame FRAME_UUID --x PIXEL_X --y PIXEL_Y [--count 1|2] [--wait-navigation]
       click-target --connection CONNECTION_UUID --target TEXT
       type --connection CONNECTION_UUID --frame FRAME_UUID (--text TEXT | --text-stdin)
       press --connection CONNECTION_UUID --frame FRAME_UUID --key KEY [--shift]
       press --connection CONNECTION_UUID --frame FRAME_UUID --key Enter --wait-navigation
+      back --connection CONNECTION_UUID --frame FRAME_UUID
 
     Use the same --app and --runtime for every command. observe returns a frame UUID and screenshot path;
     observe also returns optional local Vision OCR; unavailable OCR does not prevent a screenshot.
     click-target sends the target and recognized candidate IDs/text to the configured HTTPS model;
     it never sends the screenshot or coordinates. Successful native delivery is not proof of page effect.
-    Coordinates are screenshot pixels for that frame. A navigation requires a new observe before input.
-    --wait-navigation is for Enter or a single click and uses the native navigation operation when supported.
-    Wheel is unavailable. The original Runner binding expires after 90 seconds and cannot be renewed;
-    the daemon has a bounded replay window and may require a clean stop and restart when it is full.
+    Coordinates are screenshot pixels for that frame; the latest 32 frames are retained.
+    Use observe to judge page effects and decide when a fresh screenshot is needed.
+    For registered browsers, --wait-navigation is a compatibility spelling for sending Enter or one click;
+    it does not wait for navigation or verify its effect. Input replies report sent:true, effectVerified:false.
+    back sends Backspace through the same native press path. In editable content it deletes text;
+    otherwise the browser handles history back. Use observe to confirm the resulting page.
+    PageUp and PageDown send native page keys to the focused content; use observe to confirm scrolling.
+    Supported keys: Backspace, Delete, Enter, Tab, Escape, Left, Right, Up, Down, Home, End, PageUp, PageDown.
+    PageUp/PageDown do not accept --shift or --wait-navigation.
+    Wheel is unavailable. Registered control remains connected until release or a real connection failure;
+    request IDs remain recorded to prevent duplicate execution.
     """
     static func run(_ arguments: [String]) -> Int32 {
         do {

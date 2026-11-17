@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/acl.h>
+#include <errno.h>
 #include <time.h>
 #include <unistd.h>
 #include <limits.h>
@@ -13,6 +15,16 @@ static uint64_t now_ns(void) { struct timespec t; if (clock_gettime(CLOCK_MONOTO
 uint64_t bi_deadline_after_ms(uint32_t ms) { uint64_t n = now_ns(); return n && ms && ms <= 5000 ? n + (uint64_t)ms * 1000000ULL : 0; }
 static bool valid_deadline(uint64_t d) { uint64_t n = now_ns(); return n && d > n && d - n <= 5000000000ULL; }
 static bool same(const struct stat *a, const struct stat *b) { return a->st_dev==b->st_dev && a->st_ino==b->st_ino && a->st_mode==b->st_mode && a->st_uid==b->st_uid && a->st_gid==b->st_gid && a->st_nlink==b->st_nlink && a->st_size==b->st_size && a->st_mtimespec.tv_sec==b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec==b->st_mtimespec.tv_nsec && a->st_ctimespec.tv_sec==b->st_ctimespec.tv_sec && a->st_ctimespec.tv_nsec==b->st_ctimespec.tv_nsec; }
+/* A sibling can change directory timestamps without changing the path to the
+ * file. Continue to pin each ancestor's identity, ownership and permissions. */
+static bool same_ancestor(const struct stat *a, const struct stat *b) { return a->st_dev==b->st_dev && a->st_ino==b->st_ino && a->st_mode==b->st_mode && a->st_uid==b->st_uid && a->st_gid==b->st_gid && a->st_flags==b->st_flags && a->st_birthtimespec.tv_sec==b->st_birthtimespec.tv_sec && a->st_birthtimespec.tv_nsec==b->st_birthtimespec.tv_nsec; }
+static bool ancestor_acl(int fd,uint8_t out[32]) {
+    errno=0;acl_t acl=acl_get_fd_np(fd,ACL_TYPE_EXTENDED);int saved=errno;
+    if(!acl && saved!=ENOENT)return false;
+    CC_SHA256_CTX c;CC_SHA256_Init(&c);uint8_t present=acl?1:0;CC_SHA256_Update(&c,&present,1);
+    if(acl){ssize_t len=0;char *value=acl_to_text(acl,&len);if(!value||len<0||len>65536){if(value)acl_free(value);acl_free(acl);return false;}CC_SHA256_Update(&c,value,(CC_LONG)len);acl_free(value);acl_free(acl);}
+    CC_SHA256_Final(out,&c);return true;
+}
 static void diag_reset(BIDiagnostic *d) { if(d) { d->stage=BI_STAGE_NONE; d->fields=0; d->depth=0; } }
 static void diag_set(BIDiagnostic *d, BIStage stage, uint64_t fields, uint32_t depth) { if(d && d->stage==BI_STAGE_NONE) { d->stage=stage; d->fields=fields; d->depth=depth; } }
 static uint64_t stat_fields(const struct stat *a,const struct stat *b) {
@@ -23,11 +35,13 @@ static uint64_t stat_fields(const struct stat *a,const struct stat *b) {
  if(a->st_size!=b->st_size)m|=BI_F_SIZE;
  if(a->st_mtimespec.tv_sec!=b->st_mtimespec.tv_sec || a->st_mtimespec.tv_nsec!=b->st_mtimespec.tv_nsec)m|=BI_F_MTIME;
  if(a->st_ctimespec.tv_sec!=b->st_ctimespec.tv_sec || a->st_ctimespec.tv_nsec!=b->st_ctimespec.tv_nsec)m|=BI_F_CTIME;
+ if(a->st_birthtimespec.tv_sec!=b->st_birthtimespec.tv_sec || a->st_birthtimespec.tv_nsec!=b->st_birthtimespec.tv_nsec)m|=BI_F_BIRTH;
+ if(a->st_flags!=b->st_flags)m|=BI_F_FLAGS;
  return m;
 }
 typedef BIError (*snapshot_callback)(const char *, uint64_t, void *);
 static BIError snapshot_impl(const char *path, uint64_t deadline, BIFileSnapshot *out, snapshot_callback callback, void *context, BIDiagnostic *diag, uint64_t size_limit) {
-    int fds[MAX_PARTS]; struct stat before[MAX_PARTS], after; char copy[PATH_MAX]; char *parts[MAX_PARTS]; unsigned count=0, opened=0; BIError err=BI_INVALID; BIFileSnapshot result={0};
+    int fds[MAX_PARTS]; struct stat before[MAX_PARTS], after; uint8_t acls[MAX_PARTS][32],acl_after[32]; char copy[PATH_MAX]; char *parts[MAX_PARTS]; unsigned count=0, opened=0; BIError err=BI_INVALID; BIFileSnapshot result={0};
     if (!out || !path || path[0]!='/' || !size_limit || size_limit>MAX_SIZE) return BI_INVALID;
     if (!valid_deadline(deadline)) return BI_EXPIRED;
     size_t len=strnlen(path,sizeof copy); if (len<2 || len>=sizeof copy || path[len-1]=='/') return BI_INVALID;
@@ -36,14 +50,14 @@ static BIError snapshot_impl(const char *path, uint64_t deadline, BIFileSnapshot
     for (unsigned i=0;i<count;i++) if (!strcmp(parts[i],".") || !strcmp(parts[i],"..")) return BI_INVALID;
     fds[0]=open("/",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC); if (fds[0]<0) return valid_deadline(deadline)?BI_IO:BI_EXPIRED; opened=1;
     if (!valid_deadline(deadline)) {err=BI_EXPIRED;goto done;}
-    int statrc=fstat(fds[0],&before[0]); if (!valid_deadline(deadline)) {err=BI_EXPIRED;goto done;} if (statrc) {err=BI_IO;goto done;}
+    int statrc=fstat(fds[0],&before[0]); if (!valid_deadline(deadline)) {err=BI_EXPIRED;goto done;} if (statrc || !ancestor_acl(fds[0],acls[0])) {err=BI_IO;goto done;}
     for (unsigned i=0;i<count;i++) {
         if (!valid_deadline(deadline)) {err=BI_EXPIRED; goto done;}
         if (!S_ISDIR(before[i].st_mode) || (before[i].st_uid!=0 && before[i].st_uid!=geteuid()) || (before[i].st_mode & 0022)) goto done;
         int flags=O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK; if (i+1<count) flags|=O_DIRECTORY;
         int fd=openat(fds[i],parts[i],flags); if(fd>=0) fds[opened++]=fd;
         if(!valid_deadline(deadline)){err=BI_EXPIRED;goto done;} if(fd<0){err=BI_IO;goto done;}
-        statrc=fstat(fd,&before[i+1]); if(!valid_deadline(deadline)){err=BI_EXPIRED;goto done;} if(statrc){err=BI_IO;goto done;}
+        statrc=fstat(fd,&before[i+1]); if(!valid_deadline(deadline)){err=BI_EXPIRED;goto done;} if(statrc || (i+1<count&&!ancestor_acl(fd,acls[i+1]))){err=BI_IO;goto done;}
     }
     struct stat *file=&before[count]; if (!S_ISREG(file->st_mode) || file->st_nlink!=1 || file->st_uid!=geteuid() || (file->st_mode&0022) || file->st_size<0 || (uint64_t)file->st_size>size_limit) goto done;
     CC_SHA256_CTX ctx; CC_SHA256_Init(&ctx); uint8_t buf[16384]; uint64_t n=0; ssize_t r;
@@ -52,16 +66,19 @@ static BIError snapshot_impl(const char *path, uint64_t deadline, BIFileSnapshot
     if (callback) { err=callback(path,deadline,context); if(err!=BI_OK) goto done; }
     for (unsigned i=0;i<=count;i++) {
         if(!valid_deadline(deadline)){err=BI_EXPIRED;goto done;}
-        statrc=fstat(fds[i],&after); if(!valid_deadline(deadline)){err=BI_EXPIRED;goto done;} if(statrc || !same(&before[i],&after)){if(diag)diag_set(diag,BI_STAGE_FSTAT,statrc?BI_F_UNAVAILABLE:stat_fields(&before[i],&after),i);err=BI_CHANGED;goto done;}
-        if(i) { statrc=fstatat(fds[i-1],parts[i-1],&after,AT_SYMLINK_NOFOLLOW); if(!valid_deadline(deadline)){err=BI_EXPIRED;goto done;} if(statrc || !same(&before[i],&after)){if(diag)diag_set(diag,BI_STAGE_FSTATAT,statrc?BI_F_UNAVAILABLE:stat_fields(&before[i],&after),i);err=BI_CHANGED;goto done;} }
+        if(i<count && !ancestor_acl(fds[i],acl_after)){err=BI_IO;goto done;}
+        statrc=fstat(fds[i],&after); if(!valid_deadline(deadline)){err=BI_EXPIRED;goto done;} if(statrc || !(i==count?same(&before[i],&after):(same_ancestor(&before[i],&after)&&!memcmp(acls[i],acl_after,32)))){if(diag)diag_set(diag,BI_STAGE_FSTAT,statrc?BI_F_UNAVAILABLE:(stat_fields(&before[i],&after)|((i<count&&memcmp(acls[i],acl_after,32))?BI_F_ACL:0)),i);err=BI_CHANGED;goto done;}
+        if(i) { statrc=fstatat(fds[i-1],parts[i-1],&after,AT_SYMLINK_NOFOLLOW); if(!valid_deadline(deadline)){err=BI_EXPIRED;goto done;} if(statrc || !(i==count?same(&before[i],&after):same_ancestor(&before[i],&after))){if(diag)diag_set(diag,BI_STAGE_FSTATAT,statrc?BI_F_UNAVAILABLE:stat_fields(&before[i],&after),i);err=BI_CHANGED;goto done;} }
     }
     /* Reopen the full ancestor chain from the root; held directory descriptors alone are insufficient. */
     for(unsigned i=0;i<count;i++){
         if(!valid_deadline(deadline)){err=BI_EXPIRED;goto done;}
         int x=openat(fds[i],parts[i],O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK|(i+1<count?O_DIRECTORY:0));
         if(!valid_deadline(deadline)){if(x>=0)close(x);err=BI_EXPIRED;goto done;} if(x<0){if(diag)diag_set(diag,BI_STAGE_REOPEN,BI_F_UNAVAILABLE,i+1);err=BI_CHANGED;goto done;}
+        bool acl_ok=i+1==count||ancestor_acl(x,acl_after);
         statrc=fstat(x,&after); bool timely=valid_deadline(deadline); close(x);
-        if(!timely){err=BI_EXPIRED;goto done;} if(statrc || !same(&before[i+1],&after)){if(diag)diag_set(diag,BI_STAGE_REOPEN_FSTAT,statrc?BI_F_UNAVAILABLE:stat_fields(&before[i+1],&after),i+1);err=BI_CHANGED;goto done;}
+        if(!acl_ok){err=BI_IO;goto done;}
+        if(!timely){err=BI_EXPIRED;goto done;} if(statrc || !(i+1==count?same(&before[i+1],&after):(same_ancestor(&before[i+1],&after)&&!memcmp(acls[i+1],acl_after,32)))){if(diag)diag_set(diag,BI_STAGE_REOPEN_FSTAT,statrc?BI_F_UNAVAILABLE:(stat_fields(&before[i+1],&after)|((i+1<count&&memcmp(acls[i+1],acl_after,32))?BI_F_ACL:0)),i+1);err=BI_CHANGED;goto done;}
     }
     if(!valid_deadline(deadline)){err=BI_EXPIRED;goto done;} *out=result; err=BI_OK;
 done: while(opened) close(fds[--opened]); return err;

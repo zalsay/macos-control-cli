@@ -675,7 +675,7 @@ static SFRCallStatus SFRInstallBackgroundCursorProtection(NSApplication *app, NS
 @property(nonatomic, strong) NSApplication *application;
 @property(atomic) BOOL closed;
 @property(nonatomic) BOOL notifiedActive;
-- (SFRCallStatus)closeWithCompletion:(void (^)(void))ready detail:(NSString **)detail;
+- (SFRCallStatus)closeWithCompletion:(void (^)(void))ready waitForPageUpdate:(BOOL)waitForPageUpdate detail:(NSString **)detail;
 @end
 
 static __weak SFRBackgroundPageActivityToken *sBackgroundPageActivity;
@@ -698,7 +698,7 @@ static __attribute__((noinline)) id SFRLogicalKeyWindow(id receiver, SEL selecto
 }
 
 @implementation SFRBackgroundPageActivityToken
-- (SFRCallStatus)closeWithCompletion:(void (^)(void))ready detail:(NSString **)detail {
+- (SFRCallStatus)closeWithCompletion:(void (^)(void))ready waitForPageUpdate:(BOOL)waitForPageUpdate detail:(NSString **)detail {
     if (_closed) { ready(); return SFRCallStatusOK; }
     _closed = YES;
     if (keySlot.method) {
@@ -723,19 +723,24 @@ static __attribute__((noinline)) id SFRLogicalKeyWindow(id receiver, SEL selecto
         // No AppKit work off-main: only the owned IMP restoration above is synchronous.
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
-                [NSNotificationCenter.defaultCenter postNotificationName:NSWindowDidResignKeyNotification object:window];
-                SFRCallWithVoidCompletion(view, SFRActivityCompletion, ready, NULL);
+                if (!NSApplication.sharedApplication.isActive || !window.isKeyWindow)
+                    [NSNotificationCenter.defaultCenter postNotificationName:NSWindowDidResignKeyNotification object:window];
+                if (waitForPageUpdate) SFRCallWithVoidCompletion(view, SFRActivityCompletion, ready, NULL);
+                else ready();
             } @catch (NSException *exception) { (void)exception; }
         });
         return SFRCallStatusOK;
     }
     @try {
-        [NSNotificationCenter.defaultCenter postNotificationName:NSWindowDidResignKeyNotification object:window];
-        return SFRCallWithVoidCompletion(view, SFRActivityCompletion, ready, detail);
+        if (!NSApplication.sharedApplication.isActive || !window.isKeyWindow)
+            [NSNotificationCenter.defaultCenter postNotificationName:NSWindowDidResignKeyNotification object:window];
+        if (waitForPageUpdate) return SFRCallWithVoidCompletion(view, SFRActivityCompletion, ready, detail);
+        ready();
+        return SFRCallStatusOK;
     } @catch (NSException *exception) { return SFRException(exception, detail); }
 }
 - (void)dealloc {
-    [self closeWithCompletion:^{} detail:NULL];
+    [self closeWithCompletion:^{} waitForPageUpdate:NO detail:NULL];
 }
 @end
 
@@ -756,24 +761,13 @@ SFRCallStatus SFRBeginBackgroundPageActivity(id webView, id __autoreleasing *lea
             SFRSetDetail(detail, @"background input target is not a WKWebView");
             return SFRCallStatusMissingClass;
         }
-        NSString *version = [[NSBundle bundleForClass:webViewClass] objectForInfoDictionaryKey:@"CFBundleVersion"];
-        if (![version isEqualToString:@"21624.5.1.11.3"]) {
-            SFRSetDetail(detail, @"background activity is unavailable on this unverified WebKit version");
-            return SFRCallStatusMissingSymbol;
-        }
         SEL completionSelector;
         SFRCallStatus status = SFRPrepare(webView, SFRActivityCompletion, @encode(void), "@?", &completionSelector, detail);
         if (status != SFRCallStatusOK) return status;
-        id pageURL = nil;
-        status = SFRGetObject(webView, @"URL", &pageURL, detail);
-        if (status != SFRCallStatusOK || ![pageURL isKindOfClass:NSURL.class]) {
-            SFRSetDetail(detail, @"background page must be loaded before input");
-            return SFRCallStatusException;
-        }
         NSApplication *app = NSApplication.sharedApplication;
         NSWindow *window = [webView window];
-        if (!window || window.isKeyWindow || app.isActive) {
-            SFRSetDetail(detail, @"background input requires an inactive application and non-key target");
+        if (!window) {
+            SFRSetDetail(detail, @"background input requires a target window");
             return SFRCallStatusException;
         }
         Method keyMethod = class_getInstanceMethod(object_getClass(app), @selector(keyWindow));
@@ -810,27 +804,29 @@ SFRCallStatus SFRBeginBackgroundPageActivity(id webView, id __autoreleasing *lea
         // A local notification schedules a genuine WindowIsActive update. Merely
         // recalculating cached UI activity does not send the change to WebContent.
         // No NSWindow key state or WindowServer activation method is invoked.
-        token.notifiedActive = YES;
-        [NSNotificationCenter.defaultCenter postNotificationName:NSWindowDidBecomeKeyNotification object:window];
+        if (!app.isActive) {
+            token.notifiedActive = YES;
+            [NSNotificationCenter.defaultCenter postNotificationName:NSWindowDidBecomeKeyNotification object:window];
+        }
         status = SFRCallWithVoidCompletion(webView, SFRActivityCompletion, ready, detail);
         if (status != SFRCallStatusOK) {
-            [token closeWithCompletion:^{} detail:NULL];
+            [token closeWithCompletion:^{} waitForPageUpdate:NO detail:NULL];
             *lease = nil;
         }
         return status;
     } @catch (NSException *exception) {
-        if (token) [token closeWithCompletion:^{} detail:NULL];
+        if (token) [token closeWithCompletion:^{} waitForPageUpdate:NO detail:NULL];
         *lease = nil;
         return SFRException(exception, detail);
     }
 }
 
-SFRCallStatus SFRFinishBackgroundPageActivity(id lease, void (^ready)(void), NSString **detail) {
+SFRCallStatus SFRFinishBackgroundPageActivity(id lease, BOOL waitForPageUpdate, void (^ready)(void), NSString **detail) {
     if (![NSThread isMainThread] || ![lease isKindOfClass:SFRBackgroundPageActivityToken.class] || !ready) {
         SFRSetDetail(detail, @"invalid background activity lease or thread");
         return SFRCallStatusSignatureMismatch;
     }
-    return [(SFRBackgroundPageActivityToken *)lease closeWithCompletion:ready detail:detail];
+    return [(SFRBackgroundPageActivityToken *)lease closeWithCompletion:ready waitForPageUpdate:waitForPageUpdate detail:detail];
 }
 
 void SFRRemoveDisplayOverride(void) {

@@ -68,7 +68,7 @@ public actor AutomationRunnerClient {
     private init(owner: OwnedRunnerProcess, profileID: UUID, runnerInstanceID: UUID, channel: AutomationChannel, context: ControllerGenerationContext) {
         self.owner = owner; self.pid = owner.pid; self.ownershipID = owner.ownershipID
         let (end, overflow) = context.lifetimeStart.addingReportingOverflow(UInt64(AutomationLimits.generationSeconds * 1_000_000_000))
-        self.absoluteLifetimeDeadline = overflow ? nil : Double(end) / 1_000_000_000
+        self.absoluteLifetimeDeadline = context.registrationNonce != nil || overflow ? nil : Double(end) / 1_000_000_000
         self.profileID = profileID; self.runnerInstanceID = runnerInstanceID; self.channel = channel; self.fixtureContext = context
     }
     deinit {
@@ -294,9 +294,9 @@ public actor AutomationRunnerClient {
         let reserved = isReserved(request.action)
         // Keep two correlation tombstones for cleanup. At the hard limit the
         // channel is closed: no cleanup or other request can be safely correlated.
-        if sentIDs.count >= maxSentIDs { failConnection(.replayWindowFull); throw AutomationError(code: .replayWindowFull) }
+        if fixtureContext.registrationNonce == nil && sentIDs.count >= maxSentIDs { failConnection(.replayWindowFull); throw AutomationError(code: .replayWindowFull) }
         guard pending[request.requestID] == nil, !sentIDs.contains(request.requestID) else { throw AutomationError(code: .requestIDReused) }
-        if !reserved && sentIDs.count >= maxSentIDs - 2 { throw AutomationError(code: .replayWindowFull) }
+        if fixtureContext.registrationNonce == nil && !reserved && sentIDs.count >= maxSentIDs - 2 { throw AutomationError(code: .replayWindowFull) }
         if case .openSession(let id) = request.action, id != profileID { throw AutomationError(code: .invalidRequest) }
         guard reserved ? reservedCount < maxReserved : ordinaryCount < maxOrdinary else { throw AutomationError(code: .sessionBusy) }
         let start = DispatchTime.now().uptimeNanoseconds
@@ -420,8 +420,8 @@ public actor AutomationRunnerClient {
         if DispatchTime.now().uptimeNanoseconds >= item.deadline { finishFailure(id, code: .timeout, definitelyUnsent: true); return }
         // Preserve the actual client's original attempt boundary: all new async
         // mint/validation work is part of the send attempt, not pre-attempt wait.
-        if sentIDs.count >= maxSentIDs { failConnection(.replayWindowFull); return }
-        if !write.reserved && sentIDs.count >= maxSentIDs - 2 { finishFailure(id, code: .replayWindowFull, definitelyUnsent: true); return }
+        if fixtureContext.registrationNonce == nil && sentIDs.count >= maxSentIDs { failConnection(.replayWindowFull); return }
+        if fixtureContext.registrationNonce == nil && !write.reserved && sentIDs.count >= maxSentIDs - 2 { finishFailure(id, code: .replayWindowFull, definitelyUnsent: true); return }
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         let hoverIsMove: Bool
         if case .move = item.action { hoverIsMove = true; hoverCoreTrace("client.move_attempt_before") }
@@ -690,7 +690,7 @@ public actor AutomationRunnerClient {
         case (.capabilities, .capabilities(let c)): return c.role == "runner"
         case (.openSession, .sessionOpened(_, let target, _)): return matches(target)
         case (.getState, .stateRead(let state)): return matches(state.target)
-        case (.navigate, .navigationSubmitted), (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished), (.screenshot, .snapshotWritten): return true
+        case (.navigate, .navigationSubmitted), (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished), (.navigateByInput, .nativeDelivered), (.screenshot, .snapshotWritten): return true
         case (.move, .nativeDelivered), (.mouseDown, .nativeDelivered), (.mouseUp, .nativeDelivered), (.click, .nativeDelivered), (.scroll, .nativeDelivered), (.insertText, .nativeDelivered), (.key, .nativeDelivered): return true
         case (.cancel, .sessionClosed), (.closeSession, .sessionClosed): return true
         case (.releaseControl, .controlReleasePrepared(let value)): return matches(value.target)

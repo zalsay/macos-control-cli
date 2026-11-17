@@ -47,6 +47,7 @@ public final class AutomationSnapshotStore: @unchecked Sendable, CustomStringCon
     private var deadline: Double = 0
     private var lastTime: Double = 0
     private var successes = 0
+    private var registeredSessionLifetime = false
     private var closedResult: AutomationSnapshotCleanup?
     private var directoryName = ""
 
@@ -240,12 +241,19 @@ public final class AutomationSnapshotStore: @unchecked Sendable, CustomStringCon
             return Self.privateFile(opened) && Self.privateFile(named) && Identity(opened) == entry.identity && Identity(named) == entry.identity && Self.noACL(entry.fd)
         } catch { return false }
     }
+    /// Retain artifacts for a registered browser session instead of the fixture TTL.
+    /// The caller configures this before the first screenshot.
+    public func useRegisteredSessionLifetime() {
+        lock.lock(); defer { lock.unlock() }
+        guard closedResult == nil, records.isEmpty, successes == 0 else { return }
+        registeredSessionLifetime = true
+    }
     private func validateTime() throws {
         guard closedResult == nil else { throw AutomationError(code: .sessionExpired) }
         let instant = clock()
         guard instant.isFinite, instant >= lastTime else { _ = closeLocked(); throw AutomationError(code: .invalidRequest) }
         lastTime = instant
-        guard instant < deadline else { _ = closeLocked(); throw AutomationError(code: .sessionExpired) }
+        guard registeredSessionLifetime || instant < deadline else { _ = closeLocked(); throw AutomationError(code: .sessionExpired) }
     }
     private func validate(_ png: Data, viewport v: AutomationViewport) throws {
         let values = [v.viewportWidthPoints, v.viewportHeightPoints, v.scaleX, v.scaleY, v.pageZoom]
@@ -269,7 +277,9 @@ public final class AutomationSnapshotStore: @unchecked Sendable, CustomStringCon
     public func write(png: Data, viewport: AutomationViewport) throws -> URL {
         lock.lock(); defer { lock.unlock() }
         try validateTime(); try validate(png, viewport: viewport)
-        guard successes < AutomationLimits.screenshotCount, records.count + untrackedCreated < AutomationLimits.screenshotCount else { throw AutomationError(code: .replayWindowFull) }
+        if !registeredSessionLifetime {
+            guard successes < AutomationLimits.screenshotCount, records.count + untrackedCreated < AutomationLimits.screenshotCount else { throw AutomationError(code: .replayWindowFull) }
+        }
         guard verifyPath(), let dir = chain.last?.fd else { throw AutomationError(code: .backendUnavailable) }
         let name = UUID().uuidString.lowercased() + ".png"
         let fd = name.withCString { openat(dir, $0, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600) }
@@ -305,6 +315,13 @@ public final class AutomationSnapshotStore: @unchecked Sendable, CustomStringCon
             try validateTime()
             guard verifyPath(), verifyFile(entry, dir: dir) else { throw AutomationError(code: .backendUnavailable) }
             successes += 1
+            if registeredSessionLifetime && records.count > 32 {
+                let oldest = records[0]
+                if verifyFile(oldest, dir: dir), oldest.name.withCString({ unlinkat(dir, $0, 0) }) == 0 {
+                    Darwin.close(oldest.fd)
+                    records.removeFirst()
+                }
+            }
             return baseDirectory.appendingPathComponent(directoryName, isDirectory: true).appendingPathComponent(name, isDirectory: false)
         } catch {
             if tracked, let index = records.firstIndex(where: { $0.fd == fd }), verifyPath(), verifyFile(records[index], dir: dir), name.withCString({ unlinkat(dir, $0, 0) }) == 0 {
@@ -321,7 +338,7 @@ public final class AutomationSnapshotStore: @unchecked Sendable, CustomStringCon
         let instant = clock()
         guard instant.isFinite, instant >= lastTime else { _ = closeLocked(); throw AutomationError(code: .invalidRequest) }
         lastTime = instant
-        if instant >= deadline { return closeLocked() }
+        if !registeredSessionLifetime && instant >= deadline { return closeLocked() }
         return nil
     }
     @discardableResult public func close() -> AutomationSnapshotCleanup {

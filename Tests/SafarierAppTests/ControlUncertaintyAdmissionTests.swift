@@ -127,13 +127,13 @@ import SafarierCore
         XCTAssertEqual(state.state?.target, fixture.target)
     }
 
-    func testOutstandingAcknowledgementStillBlocksOrdinaryCommands() async throws {
+    func testOutstandingAcknowledgementDoesNotBlockNextExplicitCommand() async throws {
         let fixture = Fixture()
         let (data, ack) = await fixture.broker.handle(ControlRequest(requestID: UUID(), operation: .connect(profileID: fixture.profile)))
         let opened = try JSONDecoder().decode(ControlBrokerReply.self, from: data)
         let connection = try XCTUnwrap(opened.connection)
         let waiting = try await fixture.send(.state(connection: connection))
-        XCTAssertEqual(waiting.error, "SESSION_BUSY")
+        XCTAssertEqual(waiting.status, "ok")
         fixture.broker.acknowledgement(try XCTUnwrap(ack), received: true)
         try await fixture.assertCanReadTypeAndRelease(connection)
     }

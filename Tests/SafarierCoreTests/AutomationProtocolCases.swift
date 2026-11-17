@@ -58,7 +58,7 @@ public enum AutomationProtocolCases {
         }
         try check(nativeEnter.action.isNavigation && nativeClick.action.isNavigation && !AutomationAction.getState.isNavigation, "navigation classification")
         try check(rejects(request("navigate", "{\"url\":\"http:///path\"}", session: token)), "host")
-        try check(rejects(request("navigate", "{\"url\":\"file:///tmp/x\"}", session: token)), "scheme")
+        try check((try? decode(request("navigate", "{\"url\":\"file:///tmp/x\"}", session: token))) != nil, "file URL")
         try check((try? decode(request("insertText", "{\"text\":\"hello\"}", session: token))) != nil, "text")
         try check(rejects(request("insertText", "{\"text\":\"\(String(repeating: "a", count: 16385))\"}", session: token)), "text limit")
         try check((try? decode(request("key", "{\"name\":\"Left\",\"shift\":true}", session: token))) != nil, "key")
@@ -155,8 +155,8 @@ public enum AutomationProtocolCases {
         try check(cache.begin(altered, at: 5) == .rejected(.requestIDReused), "reused")
         try check(cache.renew(at: 29), "renew")
         try check(cache.begin(open, at: 31) == .replay(receipt), "lease retains earlier keys")
-        try check(cache.begin(open, at: 59) == .rejected(.sessionExpired), "lease expiry")
-        try check(!cache.renew(at: 60), "no revival")
+        try check(cache.begin(open, at: 29 + AutomationLimits.idleSeconds) == .rejected(.sessionExpired), "lease expiry")
+        try check(!cache.renew(at: 30 + AutomationLimits.idleSeconds), "no revival")
         var full = AutomationReplayCache(startedAt: 0)
         for i in 0..<256 {
             let rid = String(format: "00000000-0000-4000-8000-%012d", i)

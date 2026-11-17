@@ -42,23 +42,43 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         guard !controlReleaseCommitted, let value, AutomationSessionToken.isCanonical(value) else { return false }
         return value.utf8.elementsEqual(token.utf8)
     }
+    public var isRegisteredInteractive: Bool { registeredInteractive }
     public var boundTarget: AutomationTargetIdentity? { target }
     public var boundViewport: AutomationViewport? { viewport }
     public var currentTicket: AutomationSessionTicket? { flight?.ticket }
+    public func synchronizeViewport(target observed: AutomationTargetIdentity, viewport view: AutomationViewport) -> Bool {
+        guard observed == target, state == .ready, flight == nil else { return false }
+        if releasePreparation != nil { return true }
+        if registeredInteractive {
+            guard viewportValid(view, target: observed) else { return false }
+            viewport = view
+            return true
+        }
+        guard
+              let old = viewport, view.viewVersion >= old.viewVersion,
+              viewportValid(view, target: observed),
+              view.viewportWidthPoints == old.viewportWidthPoints, view.viewportHeightPoints == old.viewportHeightPoints,
+              view.pixelWidth == old.pixelWidth, view.pixelHeight == old.pixelHeight,
+              view.scaleX == old.scaleX, view.scaleY == old.scaleY, view.pageZoom == old.pageZoom else { return false }
+        viewport = view
+        return true
+    }
     public var currentCleanupTicket: AutomationSessionCleanupTicket? { cleanupTicket }
     public var nextDeadline: Double? {
         switch state {
         case .closed, .released: return nil
         case .stopping: return cleanupDeadline
-        default: return [idleDeadline, holdDeadline, flight?.deadline, releaseDeadline].compactMap { $0 }.min()
+        default: return [registeredInteractive ? nil : idleDeadline, holdDeadline, flight?.deadline, releaseDeadline].compactMap { $0 }.min()
         }
     }
     private struct Flight {
         let ticket: AutomationSessionTicket
         let request: AutomationRequest
         let deadline: Double
+        let previousViewport: AutomationViewport
     }
     private let instanceID = UUID()
+    private let registeredInteractive: Bool
     private let profileID: UUID
     private let token: String
     private var target: AutomationTargetIdentity?
@@ -82,16 +102,17 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
     private var releasePreparation: ControlReleasePreparation?
     private var releaseDeadline: Double?
 
-    private init(profileID: UUID, token: String, at now: Double) {
+    private init(profileID: UUID, token: String, at now: Double, registeredInteractive: Bool) {
+        self.registeredInteractive = registeredInteractive
         self.profileID = profileID; self.token = token; self.lastTime = now
         self.idleDeadline = now + AutomationLimits.idleSeconds
-        self.replay = AutomationReplayCache(startedAt: now)
+        self.replay = AutomationReplayCache(startedAt: now, expiresWhenIdle: !registeredInteractive)
     }
-    public static func open(profileID: UUID, allowsBackgroundAutomation: Bool, humanProfileRunning: Bool, token: String, at now: Double) -> Result<AutomationSessionMachine, AutomationError> {
+    public static func open(profileID: UUID, allowsBackgroundAutomation: Bool, humanProfileRunning: Bool, token: String, at now: Double, registeredInteractive: Bool = false) -> Result<AutomationSessionMachine, AutomationError> {
         guard allowsBackgroundAutomation else { return .failure(AutomationError(code: .profileNotAllowed)) }
         guard !humanProfileRunning else { return .failure(AutomationError(code: .profileAlreadyRunning)) }
         guard AutomationSessionToken.isCanonical(token), now.isFinite, (now + AutomationLimits.idleSeconds).isFinite else { return .failure(AutomationError(code: .invalidRequest)) }
-        return .success(AutomationSessionMachine(profileID: profileID, token: token, at: now))
+        return .success(AutomationSessionMachine(profileID: profileID, token: token, at: now, registeredInteractive: registeredInteractive))
     }
     private func reply(_ request: AutomationRequest, _ code: AutomationErrorCode, effects: AutomationSideEffects = .none) -> AutomationSessionEffect {
         .reply(AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: code, sideEffects: effects))))
@@ -161,7 +182,7 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         lastTime = now
         if state == .stopping, let deadline = cleanupDeadline, now >= deadline { return finalizeCleanup(closeReceipt, at: now) }
         guard state != .closed && state != .released && state != .stopping else { return [] }
-        if now >= idleDeadline { return stop(.expired, at: now) }
+        if !registeredInteractive && now >= idleDeadline { return stop(.expired, at: now) }
         if let deadline = holdDeadline, now >= deadline { return stop(.heldDeadline, at: now) }
         if let deadline = releaseDeadline, now >= deadline { return stop(.expired, at: now) }
         if let f = flight, now >= f.deadline { return stop(.expired, at: now) }
@@ -183,9 +204,16 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         case .runnerExited: return stop(.runnerExited, at: now)
         case .targetChanged: return stop(.targetChanged, at: now)
         case .blocked:
+            if registeredInteractive { return [] }
             if state == .held || flight != nil { return stop(.targetChanged, at: now) }
             if state == .ready { state = .blocked }; return []
         case let .geometryChanged(observed, view):
+            if registeredInteractive {
+                guard observed == target, viewportValid(view, target: observed) else { return stop(.targetChanged, at: now) }
+                // Do not disturb an in-flight receipt; synchronize on the next request.
+                if flight == nil { viewport = view }
+                return []
+            }
             guard observed == target, let current = viewport, viewportValid(view, target: observed), view.viewVersion > current.viewVersion else { return stop(.targetChanged, at: now) }
             if state == .held || flight != nil { return stop(.targetChanged, at: now) }
             viewport = view; return []
@@ -198,7 +226,7 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         if permission, observed == target, (try? AutomationCodec.encodeRequest(request)) != nil {
             if let closing = closeRequest, closing.requestID == request.requestID, closing.action != request.action {
                 reusedInFlight = true
-            } else if state != .closed, now.isFinite, now >= lastTime, now < idleDeadline, knownIDs.contains(request.requestID) {
+            } else if state != .closed, now.isFinite, now >= lastTime, (registeredInteractive || now < idleDeadline), knownIDs.contains(request.requestID) {
                 if case .rejected(.requestIDReused) = replayBegin(request, at: now) { reusedInFlight = true }
             }
         }
@@ -214,7 +242,7 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
                     guard recorded == isCancel else { return [reply(request, .requestIDReused)] }
                 } else {
                     guard !knownIDs.contains(request.requestID) else { return [reply(request, .requestIDReused)] }
-                    guard knownIDs.count < AutomationLimits.replayEntries else { return [reply(request, .replayWindowFull)] }
+                    guard registeredInteractive || knownIDs.count < AutomationLimits.replayEntries else { return [reply(request, .replayWindowFull)] }
                     knownIDs.insert(request.requestID)
                     terminalCloseKinds[request.requestID] = isCancel
                 }
@@ -268,13 +296,14 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         }
         guard flight == nil else { return [reply(request, .sessionBusy)] }
         guard let view = viewport else { return [reply(request, .targetChanged)] }
+        if !registeredInteractive, let expected = request.expectedViewVersion, expected != view.viewVersion { return [reply(request, .targetChanged)] }
         switch request.action {
-        case .releaseControl: if state != .ready { return [reply(request, .invalidPointerState)] }
+        case .releaseControl: if state != .ready && !(registeredInteractive && state == .held) { return [reply(request, .invalidPointerState)] }
         case .commitControlRelease: if state != .ready { return [reply(request, .invalidPointerState)] }
         case .mouseDown: if state == .held { return [reply(request, .invalidPointerState)] }
         case .mouseUp: if state != .held { return [reply(request, .invalidPointerState)] }
         case .click: if state == .held { return [reply(request, .invalidPointerState)] }
-        case .navigate, .navigateByInput: if state == .held { return stop(.targetChanged, at: now) + [reply(request, .invalidPointerState)] }
+        case .navigate, .navigateByInput: if state == .held { return (registeredInteractive ? [] : stop(.targetChanged, at: now)) + [reply(request, .invalidPointerState)] }
         default: break
         }
         let pointVersion: (ViewportPoint, UInt64)?
@@ -284,11 +313,11 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         default: pointVersion = nil
         }
         if let (point, version) = pointVersion {
-            guard version == view.viewVersion else { return [reply(request, .targetChanged)] }
+            guard registeredInteractive || version == view.viewVersion else { return [reply(request, .targetChanged)] }
             guard point.x.isFinite, point.y.isFinite, point.x >= 0, point.y >= 0, point.x < view.viewportWidthPoints, point.y < view.viewportHeightPoints else { return [reply(request, .outOfBounds)] }
         }
-        if case let .navigateByInput(.enter, version) = request.action, version != view.viewVersion { return [reply(request, .targetChanged)] }
-        if request.action.isNavigation, view.viewVersion == UInt64.max { return stop(.targetChanged, at: now) + [reply(request, .targetChanged)] }
+        if case let .navigateByInput(.enter, version) = request.action, !registeredInteractive, version != view.viewVersion { return [reply(request, .targetChanged)] }
+        if !registeredInteractive, request.action.isNavigation, view.viewVersion == UInt64.max { return stop(.targetChanged, at: now) + [reply(request, .targetChanged)] }
         guard epoch < UInt64.max else { return stop(.expired, at: now) + [reply(request, .sessionExpired)] }
         switch replayBegin(request, at: now) {
         case .reserved: knownIDs.insert(request.requestID)
@@ -297,15 +326,19 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         }
         guard replayRenew(at: now), (now + AutomationLimits.idleSeconds).isFinite else { return stop(.expired, at: now) + [reply(request, .sessionExpired)] }
         idleDeadline = now + AutomationLimits.idleSeconds
-        if request.action.isNavigation {
+        if !registeredInteractive && request.action.isNavigation {
             viewport = AutomationViewport(viewportWidthPoints: view.viewportWidthPoints, viewportHeightPoints: view.viewportHeightPoints, pixelWidth: view.pixelWidth, pixelHeight: view.pixelHeight, scaleX: view.scaleX, scaleY: view.scaleY, pageZoom: view.pageZoom, viewVersion: view.viewVersion + 1)
         }
-        if case .mouseDown = request.action { holdDeadline = now + AutomationLimits.heldSeconds }
+        if case .mouseDown = request.action, !registeredInteractive { holdDeadline = now + AutomationLimits.heldSeconds }
         bumpEpoch(); let ticket = AutomationSessionTicket(instanceID: instanceID, epoch: epoch, requestID: request.requestID)
         let duration = request.action.isNavigation ? AutomationLimits.navigationSeconds : AutomationLimits.actionSeconds
-        if case .releaseControl = request.action { releaseDeadline = now + AutomationLimits.actionSeconds }
-        let deadline = releaseDeadline ?? (now + duration)
-        flight = Flight(ticket: ticket, request: request, deadline: deadline)
+        if case .releaseControl = request.action {
+            releaseDeadline = now + (registeredInteractive ? AutomationLimits.releaseHandshakeSeconds : AutomationLimits.actionSeconds)
+        }
+        // Preparing and committing are separate actions. Keep a bounded handshake
+        // between them without spending the commit's entire budget on preparation.
+        let deadline = min(releaseDeadline ?? .infinity, now + duration)
+        flight = Flight(ticket: ticket, request: request, deadline: deadline, previousViewport: view)
         return [.dispatch(ticket, request)]
     }
     public func complete(ticket: AutomationSessionTicket, reply response: AutomationReply, at now: Double) -> [AutomationSessionEffect] {
@@ -316,8 +349,14 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         guard validated else {
             return stop(.targetChanged, at: now)
         }
-        if case .failure(let failure) = response.outcome, !isReadOnly(request.action), failure.sideEffects != .none {
+        if !registeredInteractive, case .failure(let failure) = response.outcome, !isReadOnly(request.action), failure.sideEffects != .none {
             return stop(.targetChanged, at: now)
+        }
+        // Navigation reserves its next viewport at dispatch. A known pre-dispatch
+        // busy rejection has not consumed that version and remains retryable.
+        if request.action.isNavigation, case .failure(let failure) = response.outcome,
+           (failure.code == .sessionBusy || failure.code == .targetChanged), failure.sideEffects == .none {
+            viewport = current.previousViewport
         }
         flight = nil
         if case .success = response.outcome {
@@ -329,7 +368,9 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         }
         if case .success(let result) = response.outcome {
             switch result {
-            case .controlReleasePrepared(let preparation): releasePreparation = preparation
+            case .controlReleasePrepared(let preparation):
+                releasePreparation = preparation
+                if registeredInteractive { state = .ready; holdDeadline = nil }
             case .controlReleased:
                 controlReleaseCommitted = true; state = .released; releasePreparation = nil; releaseDeadline = nil; replay = nil
             default: break
@@ -346,14 +387,15 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
             return value.target == target && value.inputReleased && value.artifactsCleaned && value.browserRetained
         case let (.commitControlRelease(transferID), .controlReleased(value)):
             return releasePreparation?.transferID == transferID && value.transferID == transferID && value.target == target && value.inputReleased && value.artifactsCleaned && value.browserRetained && value.manualInteractionEnabled
-        case let (.getState, .stateRead(value)): return value.target == target && value.viewVersion == viewport?.viewVersion && value.sessionState == state
-        case let (.screenshot, .snapshotWritten(_, value)): return value == viewport
-        case let (.navigate, .navigationSubmitted(v)), let (.navigate, .navigationFinished(v)), let (.navigateByInput, .navigationFinished(v)): return v == viewport?.viewVersion
-        case let (.mouseDown, .nativeDelivered(_, buttons, v)): return buttons == 1 && v == viewport?.viewVersion
-        case let (.mouseUp, .nativeDelivered(_, buttons, v)): return buttons == 0 && v == viewport?.viewVersion
+        case let (.getState, .stateRead(value)): return value.target == target && (registeredInteractive || value.viewVersion == viewport?.viewVersion) && value.sessionState == state
+        case let (.screenshot, .snapshotWritten(_, value)): return registeredInteractive || value == viewport
+        case let (.navigate, .navigationSubmitted(v)), let (.navigate, .navigationFinished(v)), let (.navigateByInput, .navigationFinished(v)): return registeredInteractive || v == viewport?.viewVersion
+        case (.navigateByInput, .nativeDelivered): return registeredInteractive
+        case let (.mouseDown, .nativeDelivered(_, buttons, v)): return buttons == 1 && (registeredInteractive || v == viewport?.viewVersion)
+        case let (.mouseUp, .nativeDelivered(_, buttons, v)): return buttons == 0 && (registeredInteractive || v == viewport?.viewVersion)
         case let (.move, .nativeDelivered(_, buttons, v)), let (.scroll, .nativeDelivered(_, buttons, v)), let (.insertText, .nativeDelivered(_, buttons, v)), let (.key, .nativeDelivered(_, buttons, v)):
-            return buttons == (state == .held ? 1 : 0) && v == viewport?.viewVersion
-        case let (.click, .nativeDelivered(_, buttons, v)): return buttons == 0 && v == viewport?.viewVersion
+            return buttons == (state == .held ? 1 : 0) && (registeredInteractive || v == viewport?.viewVersion)
+        case let (.click, .nativeDelivered(_, buttons, v)): return buttons == 0 && (registeredInteractive || v == viewport?.viewVersion)
         default: return false
         }
     }

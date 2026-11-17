@@ -40,6 +40,31 @@ public enum AutomationSessionCases {
             return m
         }
         func dispatch(_ effects: [AutomationSessionEffect]) throws -> AutomationSessionTicket { guard let t = effects.ticket else { throw Failure(label: "expected dispatch") }; return t }
+        let refreshed = try fresh()
+        let nextView = AutomationViewport(viewportWidthPoints: 100, viewportHeightPoints: 80, pixelWidth: 200, pixelHeight: 160, scaleX: 2, scaleY: 2, pageZoom: 1, viewVersion: 2)
+        try check(refreshed.synchronizeViewport(target: target, viewport: nextView), "document viewport synchronized")
+        try check(refreshed.begin(request(.click(point: ViewportPoint(x: 1, y: 1), viewVersion: 1, count: 1)), permission: true, target: target, at: 1).containsReply(.targetChanged), "old document frame rejected")
+        let inFlight = try dispatch(refreshed.begin(request(.getState), permission: true, target: target, at: 1.1))
+        let thirdView = AutomationViewport(viewportWidthPoints: 100, viewportHeightPoints: 80, pixelWidth: 200, pixelHeight: 160, scaleX: 2, scaleY: 2, pageZoom: 1, viewVersion: 3)
+        try check(!refreshed.synchronizeViewport(target: target, viewport: thirdView) && refreshed.currentTicket == inFlight && refreshed.state == .ready, "inflight viewport sync deferred")
+        let versionedID = UUID()
+        let versioned = AutomationRequest(version: 1, requestID: versionedID, sessionID: token, action: .insertText("x"), expectedViewVersion: 1)
+        let changedFrame = AutomationRequest(version: 1, requestID: versionedID, sessionID: token, action: .insertText("x"), expectedViewVersion: 2)
+        let versionedDecoded = try AutomationCodec.decode(AutomationCodec.encodeRequest(versioned))
+        let legacyDecoded = try AutomationCodec.decode(AutomationCodec.encodeRequest(request(.getState)))
+        try check(versionedDecoded == versioned, "versioned request roundtrip")
+        try check(legacyDecoded.expectedViewVersion == nil, "legacy request remains valid")
+        var versionReplay = AutomationReplayCache(startedAt: 0)
+        if case .reserved = versionReplay.begin(versioned, at: 0.1) {} else { throw Failure(label: "versioned replay reserve") }
+        if case .rejected(.requestIDReused) = versionReplay.begin(changedFrame, at: 0.2) {} else { throw Failure(label: "changed frame must not replay") }
+        let rejectedNav = try fresh(), rejectedNavRequest = request(.navigate(url: URL(string: "https://example.com/loading")!))
+        let rejectedNavTicket = try dispatch(rejectedNav.begin(rejectedNavRequest, permission: true, target: target, at: 1))
+        let busyReply = AutomationReply(requestID: rejectedNavRequest.requestID, outcome: .failure(AutomationError(code: .sessionBusy)))
+        try check(rejectedNav.complete(ticket: rejectedNavTicket, reply: busyReply, at: 1.1).containsReply(busyReply), "loading rejection returned")
+        try check(rejectedNav.state == .ready && rejectedNav.boundViewport == viewport, "unsubmitted navigation restores viewport")
+        let retryNav = request(.navigate(url: URL(string: "https://example.com/retry")!))
+        _ = try dispatch(rejectedNav.begin(retryNav, permission: true, target: target, at: 1.2))
+        try check(rejectedNav.boundViewport?.viewVersion == 2, "retry reserves next viewport only once")
         let releasing = try fresh(), prepareRequest = request(.releaseControl), transferID = UUID()
         let prepareTicket = try dispatch(releasing.begin(prepareRequest, permission: true, target: target, at: 1))
         try check(releasing.begin(request(.releaseControl), permission: true, target: target, at: 1.1).containsReply(.sessionBusy), "release rejects in-flight")

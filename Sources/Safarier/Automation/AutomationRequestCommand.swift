@@ -126,11 +126,7 @@ final class AutomationRequestCommand: NSScriptCommand, @unchecked Sendable {
         default: intakeLimit = AutomationLimits.replayEntries - 2
         }
         guard MainActor.assumeIsolated({ AutomationScriptPendingCommands.count < intakeLimit }) else { return Self.errorText(.replayWindowFull) }
-        let timeout: Double
-        switch request.action {
-        case .openSession: timeout = AutomationLimits.startupSeconds
-        default: timeout = request.action.isNavigation ? AutomationLimits.navigationSeconds : AutomationLimits.actionSeconds
-        }
+        let timeout = request.action.managerTimeoutSeconds
         suspendExecution()
         let pendingID = UUID()
         MainActor.assumeIsolated { AutomationScriptPendingCommands.register(pendingID) }

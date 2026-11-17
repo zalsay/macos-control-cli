@@ -87,7 +87,7 @@ FOUNDATION_EXPORT SFRCallStatus SFRCallWithVoidCompletion(id target, NSString *s
 /// 仅已核验 WebKit 调用点在 Runner 主线程的窗口查询返回逻辑窗口；AppKit 和应用自身读取真实状态。
 /// 必须持有 lease，并在结束时调用 SFRFinishBackgroundPageActivity；释放 lease 也会恢复查询。
 FOUNDATION_EXPORT SFRCallStatus SFRBeginBackgroundPageActivity(id webView, id _Nullable __autoreleasing * _Nonnull lease, void (^ready)(void), NSString * _Nullable * _Nullable detail);
-FOUNDATION_EXPORT SFRCallStatus SFRFinishBackgroundPageActivity(id lease, void (^ready)(void), NSString * _Nullable * _Nullable detail);
+FOUNDATION_EXPORT SFRCallStatus SFRFinishBackgroundPageActivity(id lease, BOOL waitForPageUpdate, void (^ready)(void), NSString * _Nullable * _Nullable detail);
 
 /// Runner 内的常驻光标写保护；主线程前台行为走原实现，后台或非主线程写入被抑制，其他进程不受影响。
 FOUNDATION_EXPORT BOOL SFRBackgroundCursorProtectionIsInstalled(void);

@@ -93,12 +93,7 @@ final class BrowserSession: NSObject, NSApplicationDelegate, BrowserActions {
     }
 
     func controllerPolicy(_ controller: BrowserWindowController) -> BrowserExecutionPolicy {
-        #if SAFARIER_BOUND_LOCAL_CANDIDATE
-        if let current = registeredControl, current.monitor != nil, current.controller !== controller {
-            return .interactive
-        }
-        #endif
-        return executionPolicy
+        executionPolicy
     }
 
     func routeControllerUI<T>(_ request: BackgroundUIRequest, controller: BrowserWindowController, perform: () -> T, deny: () -> T) -> T {
@@ -169,9 +164,9 @@ final class BrowserSession: NSObject, NSApplicationDelegate, BrowserActions {
         return RunnerAutomationService(profileID: profileID, runnerInstanceID: context.runnerInstanceID,
             permissionReader: {
                 do {
-                    try await context.validatePermissionFirst()
+                    try context.checkLive()
                     let allowed = await RunnerAutomationService.repositoryPermission(profileID: profileID, root: root)
-                    try await context.validatePermissionSecond()
+                    try context.checkLive()
                     return allowed
                 } catch { return false }
             },
@@ -199,38 +194,7 @@ final class BrowserSession: NSObject, NSApplicationDelegate, BrowserActions {
         fputs("REGISTERED_RESTORE_DIAG phase=target.selected monotonic_ms=\(DispatchTime.now().uptimeNanoseconds / 1_000_000) windowID=\(controller.registeredWindowID.uuidString) pageID=\(controller.registeredPageID.uuidString) initialController=\(registeredInitialController === controller)\n", stderr)
         #endif
         // Attach must not retry startup presentation or change window ordering.
-        guard RegisteredAdmissionDiagnostic.check(registeredInitialPresentationConfirmed, .initialPresentation) else { throw AutomationError(code: .interactionRequired) }
-        if registeredInitialController === controller {
-            registeredInitialController = nil // Only the first attach may wait for startup.
-            let webView = controller.webView, window = controller.window
-            #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
-            let loadTraceStart = DispatchTime.now().uptimeNanoseconds
-            func traceInitialLoad(_ phase: StaticString, result: String = "ok") {
-                let now = DispatchTime.now().uptimeNanoseconds
-                let elapsed = now >= loadTraceStart ? (now - loadTraceStart) / 1_000_000 : 0
-                fputs("REGISTERED_LOAD_DIAG phase=\(phase) monotonic_ms=\(now / 1_000_000) elapsed_ms=\(elapsed) loading=\(webView.isLoading) urlPresent=\(webView.url != nil) result=\(result)\n", stderr)
-            }
-            traceInitialLoad("before")
-            #endif
-            do {
-            try await Self.waitForRegisteredInitialLoad(deadline: .now + .seconds(AutomationLimits.actionSeconds), validate: {
-                try await context.validate()
-                guard self.executionPolicy == .interactive, self.registeredTargetValid(controller, monitor: monitor),
-                      controller.session === self,
-                      controller.webView === webView, controller.window === window,
-                      webView.window === window else { throw AutomationError(code: .targetChanged) }
-                try controller.validateRegisteredAdmission(allowLoading: true, allowTabGroup: monitor != nil)
-            }, ready: { !webView.isLoading && webView.url != nil })
-            #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
-            traceInitialLoad("after")
-            #endif
-            } catch {
-                #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
-                traceInitialLoad("catch", result: (error as? AutomationError)?.code.rawValue ?? "other")
-                #endif
-                throw error
-            }
-        }
+        if registeredInitialController === controller { registeredInitialController = nil }
         return try await OwnedBrowserAutomationPage.attachRegistered(session: self, controller: controller, context: context, monitor: monitor, generation: generation)
     }
 
@@ -239,9 +203,9 @@ final class BrowserSession: NSObject, NSApplicationDelegate, BrowserActions {
     func selectRegisteredTarget(first: BrowserWindowController, onRevoke: @escaping @Sendable () -> Void,
                                 onInvalidated: @escaping @MainActor () -> Void) throws -> (BrowserWindowController, RegisteredTabMonitor?) {
         guard RegisteredAdmissionDiagnostic.check(controllers.first === first, .targetSelection) else { throw AutomationError(code: .interactionRequired) }
-        if controllers.count == 1 { return (first, nil) }
-        guard let group = first.window.tabGroup else { RegisteredAdmissionDiagnostic.check(false, .targetNoGroup); throw AutomationError(code: .interactionRequired) }
-        guard let monitor = RegisteredTabMonitor(group: group, windows: registeredWindows(), onRevoke: onRevoke, onInvalidated: onInvalidated) else { RegisteredAdmissionDiagnostic.check(false, .targetMonitor); throw AutomationError(code: .interactionRequired) }
+        guard let group = first.window.tabGroup else { return (first, nil) }
+        let groupWindows = registeredWindows().filter { group.windows.contains($0.0) }
+        guard let monitor = RegisteredTabMonitor(group: group, windows: groupWindows, onRevoke: onRevoke, onInvalidated: onInvalidated) else { RegisteredAdmissionDiagnostic.check(false, .targetMonitor); throw AutomationError(code: .interactionRequired) }
         guard let selected = controllers.first(where: { $0.registeredWindowID == monitor.selectedID }) else { RegisteredAdmissionDiagnostic.check(false, .targetSelected); throw AutomationError(code: .interactionRequired) }
         return (selected, monitor)
     }
@@ -253,16 +217,17 @@ final class BrowserSession: NSObject, NSApplicationDelegate, BrowserActions {
     @discardableResult func setRegisteredPolicyTestTarget(_ controller: BrowserWindowController, monitor: RegisteredTabMonitor, lease: RegisteredPresentationLease? = nil) -> UUID {
         guard let window = controller.window as? NonActivatingBrowserWindow else { preconditionFailure("test window type") }
         let generation = UUID()
+        monitor.stop()
         registeredControl = (generation, controller, lease ?? RegisteredPresentationLease(window: window), monitor)
-        executionPolicy = .automationBackground
         return generation
     }
     #endif
 
     func registeredTargetValid(_ controller: BrowserWindowController, monitor: RegisteredTabMonitor?) -> Bool {
         guard controller.session === self, controllers.contains(where: { $0 === controller }) else { return false }
-        if let monitor { return monitor.selectedID == controller.registeredWindowID && monitor.matches(windows: registeredWindows()) && monitor.isValid() }
-        return controllers.count == 1 && controllers.first === controller
+        if let current = registeredControl, current.controller === controller { return true }
+        if let monitor { return monitor.selectedID == controller.registeredWindowID && monitor.isValid() }
+        return true
     }
 
     static func waitForRegisteredInitialLoad(deadline: ContinuousClock.Instant,
@@ -287,8 +252,8 @@ final class BrowserSession: NSObject, NSApplicationDelegate, BrowserActions {
             throw AutomationError(code: .interactionRequired)
         }
         let state = try controller.beginRegisteredControl(allowTabGroup: monitor != nil)
+        monitor?.stop()
         registeredControl = (generation, controller, state, monitor)
-        executionPolicy = .automationBackground
         return generation
     }
 
@@ -296,7 +261,7 @@ final class BrowserSession: NSObject, NSApplicationDelegate, BrowserActions {
         guard let current = registeredControl, current.generation == generation,
               current.controller === controller, registeredTargetValid(controller, monitor: current.monitor),
               controller.session === self, current.state.window === controller.window,
-              executionPolicy == .automationBackground else { return false }
+              executionPolicy == .interactive else { return false }
         return BrowserWindowController.registeredPresentationValid(window: controller.window,
             webView: controller.webView, leaseID: current.state.id)
     }
@@ -309,17 +274,17 @@ final class BrowserSession: NSObject, NSApplicationDelegate, BrowserActions {
         guard let registeredControl, registeredControl.generation == generation,
               registeredControl.controller === controller, controller.session === self,
               input.window === controller.window, input.webView === controller.webView,
-              executionPolicy == .automationBackground else { return false }
+              executionPolicy == .interactive else { return false }
+        do { try await input.releaseRegisteredButtonIfHeld(); try await input.drain() } catch { return false }
         input.closeActivity()
         do { try await input.waitUntilClosed() } catch { return false }
         return restoreRegisteredControl(controller: controller, generation: generation, input: input)
     }
 
     func presentRegisteredControl(controller: BrowserWindowController, generation: UUID, input: NativePageInput) throws {
-        guard registeredInitialPresentationConfirmed,
-              let current = registeredControl, current.generation == generation,
+        guard let current = registeredControl, current.generation == generation,
               current.controller === controller, registeredTargetValid(controller, monitor: current.monitor),
-              controller.session === self, executionPolicy == .automationBackground,
+              controller.session === self, executionPolicy == .interactive,
               input.window === controller.window, input.webView === controller.webView,
               input.registeredPresentationNotStarted else { throw AutomationError(code: .targetChanged) }
         let confirmed = current.state.present()
@@ -331,7 +296,7 @@ final class BrowserSession: NSObject, NSApplicationDelegate, BrowserActions {
                                   input: NativePageInput) -> Bool {
         fputs("RELEASE_DIAG phase=session.restore.before monotonic_ms=\(DispatchTime.now().uptimeNanoseconds / 1_000_000)\n", stderr)
         guard let current = self.registeredControl, current.generation == generation,
-              current.controller === controller, controllers.contains(where: { $0 === controller }), executionPolicy == .automationBackground,
+              current.controller === controller, controllers.contains(where: { $0 === controller }), executionPolicy == .interactive,
               controller.restoreRegisteredControl(current.state, input: input) else { return false }
         current.monitor?.stop()
         fputs("RELEASE_DIAG phase=session.monitor.stopped monotonic_ms=\(DispatchTime.now().uptimeNanoseconds / 1_000_000)\n", stderr)

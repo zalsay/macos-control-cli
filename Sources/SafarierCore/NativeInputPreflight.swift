@@ -27,7 +27,7 @@ public enum NativeInputPreflight {
         guard shift else { return true }
         switch name {
         case .tab, .left, .right, .up, .down, .home, .end: return true
-        case .backspace, .delete, .enter, .escape: return false
+        case .backspace, .delete, .enter, .escape, .pageUp, .pageDown: return false
         }
     }
     public static func textAllowed(_ text: String) -> Bool { text.utf8.count <= AutomationLimits.textBytes }

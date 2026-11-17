@@ -128,10 +128,7 @@ final class ControlAppleEventClient {
     }
 
     func send(_ request: AutomationRequest) async throws -> AutomationReply {
-        let timeout: UInt32
-        if request.action.isNavigation { timeout = UInt32(AutomationLimits.navigationSeconds) + UInt32(AutomationLimits.actionSeconds) }
-        else if case .openSession = request.action { timeout = UInt32(AutomationLimits.startupSeconds) + UInt32(AutomationLimits.actionSeconds) }
-        else { timeout = UInt32(AutomationLimits.actionSeconds) + UInt32(AutomationLimits.actionSeconds) }
+        let timeout = UInt32(request.action.managerTimeoutSeconds + AutomationLimits.actionSeconds)
         NavigationDiagnostic.emit(request, "sender.begin")
         do {
         let start = DispatchTime.now().uptimeNanoseconds

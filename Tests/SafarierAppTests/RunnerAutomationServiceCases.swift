@@ -42,16 +42,18 @@ import Darwin
         var identity: AutomationTargetIdentity
         var onBlocked: ((BackgroundUIRequest) -> Void)?
         var destroyed = 0, calls = 0, quiesced = 0, effects = 0
+        var rejectForNavigation = false, prepared = false, committed = false
         var performGate: Gate<Void>?
         var onPerform: (() -> Void)?
         var destroyGate: Gate<Bool>?
         var snapshotGate: Gate<RunnerAutomationPageSnapshot>?
-        let view = AutomationViewport(viewportWidthPoints: 1, viewportHeightPoints: 1, pixelWidth: 1, pixelHeight: 1, scaleX: 1, scaleY: 1, pageZoom: 1, viewVersion: 1)
+        var view = AutomationViewport(viewportWidthPoints: 1, viewportHeightPoints: 1, pixelWidth: 1, pixelHeight: 1, scaleX: 1, scaleY: 1, pageZoom: 1, viewVersion: 1)
         init(identity: AutomationTargetIdentity) { self.identity = identity }
         func viewport() throws -> AutomationViewport { view }
         func readState(sessionState: AutomationSessionState, expectedViewport: AutomationViewport) throws -> AutomationState { AutomationState(target: identity, url: URL(string: "about:blank"), loading: false, sessionState: sessionState, viewVersion: expectedViewport.viewVersion) }
         func perform(_ action: AutomationAction, expectedViewport: AutomationViewport) async throws -> AutomationResult {
             calls += 1; onPerform?()
+            if rejectForNavigation { throw AutomationNavigationInProgress.busy }
             if let performGate { await performGate.wait(); if quiesced == 0 { effects += 1 } }
             if case .mouseDown = action { return .nativeDelivered(sequence: UInt64(calls), buttons: 1, viewVersion: expectedViewport.viewVersion) }
             return .nativeDelivered(sequence: UInt64(calls), buttons: 0, viewVersion: expectedViewport.viewVersion)
@@ -61,7 +63,77 @@ import Darwin
             return RunnerAutomationPageSnapshot(png: Data([137,80,78,71,13,10,26,10, 0,0,0,13,73,72,68,82, 0,0,0,1,0,0,0,1, 8,6,0,0,0, 0,0,0,0]), viewport: expectedViewport)
         }
         func quiesceInput() { quiesced += 1 }
+        func prepareControlRelease() async throws { prepared = true }
+        func commitControlRelease() throws { guard prepared else { throw AutomationError(code: .targetChanged) }; committed = true }
+        func finishControlRelease() throws { guard committed else { throw AutomationError(code: .targetChanged) } }
         func destroy() async -> Bool { destroyed += 1; if let destroyGate { return await destroyGate.wait() }; return true }
+    }
+    public static func runLoadingRejection(base: URL) async throws -> Int {
+        let id = UUID(), instance = UUID(), target = AutomationTargetIdentity(profileID: id, runnerInstanceID: instance, windowID: UUID(), pageID: UUID())
+        let page = Page(identity: target)
+        let service = RunnerAutomationService(profileID: id, runnerInstanceID: instance, permissionReader: { true }, pageFactory: { page }, snapshotFactory: { try AutomationSnapshotStore(baseDirectory: base) }, pageOwnership: .borrowed)
+        let open = AutomationRequest(version: 1, requestID: UUID(), sessionID: nil, action: .openSession(profileID: id))
+        guard case let .success(.sessionOpened(token, _, _)) = await service.handle(open).outcome else { throw Failure(label: "loading open") }
+        page.rejectForNavigation = true
+        let actions: [AutomationAction] = [.click(point: ViewportPoint(x: 0, y: 0), viewVersion: 1, count: 1), .insertText("a"), .navigate(url: URL(string: "https://example.com/")!)]
+        for action in actions {
+            let reply = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: action))
+            guard reply.outcome == .failure(AutomationError(code: .sessionBusy)) else { throw Failure(label: "loading rejection lost: \(reply.outcome)") }
+        }
+        let state = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .getState))
+        guard case .success(.stateRead(let value)) = state.outcome, value.viewVersion == 1 else { throw Failure(label: "loading rejection closed session") }
+        let prepare = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .releaseControl))
+        guard case .success(.controlReleasePrepared(let value)) = prepare.outcome else { throw Failure(label: "loading release prepare") }
+        let commit = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .commitControlRelease(transferID: value.transferID)))
+        guard case .success(.controlReleased) = commit.outcome, page.prepared, page.committed, page.destroyed == 0 else { throw Failure(label: "loading release commit") }
+        return 5
+    }
+    public static func runDocumentChanges(base: URL) async throws -> Int {
+        let id = UUID(), instance = UUID(), target = AutomationTargetIdentity(profileID: id, runnerInstanceID: instance, windowID: UUID(), pageID: UUID())
+        func view(_ version: UInt64) -> AutomationViewport { AutomationViewport(viewportWidthPoints: 1, viewportHeightPoints: 1, pixelWidth: 1, pixelHeight: 1, scaleX: 1, scaleY: 1, pageZoom: 1, viewVersion: version) }
+        let page = Page(identity: target), gate = Gate<RunnerAutomationPageSnapshot>()
+        let service = RunnerAutomationService(profileID: id, runnerInstanceID: instance, permissionReader: { true }, pageFactory: { page }, snapshotFactory: { try AutomationSnapshotStore(baseDirectory: base) }, pageOwnership: .borrowed)
+        guard case let .success(.sessionOpened(token, _, _)) = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: nil, action: .openSession(profileID: id))).outcome else { throw Failure(label: "document open") }
+        page.snapshotGate = gate
+        let pending = Task { await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .screenshot)) }
+        try await until("snapshot in flight") { gate.waits.count == 1 }
+        page.view = view(2)
+        gate.release(RunnerAutomationPageSnapshot(png: Data(), viewport: view(1)))
+        guard await pending.value.outcome == .failure(AutomationError(code: .targetChanged)) else { throw Failure(label: "stale snapshot recoverable") }
+        let stale = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .insertText("x"), expectedViewVersion: 1))
+        guard stale.outcome == .failure(AutomationError(code: .targetChanged)) && page.calls == 0 else { throw Failure(label: "stale text dispatched") }
+        let state = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .getState))
+        guard case .success(.stateRead(let current)) = state.outcome, current.viewVersion == 2 else { throw Failure(label: "new document state") }
+        page.onPerform = { page.view = view(3) }
+        let click = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .click(point: ViewportPoint(x: 0, y: 0), viewVersion: 2, count: 1), expectedViewVersion: 2))
+        guard case .success(.nativeDelivered(_, _, 2)) = click.outcome else { throw Failure(label: "delivered input that navigates") }
+        page.onPerform = nil
+        let staleKey = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .key(name: .enter, shift: false), expectedViewVersion: 2))
+        guard staleKey.outcome == .failure(AutomationError(code: .targetChanged)) && page.calls == 1 else { throw Failure(label: "stale key dispatched") }
+        let prep = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .releaseControl))
+        guard case .success(.controlReleasePrepared(let proof)) = prep.outcome else { throw Failure(label: "release without observing new document") }
+        let commit = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .commitControlRelease(transferID: proof.transferID)))
+        guard case .success(.controlReleased) = commit.outcome else { throw Failure(label: "release after document change") }
+        return 6
+    }
+    public static func runReleasePreflightRace(base: URL) async throws -> Int {
+        let id = UUID(), instance = UUID(), target = AutomationTargetIdentity(profileID: id, runnerInstanceID: instance, windowID: UUID(), pageID: UUID())
+        let page = Page(identity: target), gate = Gate<Bool>()
+        var releasing = false, reads = 0
+        let service = RunnerAutomationService(profileID: id, runnerInstanceID: instance, permissionReader: {
+            if releasing { reads += 1; if reads == 2 { return await gate.wait() } }
+            return true
+        }, pageFactory: { page }, snapshotFactory: { try AutomationSnapshotStore(baseDirectory: base) }, pageOwnership: .borrowed)
+        guard case let .success(.sessionOpened(token, _, _)) = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: nil, action: .openSession(profileID: id))).outcome else { throw Failure(label: "release race open") }
+        releasing = true
+        let pending = Task { await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .releaseControl)) }
+        try await until("release final permission") { gate.waits.count == 1 }
+        page.view = AutomationViewport(viewportWidthPoints: 1, viewportHeightPoints: 1, pixelWidth: 1, pixelHeight: 1, scaleX: 1, scaleY: 1, pageZoom: 1, viewVersion: 2)
+        gate.release(true)
+        guard case .success(.controlReleasePrepared(let proof)) = await pending.value.outcome else { throw Failure(label: "release after preflight document change") }
+        let commit = await service.handle(AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .commitControlRelease(transferID: proof.transferID)))
+        guard case .success(.controlReleased) = commit.outcome else { throw Failure(label: "release race commit") }
+        return 2
     }
     private static func runOpeningCases(base: URL) async throws -> Int {
         var checks = 0

@@ -47,4 +47,7 @@ int32_t cs_control_send_apple_event(const char *bundle_id, const uint8_t *reques
                                     uint32_t timeout_seconds, const CSControlManager *manager, const char *expected_executable,
                                     uint8_t *reply, unsigned long capacity, unsigned long *reply_len,
                                     int *sent, int *sender_audit, uint32_t *phase, const uint8_t request_id[16]);
+#if SAFARIER_CONTROL_TESTING
+int32_t cs_control_test_permission_timeout(void);
+#endif
 #endif

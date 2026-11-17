@@ -6,6 +6,9 @@ public enum AutomationLimits {
     public static let frameBytes = 65_536, textBytes = 16_384, replayEntries = 256
     public static let startupSeconds = 60.0, navigationSeconds = 60.0
     public static let actionSeconds = 10.0, idleSeconds = 60.0, heldSeconds = 10.0, cleanupSeconds = 4.0
+    // Registered release drains admitted input, prepares, commits, then drains the channel.
+    public static let releaseHandshakeSeconds = 2 * actionSeconds
+    public static let releaseSeconds = actionSeconds + releaseHandshakeSeconds + cleanupSeconds
     public static let frameSeconds = 6.0, generationSeconds = 90.0
     public static let screenshotMaxEdge = 4_096, screenshotMaxBytes = 33_554_432, screenshotCount = 8
 }
@@ -16,6 +19,7 @@ public struct ViewportPoint: Equatable, Sendable {
 public enum AutomationKey: String, Codable, Sendable {
     case backspace = "Backspace", delete = "Delete", enter = "Enter", tab = "Tab", escape = "Escape"
     case left = "Left", right = "Right", up = "Up", down = "Down", home = "Home", end = "End"
+    case pageUp = "PageUp", pageDown = "PageDown"
 }
 public enum AutomationNavigationInput: Equatable, Sendable {
     case enter
@@ -35,11 +39,20 @@ public enum AutomationAction: Equatable, Sendable, CustomStringConvertible, Cust
     public var isNavigation: Bool {
         switch self { case .navigate, .navigateByInput: return true; default: return false }
     }
+    /// Shared outer request envelope; Runner actions still have individual deadlines.
+    public var managerTimeoutSeconds: Double {
+        switch self {
+        case .openSession: return AutomationLimits.startupSeconds
+        case .releaseControl: return AutomationLimits.releaseSeconds
+        default: return isNavigation ? AutomationLimits.navigationSeconds : AutomationLimits.actionSeconds
+        }
+    }
 }
 public struct AutomationRequest: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     public let version: Int, requestID: UUID
     public let sessionID: String?, action: AutomationAction
-    public init(version: Int, requestID: UUID, sessionID: String?, action: AutomationAction) { self.version = version; self.requestID = requestID; self.sessionID = sessionID; self.action = action }
+    public let expectedViewVersion: UInt64?
+    public init(version: Int, requestID: UUID, sessionID: String?, action: AutomationAction, expectedViewVersion: UInt64? = nil) { self.version = version; self.requestID = requestID; self.sessionID = sessionID; self.action = action; self.expectedViewVersion = expectedViewVersion }
     public var description: String { "AutomationRequest(redacted)" }
     public var debugDescription: String { description }
 }
@@ -202,7 +215,7 @@ public enum AutomationCodec {
     private static func decodeChecked(_ data: Data) throws -> AutomationRequest {
         let bad = AutomationError(code: .invalidRequest)
         let root = try AutomationJSONBoundary.object(data)
-        guard Set(root.keys).isSubset(of: ["version","requestID","sessionID","action","parameters"]), let version = integer(root["version"]), let idString = root["requestID"] as? String, let id = UUID(uuidString: idString), let name = root["action"] as? String, let p = root["parameters"] as? [String: Any] else { throw bad }
+        guard Set(root.keys).isSubset(of: ["version","requestID","sessionID","action","parameters","expectedViewVersion"]), let version = integer(root["version"]), let idString = root["requestID"] as? String, let id = UUID(uuidString: idString), let name = root["action"] as? String, let p = root["parameters"] as? [String: Any] else { throw bad }
         guard version == 1 else { throw AutomationError(code: .unsupportedProtocol) }
         let session: String?
         if root.keys.contains("sessionID") { guard let s = root["sessionID"] as? String, AutomationSessionToken.isCanonical(s) else { throw bad }; session = s } else { session = nil }
@@ -230,7 +243,14 @@ public enum AutomationCodec {
         case "releaseControl": try keys([]); action = .releaseControl
         case "commitControlRelease": try keys(["transferID"]); guard let s = p["transferID"] as? String, let id = UUID(uuidString: s) else { throw bad }; action = .commitControlRelease(transferID: id)
         case "navigate":
-            try keys(["url"]); guard let s = p["url"] as? String, let u = URL(string: s), let scheme = u.scheme?.lowercased(), ["http","https"].contains(scheme), let host = u.host, !host.isEmpty, host != ".", host.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil else { throw bad }; action = .navigate(url: u)
+            try keys(["url"])
+            guard let s = p["url"] as? String, s.rangeOfCharacter(from: .controlCharacters) == nil,
+                  let u = URL(string: s), let scheme = u.scheme?.lowercased() else { throw bad }
+            if scheme == "http" || scheme == "https" {
+                guard let host = u.host, !host.isEmpty, host != ".",
+                      host.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil else { throw bad }
+            }
+            action = .navigate(url: u)
         case "navigateByInput":
             guard let input = p["input"] as? String else { throw bad }
             switch input {
@@ -255,7 +275,9 @@ public enum AutomationCodec {
             try keys(["name","shift"]); guard let s = p["name"] as? String, let key = AutomationKey(rawValue: s), let n = p["shift"] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { throw bad }; let shift = n.boolValue; guard !shift || [.tab,.left,.right,.up,.down,.home,.end].contains(key) else { throw bad }; action = .key(name: key, shift: shift)
         default: throw bad
         }
-        return AutomationRequest(version: 1, requestID: id, sessionID: session, action: action)
+        let expected: UInt64?
+        if root.keys.contains("expectedViewVersion") { guard let value = integer(root["expectedViewVersion"]), value > 0, session != nil else { throw bad }; expected = value } else { expected = nil }
+        return AutomationRequest(version: 1, requestID: id, sessionID: session, action: action, expectedViewVersion: expected)
     }
     private static func number(_ value: Any?) -> Double? {
         guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue.isFinite else { return nil }; return n.doubleValue
@@ -300,6 +322,7 @@ public enum AutomationCodec {
         }
         var root: [String: Any] = ["version":request.version,"requestID":request.requestID.uuidString,"action":name,"parameters":params]
         if let session = request.sessionID { root["sessionID"] = session }
+        if let expected = request.expectedViewVersion { root["expectedViewVersion"] = expected }
         guard JSONSerialization.isValidJSONObject(root) else { throw AutomationError(code: .invalidRequest) }
         let data = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
         _ = try decode(data)

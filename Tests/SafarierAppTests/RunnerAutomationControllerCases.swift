@@ -152,11 +152,11 @@ import SafarierCore
         let down = makeRequest(.mouseDown(point: ViewportPoint(x: 1, y: 1), viewVersion: 1))
         _ = await c4.handle(down); await drain()
         try check(m4.state == .held, "held after down")
-        clock4.advance(4.99); await drain(); try check(m4.state == .held && counts4.cleanup == 0, "hold before deadline")
-        clock4.advance(5); try await waitUntil("hold timer did not fire") { m4.state == .stopping && counts4.cleanup == 1 }
+        clock4.advance(AutomationLimits.heldSeconds - 0.01); await drain(); try check(m4.state == .held && counts4.cleanup == 0, "hold before deadline")
+        clock4.advance(AutomationLimits.heldSeconds); try await waitUntil("hold timer did not fire") { m4.state == .stopping && counts4.cleanup == 1 }
         try check(m4.state == .stopping && counts4.cleanup == 1, "hold exact deadline")
-        try await waitUntil("cleanup timer not installed") { clock4.waits.contains { $0.deadline == 7 } }
-        clock4.advance(7); try await waitUntil("cleanup timer did not fire") { m4.state == .closed }
+        try await waitUntil("cleanup timer not installed") { clock4.waits.contains { $0.deadline == AutomationLimits.heldSeconds + AutomationLimits.cleanupSeconds } }
+        clock4.advance(AutomationLimits.heldSeconds + AutomationLimits.cleanupSeconds); try await waitUntil("cleanup timer did not fire") { m4.state == .closed }
         try check(m4.state == .closed, "cleanup exact deadline")
         cleanupGate.release(CleanupReceipt(cleaned: true, terminatedOwnedRunner: true)); await drain()
         let afterTimeout = await c4.handle(makeRequest(.closeSession))
@@ -184,8 +184,8 @@ import SafarierCore
             return AutomationReply(requestID: r.requestID, outcome: .success(.stateRead(value)))
         }, cleanupSink: { _, _, _ in counts5.cleanup += 1; return CleanupReceipt(cleaned: false, terminatedOwnedRunner: false) }, now: { clock5.instant }, sleepUntil: { await clock5.sleep($0) })
         await drain(); clock5.advance(10); await drain(); _ = await c5.handle(makeRequest(.getState)); await drain()
-        clock5.advance(30); await drain(); try check(m5.state == .ready && counts5.cleanup == 0, "stale timer ignored")
-        clock5.advance(40); await drain(); try check(counts5.cleanup == 1, "renewed lease exact deadline")
+        clock5.advance(AutomationLimits.idleSeconds); await drain(); try check(m5.state == .ready && counts5.cleanup == 0, "stale timer ignored")
+        clock5.advance(10 + AutomationLimits.idleSeconds); await drain(); try check(counts5.cleanup == 1, "renewed lease exact deadline")
         clock5.advance(100); await drain()
         return checks
     }
@@ -349,11 +349,11 @@ import SafarierCore
         let leaseClock = VirtualClock(), leaseAuth = Gate<Bool>(), leaseCleanup = Gate<CleanupReceipt>(), leaseCounts = Counts(), leaseMachine = try fresh(leaseClock)
         let leaseController = RunnerAutomationController(machine: leaseMachine, permissionReader: { leaseCounts.permissions += 1; return await leaseAuth.wait() }, targetReader: { target }, actionSink: { r, _ in leaseCounts.sink += 1; return AutomationReply(requestID: r.requestID, outcome: .failure(AutomationError(code: .timeout))) }, cleanupSink: { _, _, _ in leaseCounts.cleanup += 1; return await leaseCleanup.wait() }, now: { leaseClock.instant }, sleepUntil: { await leaseClock.sleep($0) })
         let leaseCall = Task { await leaseController.handle(click) }; await drain()
-        try await waitUntil("lease timer not installed") { leaseClock.waits.contains { $0.deadline == 30 } }
-        leaseClock.advance(30); try await waitUntil("lease did not stop") { leaseMachine.state == .stopping && leaseCounts.cleanup == 1 }; let leaseReply = await leaseCall.value
+        try await waitUntil("lease timer not installed") { leaseClock.waits.contains { $0.deadline == AutomationLimits.idleSeconds } }
+        leaseClock.advance(AutomationLimits.idleSeconds); try await waitUntil("lease did not stop") { leaseMachine.state == .stopping && leaseCounts.cleanup == 1 }; let leaseReply = await leaseCall.value
         try check(leaseReply.outcome == .failure(AutomationError(code: .cancelled)) && leaseCounts.cleanup == 1 && leaseMachine.state == .stopping, "lease settles pending authorization")
-        try await waitUntil("lease cleanup timer not installed") { leaseClock.waits.contains { $0.deadline == 32 } }
-        leaseClock.advance(32); try await waitUntil("lease cleanup did not close") { leaseMachine.state == .closed }
+        try await waitUntil("lease cleanup timer not installed") { leaseClock.waits.contains { $0.deadline == AutomationLimits.idleSeconds + AutomationLimits.cleanupSeconds } }
+        leaseClock.advance(AutomationLimits.idleSeconds + AutomationLimits.cleanupSeconds); try await waitUntil("lease cleanup did not close") { leaseMachine.state == .closed }
         leaseAuth.release(true); leaseCleanup.release(CleanupReceipt(cleaned: true, terminatedOwnedRunner: true)); await drain()
         try check(leaseMachine.state == .closed && leaseCounts.sink == 0, "late authorization and cleanup ignored")
         leaseClock.advance(100); await drain()
@@ -581,7 +581,7 @@ import SafarierCore
         let delayedController = RunnerAutomationController(machine: delayedMachine, permissionReader: { true }, targetReader: { delayedCounts.targets += 1; return delayedCounts.targets == 2 ? await delayedTarget.wait() : target }, actionSink: { r, _ in delayedCounts.sink += 1; return AutomationReply(requestID: r.requestID, outcome: .failure(AutomationError(code: .timeout))) }, cleanupSink: { _, _, _ in delayedCounts.cleanup += 1; return CleanupReceipt(cleaned: false, terminatedOwnedRunner: false) }, now: { delayedClock.instant }, sleepUntil: { await delayedClock.sleep($0) })
         let delayedTask = Task { await delayedController.handle(click) }; await drain()
         try check(delayedTarget.waits.count == 1, "final target read pending")
-        delayedClock.instant = 5; delayedTarget.release(target); await drain()
+        delayedClock.instant = AutomationLimits.actionSeconds; delayedTarget.release(target); await drain()
         let delayedReply = await delayedTask.value
         try check(delayedCounts.sink == 0 && delayedCounts.cleanup == 1 && delayedReply.outcome == .failure(AutomationError(code: .indeterminateResult)), "deadline checked at final sink entry")
         delayedClock.advance(100); await drain()
@@ -597,7 +597,7 @@ import SafarierCore
         var controller: RunnerAutomationController? = RunnerAutomationController(machine: machine, permissionReader: { true }, targetReader: { target }, actionSink: { r, _ in counts.sink += 1; return AutomationReply(requestID: r.requestID, outcome: .failure(AutomationError(code: .timeout))) }, cleanupSink: { _, _, _ in counts.cleanup += 1; return await gate.wait() }, now: { clock.instant }, sleepUntil: { await clock.sleep($0) })
         weak let weakOwner = controller
         controller?.shutdown()
-        clock.instant = 3
+        clock.instant = AutomationLimits.cleanupSeconds + 1
         controller?.shutdown()
         guard machine.state == .closed else { throw Failure(label: "cleanup deadline not applied") }
         controller = nil
@@ -605,7 +605,7 @@ import SafarierCore
         guard weakOwner == nil && counts.sink == 0 else { throw Failure(label: "cleanup retains owner or dispatches input") }
         gate.release(CleanupReceipt(cleaned: true, terminatedOwnedRunner: true)); await drain()
         let close = AutomationRequest(version: 1, requestID: UUID(), sessionID: token, action: .closeSession)
-        let effects = machine.begin(close, permission: true, target: target, at: 3)
+        let effects = machine.begin(close, permission: true, target: target, at: clock.instant)
         let expected = AutomationReply(requestID: close.requestID, outcome: .success(.sessionClosed(CleanupReceipt(cleaned: false, terminatedOwnedRunner: false))))
         guard effects.contains(where: { if case .reply(let value) = $0 { return value == expected }; return false }) else { throw Failure(label: "late cleanup changed terminal receipt") }
         clock.advance(100); await drain()

@@ -14,6 +14,8 @@
 #include <unistd.h>
 #include <os/log.h>
 #include <uuid/uuid.h>
+#include <dispatch/dispatch.h>
+#include <stdlib.h>
 
 static int peer_token(int fd, audit_token_t *token, pid_t *pid) {
     int type = 0; socklen_t size = sizeof(type);
@@ -159,6 +161,53 @@ static uint64_t control_now_ns(void) {
     return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
 }
 static int control_before(uint64_t deadline) { uint64_t now = control_now_ns(); return now && now < deadline; }
+typedef int32_t (*control_permission_query)(const char *bundle_id);
+static int32_t control_permission_native(const char *bundle_id) {
+    AEAddressDesc address = { typeNull, NULL };
+    OSStatus status = AECreateDesc(typeApplicationBundleID, bundle_id, (Size)strlen(bundle_id), &address);
+    if (status == noErr) status = AEDeterminePermissionToAutomateTarget(&address, 'SFAu', 'requ', false);
+    AEDisposeDesc(&address);
+    return status;
+}
+static int32_t control_permission_bounded(const char *bundle_id, uint64_t timeout_ns, control_permission_query query) {
+    if (!timeout_ns || timeout_ns > INT64_MAX) return errAETimeout;
+    // A native query is uncancellable. Limit retained workers even if the OS
+    // never returns, and charge admission to the same deadline as the query.
+    static dispatch_once_t once;
+    static dispatch_semaphore_t slots;
+    dispatch_once(&once, ^{ slots = dispatch_semaphore_create(16); });
+    if (!slots) return memFullErr;
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout_ns);
+    if (dispatch_semaphore_wait(slots, deadline)) return errAETimeout;
+    char *owned_id = strdup(bundle_id);
+    if (!owned_id) { dispatch_semaphore_signal(slots); return memFullErr; }
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    if (!done) { free(owned_id); dispatch_semaphore_signal(slots); return memFullErr; }
+    __block int32_t result = errAETimeout;
+    dispatch_retain(done);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        result = query(owned_id);
+        free(owned_id);
+        dispatch_semaphore_signal(slots);
+        dispatch_semaphore_signal(done);
+        dispatch_release(done);
+    });
+    long expired = dispatch_semaphore_wait(done, deadline);
+    int32_t answer = expired ? errAETimeout : result;
+    dispatch_release(done);
+    return answer;
+}
+#if SAFARIER_CONTROL_TESTING
+static int32_t control_permission_test_slow(const char *bundle_id) {
+    (void)bundle_id;
+    struct timespec delay = { .tv_sec = 0, .tv_nsec = 250000000 };
+    nanosleep(&delay, NULL);
+    return noErr;
+}
+int32_t cs_control_test_permission_timeout(void) {
+    return control_permission_bounded("invalid.test", 20000000ULL, control_permission_test_slow);
+}
+#endif
 static int manager_still_matches(const CSControlManager *expected, const char *path) {
     CSControlManager current = {0};
     return cs_control_capture_manager(expected->pid, path, &current) && cs_control_manager_equal(expected, &current);
@@ -189,7 +238,11 @@ int32_t cs_control_send_apple_event(const char *bundle_id, const uint8_t *reques
     if (status != noErr) goto done;
     *phase = 3;
     TRACE("permission.before");
-    status = AEDeterminePermissionToAutomateTarget(&address, 'SFAu', 'requ', false);
+    uint64_t permission_now = control_now_ns();
+    if (!permission_now || permission_now >= deadline) { status = errAETimeout; goto done; }
+    uint64_t permission_budget = deadline - permission_now;
+    if (permission_budget > 5000000000ULL) permission_budget = 5000000000ULL;
+    status = control_permission_bounded(bundle_id, permission_budget, control_permission_native);
     TRACE("permission.after");
     if (status != noErr) goto done;
     *phase = 4;

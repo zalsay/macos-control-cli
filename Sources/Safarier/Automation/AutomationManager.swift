@@ -236,7 +236,22 @@ import AppKit
         guard let identity = entry.identity else { return false }
         return endpoint.pid == identity.pid && endpoint.runnerInstanceID == identity.instance && endpoint.ownershipID == identity.ownership
     }
+    private func requestBudget(_ request: AutomationRequest, entry: Entry) -> Double {
+        if entry.registeredInteractive, case .navigate = request.action {
+            // Registered explicit navigation submits after closing and preparing
+            // native input; it no longer waits for the page to finish loading.
+            return 2 * AutomationLimits.actionSeconds
+        }
+        if entry.registeredInteractive, case .navigateByInput = request.action {
+            return AutomationLimits.actionSeconds
+        }
+        return request.action.isNavigation ? AutomationLimits.navigationSeconds : AutomationLimits.actionSeconds
+    }
     private func armLease(_ entry: Entry, since forwardedAt: Double? = nil) {
+        if entry.registeredInteractive {
+            entry.leaseTimer?.cancel(); entry.leaseTimer = nil; entry.leaseDeadline = .infinity
+            return
+        }
         let startedAt = now()
         let deadline = (forwardedAt ?? startedAt) + AutomationLimits.idleSeconds
         guard startedAt.isFinite, deadline.isFinite, startedAt < deadline else { startClose(entry); return }
@@ -293,7 +308,7 @@ import AppKit
         guard case .success(let result) = reply.outcome else { return true }
         switch (action, result) {
         case (.getState, .stateRead(let state)): return state.target == target
-        case (.navigate, .navigationSubmitted), (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished), (.screenshot, .snapshotWritten),
+        case (.navigate, .navigationSubmitted), (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished), (.navigateByInput, .nativeDelivered), (.screenshot, .snapshotWritten),
              (.move, .nativeDelivered), (.mouseDown, .nativeDelivered), (.mouseUp, .nativeDelivered),
              (.click, .nativeDelivered), (.scroll, .nativeDelivered), (.insertText, .nativeDelivered),
              (.key, .nativeDelivered): return true
@@ -319,12 +334,15 @@ import AppKit
         if entry.phase == .closing || entry.phase == .closed { return failure(request, .sessionExpired) }
         pruneRetainedRunners()
         guard retainedRunners.count + opens.values.filter({ $0.releaseWorkerRunning }).count < AutomationLimits.replayEntries else { return failure(request, .replayWindowFull) }
-        guard entry.phase == .active, entry.cancellers.isEmpty, let token = entry.token,
+        guard entry.phase == .active, (entry.registeredInteractive || entry.cancellers.isEmpty), let token = entry.token,
               request.sessionID == token, let target = entry.target,
               let endpoint = entry.endpoint,
               identityMatches(entry, endpoint), target.profileID == entry.profileID,
               target.runnerInstanceID == endpoint.runnerInstanceID else { return failure(request, .sessionBusy) }
-        let start = now(), deadline = min(start + AutomationLimits.actionSeconds, entry.leaseDeadline)
+        let start = now()
+        let budget = entry.registeredInteractive ? AutomationLimits.releaseSeconds : AutomationLimits.actionSeconds
+        let deadline = min(start + budget, entry.leaseDeadline)
+        let inputDrainDeadline = min(start + AutomationLimits.actionSeconds, deadline)
         guard start.isFinite, deadline.isFinite, start < deadline else { startClose(entry); return failure(request, .sessionExpired) }
         if entry.closeRequests[request.requestID] != nil { return failure(request, .requestIDReused) }
         switch entry.replay.begin(request, at: start) {
@@ -356,9 +374,20 @@ import AppKit
         }
         do {
             let result = try await runUntil(deadline: deadline, flag: flag, owner: entry, work: { [self] in
-                guard valid(), let profile = try await profileReader(entry.profileID), profile.id == entry.profileID,
-                      valid() else { throw AutomationError(code: .profileNotAllowed) }
-                let remaining = deadline - now()
+                // The release owns one canceller itself. Drain previously admitted
+                // operations before preparing native handoff, without revoking them.
+                while entry.registeredInteractive && entry.cancellers.count > 1 {
+                    guard valid(), now() < inputDrainDeadline else { throw AutomationError(code: .timeout) }
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+                // Returning a registered browser to the user does not require
+                // a fresh business permission or repository read.
+                guard valid() else { throw AutomationError(code: .timeout) }
+                if !entry.registeredInteractive {
+                    guard let profile = try await profileReader(entry.profileID), profile.id == entry.profileID,
+                          valid() else { throw AutomationError(code: .profileNotAllowed) }
+                }
+                let remaining = min(AutomationLimits.actionSeconds, deadline - now())
                 guard remaining > 0 else { throw AutomationError(code: .timeout) }
                 sent.cancel()
                 #if SAFARIER_BOUND_LOCAL_CANDIDATE
@@ -376,7 +405,7 @@ import AppKit
                 let commit = AutomationRequest(version: 1, requestID: UUID(), sessionID: token,
                                                action: .commitControlRelease(transferID: preparation.transferID))
                 NavigationDiagnostic.releaseChild(parent: request.requestID, child: commit.requestID)
-                let commitRemaining = deadline - now()
+                let commitRemaining = min(AutomationLimits.actionSeconds, deadline - now())
                 guard valid(), commitRemaining > 0 else { throw AutomationError(code: .timeout) }
                 #if SAFARIER_BOUND_LOCAL_CANDIDATE
                 traceRelease("commit.before", relatedRequestID: commit.requestID)
@@ -496,9 +525,9 @@ import AppKit
             if entry.phase == .active { startClose(entry) }
             return failure(request, .sessionExpired)
         }
-        let duration: Double
-        if request.action.isNavigation { duration = AutomationLimits.navigationSeconds } else { duration = AutomationLimits.actionSeconds }
-        let deadline = now() + duration, flag = CancellationFlag(), sent = CancellationFlag()
+        let instant = now()
+        let duration = requestBudget(request, entry: entry)
+        let deadline = instant + duration, flag = CancellationFlag(), sent = CancellationFlag()
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         let diagnosticStart = DispatchTime.now().uptimeNanoseconds
         let diagnosticMove: Bool
@@ -536,11 +565,11 @@ import AppKit
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         NavigationDiagnostic.emit(request, "manager.flow.enter")
         #endif
-        func valid() -> Bool { !flag.cancelled && now() < deadline && entry.phase == .active && admission() && !stopped }
+        func valid() -> Bool { !flag.cancelled && now() < deadline && (entry.phase == .active || (entry.registeredInteractive && entry.phase == .releasing)) && admission() && !stopped }
         switch request.action {
         case .cancel, .closeSession: break
         default:
-            guard entry.phase == .active, now() < entry.leaseDeadline else { if entry.phase == .active { startClose(entry, excluding: flag) }; return failure(request, .sessionExpired) }
+            guard (entry.phase == .active || (entry.registeredInteractive && entry.phase == .releasing)), now() < entry.leaseDeadline else { if entry.phase == .active { startClose(entry, excluding: flag) }; return failure(request, .sessionExpired) }
             do {
                 guard let profile = try await profileReader(entry.profileID), profile.id == entry.profileID, profile.allowsAgentAccess else {
                     startClose(entry, excluding: flag); return failure(request, .profileNotAllowed)
@@ -580,7 +609,7 @@ import AppKit
             return reply
         default: break
         }
-        guard entry.phase == .active, let endpoint = entry.endpoint else { return failure(request, .sessionNotFound) }
+        guard (entry.phase == .active || (entry.registeredInteractive && entry.phase == .releasing)), let endpoint = entry.endpoint else { return failure(request, .sessionNotFound) }
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         let diagnosticStart = DispatchTime.now().uptimeNanoseconds
         let diagnosticMove: Bool
@@ -591,9 +620,9 @@ import AppKit
             guard valid(), identityMatches(entry, endpoint) else { startClose(entry, excluding: flag); return failure(request, .cancelled) }
             guard entry.replay.renew(at: now()) else { _ = await close(entry, excluding: flag); return failure(request, .sessionExpired) }
             armLease(entry)
-            let timeout: Double
-            if request.action.isNavigation { timeout = AutomationLimits.navigationSeconds } else { timeout = AutomationLimits.actionSeconds }
             guard valid() else { return failure(request, .cancelled) }
+            let beforeDispatch = now()
+            let timeout = deadline - beforeDispatch
             sent.cancel()
             #if SAFARIER_BOUND_LOCAL_CANDIDATE
             NavigationDiagnostic.emit(request, "manager.endpoint.before")
@@ -648,7 +677,7 @@ import AppKit
             reply = AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: readOnly ? .runnerExited : .indeterminateResult, sideEffects: readOnly ? .none : .possible)))
         }
         _ = entry.replay.complete(request, reply: reply, at: now())
-        if case .failure(let error) = reply.outcome, error.code == .runnerExited || error.code == .indeterminateResult {
+        if case .failure(let error) = reply.outcome, error.code == .runnerExited || (!entry.registeredInteractive && error.code == .indeterminateResult) {
             startClose(entry, excluding: flag)
         }
         return reply
@@ -673,7 +702,11 @@ import AppKit
             if let reply = existing.openReply, case .failure = reply.outcome { return reply }
             return failure(request, existing.phase == .opening ? .sessionBusy : .sessionExpired)
         }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        guard registeredConnector != nil || opens.count < AutomationLimits.replayEntries else { return failure(request, .replayWindowFull) }
+        #else
         guard opens.count < AutomationLimits.replayEntries else { return failure(request, .replayWindowFull) }
+        #endif
         guard opens.values.filter({ ($0.phase != .closed && $0.phase != .released) || $0.openWorkerRunning || $0.closeWorkerRunning || !$0.cancellers.isEmpty }).count < 8 else { return failure(request, .sessionBusy) }
         guard !opens.values.contains(where: { entry in
             guard entry.profileID == profileID else { return false }
@@ -823,7 +856,7 @@ import AppKit
             #endif
             // No session request has used this cache yet. Startup time must not
             // consume the newly bound session's replay lifetime.
-            entry.replay = AutomationReplayCache(startedAt: now())
+            entry.replay = AutomationReplayCache(startedAt: now(), expiresWhenIdle: !entry.registeredInteractive)
             entry.token = token; entry.target = target; entry.phase = .active; sessions[token] = entry
             armLease(entry, since: openForwardedAt)
             guard entry.phase == .active else { return finishOpen(entry, failure(request, .sessionExpired)) }

@@ -1,5 +1,6 @@
 #if SAFARIER_BOUND_LOCAL_CANDIDATE && SAFARIER_INTERNAL_TEST_APP
 import XCTest
+import WebKit
 @testable import Safarier
 
 final class InternalNavigationPolicyTests: XCTestCase {
