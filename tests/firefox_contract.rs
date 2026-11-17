@@ -488,3 +488,39 @@ fn public_pause_envelopes_keep_partial_receipts_while_redacting_helper_diagnosti
         }
     }
 }
+
+#[test]
+fn eb_does_not_fall_back_to_managed_firefox_input() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut service = copis_chrome::service::Service::with_scope(
+        FirefoxNative(requests.clone()),
+        std::env::temp_dir(),
+        Scope::Desktop,
+    );
+    let connected = service
+        .execute(json!({"action":"firefox-start","profile":"test"}))
+        .unwrap();
+    let observed = service
+        .execute(json!({"action":"observe","connectionId":connected["connectionId"]}))
+        .unwrap();
+    for action in ["click", "type", "press", "scroll"] {
+        let request = match action {
+            "click" => json!({"action":action,"x":10,"y":20}),
+            "scroll" => json!({"action":action,"x":10,"y":20,"deltaY":40}),
+            "type" => json!({"action":action,"text":"Hello"}),
+            _ => json!({"action":action,"key":"Enter"}),
+        };
+        let mut request = request;
+        request["connectionId"] = connected["connectionId"].clone();
+        request["frameId"] = observed["frameId"].clone();
+        request["eb"] = json!(true);
+        let before = requests.lock().unwrap().len();
+        assert_eq!(
+            service.execute(request.clone()).unwrap_err().code,
+            "BLE_UNSUPPORTED"
+        );
+        assert_eq!(requests.lock().unwrap().len(), before);
+        request["eb"] = json!(false);
+        assert_eq!(service.execute(request).unwrap()["backend"], "firefox-x11");
+    }
+}

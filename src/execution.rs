@@ -40,6 +40,7 @@ pub fn execute_local(command: Command, scope: Scope) -> Result<Value> {
             }
         }
         Command::Request { request, output } => execute_request(request, output, scope),
+        Command::EspBle(_) => Err(Error::invalid("ESP BLE 命令只能由 CLI 前端分派")),
         Command::FilePut { .. } | Command::Host(_) | Command::Remote { .. } => {
             Err(Error::invalid("远程命令只能由 CLI 前端分派"))
         }

@@ -28,6 +28,8 @@ Version **0.2.3** adds the default **`mcc`** command, a user-level `sh` installe
 
 **v0.3.4:** Built-in authenticated WSS Host and explicit `--remote` client, private CA/IP certificate and token provisioning, cross-process sessions, bounded screenshot transfer, and pause-preserving cancellation through the original executor. Browser/OCR/Jev/input run on the Host; no local helper or local model configuration is used. See [remote Host setup and validation boundaries](docs/REMOTE-HOST.md).
 
+**ESP32 BLE:** `mcc --eb status`, `mcc --eb move 52,54`, `mcc --eb click 52,54`, and `mcc --eb type 'Hello'` reuse the [MBC client in this project](mbc/README.md). Ordinary Host input commands also accept per-operation `--eb` (`eb:true` in requests), retaining screenshot-pixel coordinates and MCC JSON. Full builds bundle `mbc` and `macos-ble-control`; `--eb` prefers its sibling client and retains PATH lookup for compatibility. The standalone prefix form uses integer screen percentages and passes through MBC's output and exit status without starting a desktop daemon. Run `mcc --eb --help` or see [ESP BLE commands](docs/ESPBLE.md). Installed MCC is not updated automatically.
+
 ## Features
 
 - List ordinary applications/windows and bind a connection to an exact window/PID/bundle ID.
@@ -98,6 +100,8 @@ dist/
     copis-chrome
     desktop-control
     mcc
+    mbc
+    macos-ble-control
     install.sh
     macos-chrome-helper
     module.json

@@ -142,17 +142,29 @@ pub fn validate_action_with_files(scope: Scope, request: &Value, allow_files: bo
             "clickCount",
             "button",
             "modifiers",
+            "eb",
         ],
-        "click-target" => &["action", "connectionId", "target"],
-        "scroll" => &["action", "connectionId", "frameId", "x", "y", "deltaY"],
-        "type" => &["action", "connectionId", "frameId", "text"],
-        "press" => &["action", "connectionId", "frameId", "key"],
+        "click-target" => &["action", "connectionId", "target", "eb"],
+        "scroll" => &[
+            "action",
+            "connectionId",
+            "frameId",
+            "x",
+            "y",
+            "deltaY",
+            "eb",
+        ],
+        "type" => &["action", "connectionId", "frameId", "text", "eb"],
+        "press" => &["action", "connectionId", "frameId", "key", "eb"],
         "frame" => &["action", "connectionId", "frameId"],
         "select-file" if allow_files => &["action", "connectionId", "path", "fileId"],
         "file-put" if allow_files => &["action", "connectionId", "name", "bytes", "sha256"],
         _ => return Err(Error::invalid("不支持的远程命令")),
     };
     fields(request, allowed)?;
+    if request.get("eb").is_some_and(|v| !v.is_boolean()) {
+        return Err(Error::invalid("eb 必须为布尔值"));
+    }
     if (scope != Scope::Desktop
         && (matches!(
             action,

@@ -71,6 +71,20 @@ regular_tree "$package" || fail '功能包含符号链接或非普通文件'
 package=$(CDPATH= cd -P "$package" && pwd)
 field_file() { /usr/bin/plutil -extract "$2" raw -o - "$1/module.json"; }
 field() { field_file "$package" "$1"; }
+validate_ble_payload() {
+    # Legacy packages have no BLE declaration; new packages must be complete.
+    ble_entry=$(field_file "$1" bleClient 2>/dev/null || :)
+    [ -n "$ble_entry" ] || return 0
+    [ "$ble_entry" = macos-ble-control ] || return 1
+    for ble_item in mbc macos-ble-control source/mbc/MBCMain.swift source/mbc/MBCOptions.swift source/mbc/build.sh; do
+        [ -f "$1/$ble_item" ] && [ ! -L "$1/$ble_item" ] || return 1
+    done
+    for ble_item in mbc macos-ble-control; do
+        [ -x "$1/$ble_item" ] || return 1
+        /usr/bin/codesign --verify --strict "$1/$ble_item" >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
 [ "$(field name)" = chrome-desktop-cli ] || fail '功能包名称不匹配'
 [ "$(field platform)" = darwin ] && [ "$(field arch)" = "$arch" ] || fail '功能包平台或架构不匹配'
 version=$(field version); safe_version "$version" || fail '功能包版本无效'
@@ -86,6 +100,7 @@ for item in mcc desktop-control copis-chrome "$helper"; do
     [ -x "$package/$item" ] || fail "文件不可执行：$item"
     /usr/bin/codesign --verify --strict "$package/$item" 2>/dev/null || fail "代码签名校验失败：$item"
 done
+validate_ble_payload "$package" || fail 'BLE 功能包不完整或签名无效'
 reply=$("$package/mcc" --version) || fail '无法执行功能包 mcc'
 reported=$(printf '%s' "$reply" | /usr/bin/plutil -extract version raw -o - -)
 reported_scope=$(printf '%s' "$reply" | /usr/bin/plutil -extract scope raw -o - -)
@@ -181,6 +196,7 @@ validate_archive() {
         [ -f "$archive/$archive_item" ] && [ ! -L "$archive/$archive_item" ] && [ -x "$archive/$archive_item" ] || return 1
         /usr/bin/codesign --verify --strict "$archive/$archive_item" >/dev/null 2>&1 || return 1
     done
+    validate_ble_payload "$archive" || return 1
 }
 stable_version=
 if [ -e "$stable" ] || [ -L "$stable" ]; then
@@ -189,6 +205,7 @@ if [ -e "$stable" ] || [ -L "$stable" ]; then
     safe_version "$stable_version" || fail '稳定运行目录版本无效'
     validate_archive "$libroot/$stable_version" "$stable_version" || fail '稳定运行目录缺少受管理的版本归档'
     diff -qr "$stable" "$libroot/$stable_version" >/dev/null 2>&1 || fail '稳定运行目录内容与归档不一致，拒绝覆盖'
+    validate_ble_payload "$stable" || fail '稳定运行目录的 BLE 功能包无效'
     for item in mcc desktop-control copis-chrome "$archive_helper"; do
         [ -x "$stable/$item" ] || fail '稳定运行目录执行权限异常'
     done
@@ -236,12 +253,12 @@ else
     [ -z "$stable_version" ] || active_archive=$libroot/$stable_version
     if printf '%s\n' "$commands" | ( while IFS= read -r command; do
         case "$command" in /*) ;; *) continue ;; esac
-        case "${command##*/}" in mcc|macos-chrome-helper|copis-chrome-helper|desktop-control|copis-chrome) ;; *) continue ;; esac
+        case "${command##*/}" in mcc|macos-chrome-helper|copis-chrome-helper|desktop-control|copis-chrome|mbc|macos-ble-control) ;; *) continue ;; esac
         resolved=$(/bin/realpath "$command" 2>/dev/null || :)
         if [ "$command" = "$bindir/mcc" ] || [ "$resolved" = "$bindir/mcc" ]; then exit 0; fi
         for base in "$stable" "$old_base" "$active_archive"; do
             [ -n "$base" ] || continue
-            for item in mcc macos-chrome-helper copis-chrome-helper desktop-control copis-chrome; do
+            for item in mcc macos-chrome-helper copis-chrome-helper desktop-control copis-chrome mbc macos-ble-control; do
                 if [ "$command" = "$base/$item" ] || [ "$resolved" = "$base/$item" ]; then exit 0; fi
             done
         done

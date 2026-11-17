@@ -224,6 +224,7 @@ impl<N: Native> Service<N> {
                 "clickCount",
                 "button",
                 "modifiers",
+                "eb",
             ],
             "click-target" => &[
                 "action",
@@ -233,14 +234,26 @@ impl<N: Native> Service<N> {
                 "jevUrl",
                 "jevModel",
                 "jevProtocol",
+                "eb",
             ],
-            "scroll" => &["action", "connectionId", "frameId", "x", "y", "deltaY"],
-            "type" => &["action", "connectionId", "frameId", "text"],
-            "press" => &["action", "connectionId", "frameId", "key"],
+            "scroll" => &[
+                "action",
+                "connectionId",
+                "frameId",
+                "x",
+                "y",
+                "deltaY",
+                "eb",
+            ],
+            "type" => &["action", "connectionId", "frameId", "text", "eb"],
+            "press" => &["action", "connectionId", "frameId", "key", "eb"],
             "select-file" => &["action", "connectionId", "path"],
             _ => return Err(Error::invalid("不支持的命令")),
         };
         fields(&request, allowed)?;
+        if request.get("eb").is_some_and(|v| !v.is_boolean()) {
+            return Err(Error::invalid("eb 必须为布尔值"));
+        }
         let result = match action {
             "status" => {
                 let mut status = json!({"running":true,"connected":self.connection.is_some(),"window":self.connection.as_ref().map(|c| &c.window),
@@ -878,8 +891,11 @@ impl<N: Native> Service<N> {
         self.check_operation_cancelled()?;
         let decision_ms = decision_start.elapsed().as_millis() as u64;
         let selection = candidates.select(&response, &model.model)?;
-        let click = json!({"action":"click","connectionId":request["connectionId"],
+        let mut click = json!({"action":"click","connectionId":request["connectionId"],
             "frameId":observation["frameId"],"x":selection.x,"y":selection.y,"clickCount":1});
+        if let Some(eb) = request.get("eb") {
+            click["eb"] = eb.clone();
+        }
         let click_start = Instant::now();
         let mut receipt = self.input(&click)?;
         receipt["status"] = json!("click_sent");
@@ -911,6 +927,12 @@ impl<N: Native> Service<N> {
             })?;
         let action = string(request, "action")?;
         let firefox = self.connection.as_ref().expect("已校验连接").firefox;
+        if request["eb"] == true && (cfg!(target_os = "linux") || firefox) {
+            return Err(Error::new(
+                "BLE_UNSUPPORTED",
+                "ESP BLE 输入当前仅支持 macOS Host；不能回退到 Docker/X11 输入",
+            ));
+        }
         let extended = matches!(action, "move" | "hover" | "drag" | "actions")
             || request.get("button").is_some()
             || request.get("modifiers").is_some();
@@ -1018,13 +1040,23 @@ impl<N: Native> Service<N> {
         {
             native["bundleId"] = json!(bundle_id);
         }
+        if let Some(eb) = request.get("eb") {
+            native["eb"] = eb.clone();
+        }
         let receipt = self.native.request(native)?;
         if receipt["sent"] != true {
             return Err(Error::new("HELPER_PROTOCOL", "原生输入未返回投递回执"));
         }
         let mut result = json!({"sent":true,"connectionId":self.connection.as_ref().unwrap().id,"frameId":frame_id});
         if let Some(screen_point) = screen_point {
-            result["screenPoint"] = screen_point;
+            result["screenPoint"] = if request["eb"] == true {
+                receipt.get("screenPoint").cloned().unwrap_or(screen_point)
+            } else {
+                screen_point
+            };
+        }
+        if request["eb"] == true {
+            result["eb"] = json!(true);
         }
         for key in [
             "backend",

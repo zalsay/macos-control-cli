@@ -151,6 +151,23 @@ impl Drop for Fixture {
     }
 }
 #[test]
+fn semantic_eb_selection_is_forwarded_to_the_existing_single_click() {
+    let mut f = Fixture::new(ocr(), Ok(response()), None, true);
+    let receipt = f.service.execute(json!({"action":"click-target","eb":true,"jevProtocol":"decisions-v1","jevUrl":"https://router.example/decisions","jevModel":"typesafe/jev-1.13","connectionId":f.id,"target":"保存按钮","jevKey":"test-private-key"})).unwrap();
+    assert_eq!(receipt["eb"], true);
+    assert_eq!(f.clicks(), 1);
+    assert_eq!(
+        f.native
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r["action"] == "click")
+            .unwrap()["eb"],
+        true
+    );
+}
+
+#[test]
 fn semantic_click_reuses_original_input_conversion_and_reports_only_dispatch() {
     let mut f = Fixture::new(ocr(), Ok(response()), None, true);
     let receipt = f.click().unwrap();

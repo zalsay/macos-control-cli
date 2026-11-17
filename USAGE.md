@@ -6,6 +6,12 @@
 
 其他 Agent 的安装定位、调用流程、图像接入、错误恢复和 Python 示例见 [Agent 接入指南](docs/AGENT-INTEGRATION.md)（源码目录入口；独立功能包中对应 `source/docs/AGENT-INTEGRATION.md`）。
 
+## ESP32 BLE 接口
+
+`mcc --eb status` 查询 `pilot-2`；`mcc --eb move 52,54` / `mcc --eb click 52,54` 使用 0–100 整数屏幕百分比，`mcc --eb type 'Hello'` 输入文本。支持 `key`、`scroll` 及 `mcc --eb --move 52,54 --click` 组合参数。底层优先调用 MCC 同目录的 `macos-ble-control`（`mbc`），缺失时兼容 PATH，直接透传输出和退出码，不增加 MCC JSON 包装。客户端源码位于 `mbc/`，完整构建包包含两个 BLE 可执行入口及 `source/mbc/` 源码，不必另装 MBC；也可执行 `sh mbc/build.sh` 独立构建到 `target/mbc/`。专项帮助 `mcc --eb --help` 不要求安装 BLE 客户端；坐标、输入和本机调用边界见 [ESP BLE 接口](docs/ESPBLE.md)。
+
+Host 的普通 `click`、`click-target`、`type`、`press`、`scroll` 操作追加 `--eb`（请求字段 `eb:true`），仅该次使用 Host 端 ESP32；下一次省略仍使用原输入方式。无需修改 `host start`。坐标仍为窗口截图像素，回执仍为 MCC JSON，Host helper 复用原帧/焦点/倒计时并逐条授权 MBC。当前固件支持单主屏指针、整数百分比近似、ASCII，单次最多 16 个固件命令；暂停发生于投递中时不能撤回已发命令，须保留未确认状态。完整用法和限制见 [ESP BLE 接口](docs/ESPBLE.md#per-operation-esp-input-through-host)。
+
 ## 0.3.6 Host 自动接管（开发候选）
 
 Host 默认在鼠标活动/普通失焦软暂停后的新输入前自动接管，无需用户点击继续。原连接、lease 与窗口/焦点/几何/权限门禁不变；更新 epoch 后，旧指令不能恢复，控制条展示后仍等待 3 秒。明确暂停/取消/关闭控制条以及断线不确定状态/崩溃恢复锁不会自动解除。本机非 Host 模式不变，详见[远端 Host](docs/REMOTE-HOST.md)。开发构建不代表已升级本机或远端服务。

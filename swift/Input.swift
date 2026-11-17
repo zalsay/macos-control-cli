@@ -57,6 +57,40 @@ final class InputCancellation {
     private enum PauseReason: String { case none, userInteraction, focusLoss, manual, transport }
     private var pauseReason = PauseReason.none
     private var transportLocked = false
+    private var blePending = false
+    private var bleUncertain = false
+    private var blePointerStart: TimeInterval = -.infinity
+    private var blePointerEnd: TimeInterval = -.infinity
+
+    var canConfirmInputStopped: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !blePending && !bleUncertain
+    }
+
+    // Authorize each individual BLE packet under the existing input commit lock.
+    // Firmware cannot revoke a packet already accepted; never acknowledge that as stopped.
+    func beginBLECommand(permit: ChromeInputPermit, pointer: Bool, _ authorize: () throws -> Void) throws {
+        lock.lock(); defer { lock.unlock() }
+        try validateInput(permit)
+        guard !bleUncertain, !blePending else { throw HelperFailure.userPaused }
+        blePending = true
+        if pointer { blePointerStart = clock(); blePointerEnd = .infinity }
+        do { try authorize() }
+        catch { bleUncertain = true; throw error }
+    }
+
+    func finishBLECommand() {
+        lock.lock(); defer { lock.unlock() }
+        blePending = false
+        if blePointerEnd == .infinity { blePointerEnd = clock() }
+    }
+
+    func abandonBLECommand() {
+        lock.lock(); defer { lock.unlock() }
+        if blePending { bleUncertain = true; transportLocked = true; _ = pauseLocked(reason: .transport) }
+        blePending = false
+        if blePointerEnd == .infinity { blePointerEnd = clock() }
+    }
 
     private func transportStateLocked() -> [String: Any] {
         let state = stateLocked()
@@ -68,7 +102,8 @@ final class InputCancellation {
         }
         return ["transportPauseVersion": 1, "hostAutoTakeoverVersion": 1, "pauseReason": pauseReason.rawValue, "paused": state == .paused, "phase": phaseName,
                 "inputEpoch": inputEpoch, "lease": executionLease.map { $0 as Any } ?? NSNull(),
-                "recoveryRequired": transportLocked]
+                "recoveryRequired": transportLocked || bleUncertain,
+                "externalInputPending": blePending, "externalInputUncertain": bleUncertain]
     }
 
     func transportState() -> [String: Any] {
@@ -99,7 +134,7 @@ final class InputCancellation {
         lock.lock(); defer { lock.unlock() }
         guard generation == expected else { throw HelperFailure.cancelled }
         if let lease = executionLease { return lease }
-        guard !transportLocked else { throw HelperFailure.userPaused }
+        guard !transportLocked, !bleUncertain else { throw HelperFailure.userPaused }
         leaseCounter &+= 1
         executionLease = leaseCounter
         phase = .awaitingCountdown
@@ -145,6 +180,7 @@ final class InputCancellation {
     }
 
     private func pauseLocked(reason: PauseReason) -> Bool {
+        if blePending { bleUncertain = true }
         if stateLocked() == .paused {
             if reason == .transport || (reason == .manual && pauseReason != .transport) { pauseReason = reason }
             return false
@@ -165,8 +201,12 @@ final class InputCancellation {
     }
 
     // 倒计时内允许用户移开鼠标；迟到的旧事件也不能在倒计时结束后把控制重新暂停。
-    func pauseForUserInteraction(lease: UInt64, timestamp: TimeInterval) -> Bool {
+    func pauseForUserInteraction(lease: UInt64, timestamp: TimeInterval, pointer: Bool = false) -> Bool {
         lock.lock(); defer { lock.unlock() }
+        // CoreGraphics cannot distinguish ESP HID from physical mouse events.
+        // Suppress pointer soft-pauses only within the authorized firmware packet interval.
+        // Manual toolbar pause and focus loss continue to invalidate the permit.
+        if pointer && timestamp >= blePointerStart && timestamp <= blePointerEnd { return false }
         guard executionLease == lease, case .countdown(let deadline) = phase,
               stateLocked() == .running, timestamp >= deadline else { return false }
         return pauseLocked(reason: .userInteraction)
@@ -183,7 +223,7 @@ final class InputCancellation {
         lock.lock(); defer { lock.unlock() }
         guard let lease = executionLease, lease == expectedLease, inputEpoch == expectedEpoch,
               case .paused = phase, (pauseReason == .userInteraction || pauseReason == .focusLoss),
-              !transportLocked, inputEpoch < UInt64.max else { throw HelperFailure.userPaused }
+              !transportLocked, !bleUncertain, inputEpoch < UInt64.max else { throw HelperFailure.userPaused }
         inputEpoch += 1
         pauseReason = .none
         phase = .awaitingCountdown
@@ -194,7 +234,7 @@ final class InputCancellation {
 
     func resumeExecution(lease: UInt64) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard executionLease == lease else { return false }
+        guard executionLease == lease, !bleUncertain else { return false }
         // 暂停期间收到的请求也作废；倒计时完成不再换代，允许其开始后的新请求等待接管。
         if stateLocked() == .paused {
             inputEpoch &+= 1
@@ -215,7 +255,7 @@ final class InputCancellation {
     func beginSetup(generation expected: UInt64, expectedEpoch: UInt64) throws -> StartupPermit {
         lock.lock(); defer { lock.unlock() }
         guard generation == expected else { throw HelperFailure.cancelled }
-        guard inputEpoch == expectedEpoch, stateLocked() != .paused else { throw HelperFailure.userPaused }
+        guard inputEpoch == expectedEpoch, stateLocked() != .paused, !bleUncertain else { throw HelperFailure.userPaused }
         guard executionLease == nil else {
             throw HelperFailure(code: "CONNECTION_BUSY", message: "已有桌面执行 lease；拒绝在活动连接中创建 Chrome 窗口")
         }
@@ -224,7 +264,7 @@ final class InputCancellation {
 
     private func validateSetup(_ permit: StartupPermit) throws {
         guard generation == permit.generation else { throw HelperFailure.cancelled }
-        guard inputEpoch == permit.epoch, stateLocked() != .paused else { throw HelperFailure.userPaused }
+        guard inputEpoch == permit.epoch, stateLocked() != .paused, !bleUncertain else { throw HelperFailure.userPaused }
         guard executionLease == nil else {
             throw HelperFailure(code: "CONNECTION_BUSY", message: "桌面执行 lease 已启动；拒绝继续 Chrome 窗口 setup")
         }
@@ -274,7 +314,7 @@ final class InputCancellation {
 
     private func validateInput(_ permit: ChromeInputPermit) throws {
         guard generation == permit.generation, executionLease == permit.lease else { throw HelperFailure.cancelled }
-        guard stateLocked() == .running, inputEpoch == permit.epoch else { throw HelperFailure.userPaused }
+        guard stateLocked() == .running, inputEpoch == permit.epoch, !bleUncertain else { throw HelperFailure.userPaused }
     }
 
     func checkInput(_ permit: ChromeInputPermit) throws {
@@ -324,6 +364,7 @@ final class InputCancellation {
     }
 
     private func cancelLocked() -> (() -> Void)? {
+        if blePending { bleUncertain = true; transportLocked = true }
         generation &+= 1
         executionLease = nil
         phase = transportLocked ? .paused : .awaitingCountdown
@@ -391,6 +432,7 @@ final class ChromeInput {
 
     func send(_ request: NativeRequest, generation: UInt64) throws -> [String: Any] {
         guard let target = request.target, let bounds = request.expectedBounds else { throw HelperFailure.invalidArgument }
+        let ble = request.espBle ? try ESPBleInput.prepare(request) : nil
         let operation = chromeToastOperationLabel(action: request.action, key: request.key, clickCount: request.clickCount)
         let permit = try desktop.prepareInput(target, cancellation: cancellation, generation: generation, expectedEpoch: request.inputEpoch, operation: operation)
         var completed = false
@@ -425,6 +467,13 @@ final class ChromeInput {
             }
             move.flags = []
             try cancellation.post(move, permit: permit)
+        }
+        if let ble {
+            try ble.send(cancellation: cancellation, permit: permit, verify: { try verify(pointer: ble.plan.point) })
+            completed = true
+            var result: [String: Any] = ["sent": true, "eb": true]
+            if let point = ble.plan.point { result["screenPoint"] = ["x": point.x, "y": point.y] }
+            return result
         }
         switch request.action {
         case "click", "scroll":

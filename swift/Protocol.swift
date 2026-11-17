@@ -68,6 +68,7 @@ struct NativeRequest {
     var maxWidthPx = 1600
     var requestPermissions = false
     var prepareToast = false
+    var espBle = false
     // 仅由 stdin 接收线程签发，协议请求不能自行指定或绕过暂停前的排队代次。
     var inputEpoch: UInt64?
     var expectedLease: UInt64?
@@ -94,6 +95,7 @@ struct NativeRequest {
         for action in ["click", "scroll", "type", "press", "select-file", "chrome-start"] {
             fields[action]?.insert("expectedInputEpoch")
         }
+        for action in ["click", "scroll", "type", "press"] { fields[action]?.insert("eb") }
         if scope == .desktop { fields["apps"] = [] }
         for key in Array(fields.keys) where fields[key]?.contains("windowId") == true {
             fields[key]?.insert("bundleId")
@@ -105,6 +107,10 @@ struct NativeRequest {
             throw HelperFailure.invalidArgument
         }
         var request = NativeRequest(id: id, action: action)
+        if let value = json["eb"] {
+            guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { throw HelperFailure.invalidArgument }
+            request.espBle = number.boolValue
+        }
         if let value = json["expectedInputEpoch"] { request.inputEpoch = try unsignedInteger(value) }
         if let value = json["expectedLease"] { request.expectedLease = try unsignedInteger(value) }
         if action == "transport-disconnect" && request.inputEpoch == nil { throw HelperFailure.invalidArgument }

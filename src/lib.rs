@@ -18,6 +18,7 @@ pub mod remote;
 
 mod private_files;
 
+pub mod espble;
 pub mod execution;
 pub mod firefox;
 #[cfg(target_os = "linux")]

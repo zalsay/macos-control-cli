@@ -28,6 +28,8 @@
 
 **v0.3.4新增：** 内置公网WSS Host与显式`--remote`客户端，支持私有CA/IP证书和独立token初始化、跨CLI会话、截图回传及原执行器保持暂停的断线取消。Chrome/OCR/Jev/输入在Host执行，本地不启动helper或读取模型配置；部署、恢复及实测边界见 [远端Host](docs/REMOTE-HOST.md)。
 
+**ESP32 蓝牙控制：** `mcc --eb status`、`mcc --eb move 52,54`、`mcc --eb click 52,54`、`mcc --eb type 'Hello'` 复用[项目内 MBC 客户端](mbc/README.md)。Host 普通输入命令追加 `--eb`（请求字段 `eb:true`）可仅该次使用 ESP32，仍使用截图像素坐标和 MCC JSON。完整构建包含 `mbc` 与 `macos-ble-control`，`--eb` 优先调用同目录客户端，缺失时兼容 PATH 查找。独立前缀形式使用整数屏幕百分比，并直接透传 BLE 输出和退出码，不启动桌面 daemon。专项帮助运行 `mcc --eb --help`，详见 [ESP BLE 接口](docs/ESPBLE.md)。未更新本机已安装的 MCC。
+
 ## 功能
 
 - 列出普通应用及窗口，连接到精确的窗口 ID、PID 与 bundle ID。
@@ -98,6 +100,8 @@ dist/
     copis-chrome
     desktop-control
     mcc
+    mbc
+    macos-ble-control
     install.sh
     macos-chrome-helper
     module.json

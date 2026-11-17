@@ -109,6 +109,64 @@ fn observe(service: &mut Service<Desktop>, connection: &str) -> String {
         .unwrap()
         .to_owned()
 }
+
+#[test]
+fn eb_routes_only_selected_input_and_retains_frame_and_geometry_checks() {
+    let (mut service, desktop, path) = setup();
+    let connection = connect(&mut service);
+    let frame = observe(&mut service, &connection);
+    let click = json!({"action":"click","connectionId":connection,"frameId":frame,"x":400,"y":300,"eb":true});
+    service.execute(click.clone()).unwrap();
+    let calls = desktop.calls.lock().unwrap();
+    let native = calls.iter().rev().find(|v| v["action"] == "click").unwrap();
+    assert_eq!(native["eb"], true);
+    assert_eq!(native["screenX"], -100.0);
+    assert_eq!(native["screenY"], 170.0);
+    drop(calls);
+    service
+        .execute(json!({"action":"type","connectionId":connection,"frameId":frame,"text":"Hi"}))
+        .unwrap();
+    assert!(desktop
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|v| v["action"] == "type")
+        .unwrap()
+        .get("eb")
+        .is_none());
+    let before = desktop
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|v| v["action"] == "click")
+        .count();
+    let mut invalid = click.clone();
+    invalid["eb"] = json!("true");
+    assert!(service.execute(invalid).is_err());
+    let mut missing = click.clone();
+    missing["frameId"] = json!("missing");
+    assert_eq!(service.execute(missing).unwrap_err().code, "FRAME_UNKNOWN");
+    *desktop.moved.lock().unwrap() = true;
+    assert_eq!(
+        service.execute(click).unwrap_err().code,
+        "FRAME_GEOMETRY_CHANGED"
+    );
+    assert_eq!(
+        desktop
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v["action"] == "click")
+            .count(),
+        before
+    );
+    drop(service);
+    std::fs::remove_dir_all(path).unwrap();
+}
 #[test]
 fn given_one_observation_when_reused_multiple_times_then_all_inputs_are_sent_without_age_limit() {
     let (mut service, desktop, path) = setup();

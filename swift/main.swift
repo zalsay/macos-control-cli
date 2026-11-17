@@ -43,7 +43,11 @@ func handleLine(_ line: Data, oversized: Bool) {
             return
         }
         if request.action == "transport-pause" {
-            writer.success(id: request.id, data: cancellation.transportPause())
+            let receipt = cancellation.transportPause()
+            guard cancellation.canConfirmInputStopped else {
+                throw HelperFailure(code: "CANCEL_UNCONFIRMED", message: "ESP 已接收的输入无法撤回，后续命令已停止，须核对桌面后恢复")
+            }
+            writer.success(id: request.id, data: receipt)
             return
         }
         if request.action == "transport-auto-resume" {
@@ -54,6 +58,7 @@ func handleLine(_ line: Data, oversized: Bool) {
         if request.action == "transport-disconnect" {
             guard let epoch = request.inputEpoch else { throw HelperFailure.invalidArgument }
             try cancellation.cancelIfNotPaused(expectedEpoch: epoch)
+            guard cancellation.canConfirmInputStopped else { throw HelperFailure(code: "CANCEL_UNCONFIRMED", message: "ESP 输入执行结果未确认") }
             writer.success(id: request.id, data: ["cancelled": true])
             return
         }
@@ -64,6 +69,7 @@ func handleLine(_ line: Data, oversized: Bool) {
         if request.action == "cancel" {
             // 直接在 stdin 线程处理，不排在截图、焦点等待或文本输入后面。
             cancellation.cancel()
+            guard cancellation.canConfirmInputStopped else { throw HelperFailure(code: "CANCEL_UNCONFIRMED", message: "ESP 输入执行结果未确认") }
             writer.success(id: request.id, data: ["cancelled": true])
             return
         }

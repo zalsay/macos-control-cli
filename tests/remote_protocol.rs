@@ -3,6 +3,43 @@ use remote_protocol::{parse_envelope, validate_handshake};
 use serde_json::json;
 
 #[test]
+fn remote_eb_accepts_only_boolean_input_selection() {
+    use copis_chrome::protocol::Scope;
+    for request in [
+        json!({"action":"click","connectionId":"c","frameId":"f","x":1,"y":2,"eb":true}),
+        json!({"action":"scroll","connectionId":"c","frameId":"f","x":1,"y":2,"deltaY":-3,"eb":false}),
+        json!({"action":"type","connectionId":"c","frameId":"f","text":"hello","eb":true}),
+        json!({"action":"press","connectionId":"c","frameId":"f","key":"Enter","eb":true}),
+        json!({"action":"click-target","connectionId":"c","target":"Save","eb":true}),
+    ] {
+        assert!(
+            remote_protocol::validate_action(Scope::Desktop, &request).is_ok(),
+            "{request}"
+        );
+        for value in [json!(1), json!("true"), json!(null), json!({})] {
+            let mut invalid = request.clone();
+            invalid["eb"] = value;
+            assert!(remote_protocol::validate_action(Scope::Desktop, &invalid).is_err());
+        }
+    }
+    for action in [
+        "status",
+        "apps",
+        "windows",
+        "connect",
+        "observe",
+        "disconnect",
+        "select-file",
+    ] {
+        assert!(remote_protocol::validate_action(
+            Scope::Desktop,
+            &json!({"action":action,"eb":true})
+        )
+        .is_err());
+    }
+}
+
+#[test]
 fn rejects_untrusted_input_before_dispatch() {
     let good = json!({"remoteProtocol":1,"id":"req-1","session":"secret","sequence":1,"scope":"desktop","request":{"action":"windows"}});
     assert!(parse_envelope(&serde_json::to_vec(&good).unwrap()).is_ok());
