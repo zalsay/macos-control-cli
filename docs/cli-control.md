@@ -47,6 +47,10 @@ sfa launch "$PROFILE_UUID"
 
 `launch` 请求已有 Manager，不会代为启动 Manager。启动会请求激活浏览器窗口；返回成功不等于窗口已获得焦点或控制连接已建立。接管要求浏览器已不在前台且窗口不是 key/main；用户切换到其他应用后再 connect。不会在 connect 时自动切换前台应用，以 connect 的真实结果为准。
 
+Manager 唯一性检查只计入已完成 GUI 启动且未退出的应用；同 bundle ID 下未启动 GUI 的 CLI/daemon 注册记录不会被计作第二个 Manager。多个真正的 GUI Manager 仍拒绝歧义路由。
+
+AppleEvents 权限查询和业务请求均使用已核验 Manager 的系统进程序列号（PSN），绑定这一次进程启动。不会再按 bundle ID 查找接收者，避免同一可执行文件的 `sfa daemon` 被系统选成目标。PID 只用于从已持有的 Manager 获取并核验进程身份，不直接作为 AppleEvent 地址；Manager 更换时仍需重新建立客户端。
+
 ### 单独查询或申请 AppleEvents 授权
 
 在同一个实际执行宿主（例如 Copis/DSH）的子进程链中使用：
@@ -65,6 +69,8 @@ sfa authorize --request  # 仅用户明确要求授权时执行一次，由用�
 ## 3. 建立连接，观察页面
 
 已注册浏览器的控制连接不再按90秒代次或60秒空闲自动到期，也不再按剩余代次预算拒绝新命令。单次启动、IPC 与系统调用仍有超时；超时不能解释为网页未执行。sfa 不自动重放输入或导航，agent 根据回执及 observe 决定后续操作，完成后主动 release。
+
+已注册连接中的 `state`/`observe` 单次超时不会再让 Runner 状态机关闭整个会话。完整发送后的只读请求超时或取消时，客户端返回原调用错误，并保留原请求关联信息来核验、消费迟到回包；迟到结果不会交给下一次调用。真实通道断开或回包不匹配仍返回实际错误。`release` 的准备/提交明确返回无副作用的 `SESSION_BUSY` 或 `INVALID_POINTER_STATE` 时，允许新的显式 release；提交重试沿用原 transferID，不重复准备。没有自动重试，真实交还回执未完成时也不会声称释放成功。
 
 ```sh
 SF_RUNTIME="$(mktemp -d "$HOME/sfc-XXXXXXXX")"

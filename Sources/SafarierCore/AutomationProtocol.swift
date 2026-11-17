@@ -39,6 +39,9 @@ public enum AutomationAction: Equatable, Sendable, CustomStringConvertible, Cust
     public var isNavigation: Bool {
         switch self { case .navigate, .navigateByInput: return true; default: return false }
     }
+    public var isReadOnly: Bool {
+        switch self { case .capabilities, .getState, .screenshot: return true; default: return false }
+    }
     /// Shared outer request envelope; Runner actions still have individual deadlines.
     public var managerTimeoutSeconds: Double {
         switch self {

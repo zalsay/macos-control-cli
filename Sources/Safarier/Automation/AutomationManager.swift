@@ -51,6 +51,7 @@ import AppKit
         var closeTask: Task<CleanupReceipt, Never>?
         var releaseRequest: AutomationRequest?
         var releaseReply: AutomationReply?
+        var releasePreparation: ControlReleasePreparation?
         var releaseWorkerRunning = false
         var closeRequests: [UUID: AutomationRequest] = [:]
         // Correlation-only tombstones preserve cross-action conflicts when the
@@ -334,7 +335,8 @@ import AppKit
         if entry.phase == .closing || entry.phase == .closed { return failure(request, .sessionExpired) }
         pruneRetainedRunners()
         guard retainedRunners.count + opens.values.filter({ $0.releaseWorkerRunning }).count < AutomationLimits.replayEntries else { return failure(request, .replayWindowFull) }
-        guard entry.phase == .active, (entry.registeredInteractive || entry.cancellers.isEmpty), let token = entry.token,
+        guard (entry.phase == .active || (entry.registeredInteractive && entry.phase == .releasing && entry.releasePreparation != nil)),
+              (entry.registeredInteractive || entry.cancellers.isEmpty), let token = entry.token,
               request.sessionID == token, let target = entry.target,
               let endpoint = entry.endpoint,
               identityMatches(entry, endpoint), target.profileID == entry.profileID,
@@ -387,26 +389,32 @@ import AppKit
                     guard let profile = try await profileReader(entry.profileID), profile.id == entry.profileID,
                           valid() else { throw AutomationError(code: .profileNotAllowed) }
                 }
-                let remaining = min(AutomationLimits.actionSeconds, deadline - now())
-                guard remaining > 0 else { throw AutomationError(code: .timeout) }
-                sent.cancel()
-                #if SAFARIER_BOUND_LOCAL_CANDIDATE
-                traceRelease("prepare.before")
-                #endif
-                let preparedReply = try await endpoint.request(request, timeoutSeconds: remaining)
-                #if SAFARIER_BOUND_LOCAL_CANDIDATE
-                traceRelease("prepare.after")
-                #endif
-                guard valid(), preparedReply.requestID == request.requestID,
-                      (try? AutomationCodec.decodeReply(AutomationCodec.encode(preparedReply))) == preparedReply,
-                      case .success(.controlReleasePrepared(let preparation)) = preparedReply.outcome,
-                      preparation.target == target, preparation.inputReleased, preparation.artifactsCleaned,
-                      preparation.browserRetained else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
+                if entry.releasePreparation == nil {
+                    let remaining = min(AutomationLimits.actionSeconds, deadline - now())
+                    guard remaining > 0 else { throw AutomationError(code: .timeout) }
+                    sent.cancel()
+                    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+                    traceRelease("prepare.before")
+                    #endif
+                    let preparedReply = try await endpoint.request(request, timeoutSeconds: remaining)
+                    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+                    traceRelease("prepare.after")
+                    #endif
+                    guard valid(), preparedReply.requestID == request.requestID,
+                          (try? AutomationCodec.decodeReply(AutomationCodec.encode(preparedReply))) == preparedReply else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
+                    if case .failure(let error) = preparedReply.outcome { throw error }
+                    guard case .success(.controlReleasePrepared(let preparation)) = preparedReply.outcome,
+                          preparation.target == target, preparation.inputReleased, preparation.artifactsCleaned,
+                          preparation.browserRetained else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
+                    entry.releasePreparation = preparation
+                }
+                guard let preparation = entry.releasePreparation else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
                 let commit = AutomationRequest(version: 1, requestID: UUID(), sessionID: token,
                                                action: .commitControlRelease(transferID: preparation.transferID))
                 NavigationDiagnostic.releaseChild(parent: request.requestID, child: commit.requestID)
                 let commitRemaining = min(AutomationLimits.actionSeconds, deadline - now())
                 guard valid(), commitRemaining > 0 else { throw AutomationError(code: .timeout) }
+                sent.cancel()
                 #if SAFARIER_BOUND_LOCAL_CANDIDATE
                 traceRelease("commit.before", relatedRequestID: commit.requestID)
                 #endif
@@ -415,8 +423,9 @@ import AppKit
                 traceRelease("commit.after", relatedRequestID: commit.requestID)
                 #endif
                 guard valid(), commitReply.requestID == commit.requestID,
-                      (try? AutomationCodec.decodeReply(AutomationCodec.encode(commitReply))) == commitReply,
-                      case .success(.controlReleased(let receipt)) = commitReply.outcome,
+                      (try? AutomationCodec.decodeReply(AutomationCodec.encode(commitReply))) == commitReply else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
+                if case .failure(let error) = commitReply.outcome { throw error }
+                guard case .success(.controlReleased(let receipt)) = commitReply.outcome,
                       receipt.target == target, receipt.transferID == preparation.transferID,
                       receipt.inputReleased, receipt.artifactsCleaned, receipt.browserRetained,
                       receipt.manualInteractionEnabled else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
@@ -430,7 +439,7 @@ import AppKit
                 let withinDeadline = valid() && owner.pid == endpoint.pid && owner.ownershipID == endpoint.ownershipID
                 // The exact owner has already been taken even if timeout/cancellation won meanwhile.
                 if !endpoint.registeredInteractive { retainedRunners[owner.ownershipID] = owner }
-                entry.endpoint = nil; entry.phase = .released; changed()
+                entry.endpoint = nil; entry.releasePreparation = nil; entry.phase = .released; changed()
                 guard withinDeadline else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
                 let reply = AutomationReply(requestID: request.requestID, outcome: .success(.controlReleased(receipt)))
                 guard entry.replay.complete(request, reply: reply, at: now()) else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
@@ -443,6 +452,15 @@ import AppKit
             traceRelease("failed.after." + diagnosticPhase, result: (error as? AutomationError)?.code.rawValue ?? "unknown")
             #endif
             if !entry.cancellers.values.contains(where: { $0.flag === flag }) { entry.releaseWorkerRunning = false }
+            if entry.registeredInteractive, !flag.cancelled, entry.phase == .releasing,
+               let error = error as? AutomationError, error.sideEffects == .none,
+               !sent.cancelled || error.code == .sessionBusy || error.code == .invalidPointerState {
+                let reply = AutomationReply(requestID: request.requestID, outcome: .failure(error))
+                _ = entry.replay.complete(request, reply: reply, at: now())
+                entry.releaseRequest = nil; entry.releaseReply = nil
+                if entry.releasePreparation == nil { entry.phase = .active; armLease(entry) }
+                return reply
+            }
             if entry.phase != .released { startClose(entry, excluding: flag) }
             let code: AutomationErrorCode = sent.cancelled ? .indeterminateResult : ((error as? AutomationError)?.code ?? .cancelled)
             let reply = AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: code, sideEffects: sent.cancelled ? .possible : .none)))
@@ -546,6 +564,11 @@ import AppKit
             }
             #endif
             if error.code == .sessionBusy { return failure(request, .sessionBusy) }
+            if entry.registeredInteractive && request.action.isReadOnly {
+                let reply = AutomationReply(requestID: request.requestID, outcome: .failure(error))
+                _ = entry.replay.complete(request, reply: reply, at: now())
+                return reply
+            }
             startClose(entry)
             if sent.cancelled, case .getState = request.action { return AutomationReply(requestID: request.requestID, outcome: .failure(error)) }
             if sent.cancelled { return AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .indeterminateResult, sideEffects: .possible))) }
@@ -819,7 +842,10 @@ import AppKit
             #else
             let diagnosticBundleID = "sh.safarier.boundcandidate"
             #endif
+            // CLI and daemon share the bundle without launching a GUI Manager.
+            // Their LaunchServices entries are not competing Manager instances.
             let registrations = NSRunningApplication.runningApplications(withBundleIdentifier: diagnosticBundleID)
+                .filter { $0.isFinishedLaunching && !$0.isTerminated }
             let managerPID = getpid()
             let managerCount = registrations.filter { $0.processIdentifier == managerPID }.count
             guard let concrete = Self.concreteOwnedClient(endpoint) else {

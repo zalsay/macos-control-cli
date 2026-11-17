@@ -2,6 +2,7 @@
 #include "BinderIdentity.h"
 #include <Security/Security.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <Carbon/Carbon.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <bsm/libbsm.h>
 #include <libproc.h>
@@ -15,7 +16,6 @@
 #include <os/log.h>
 #include <uuid/uuid.h>
 #include <dispatch/dispatch.h>
-#include <stdlib.h>
 
 static int peer_token(int fd, audit_token_t *token, pid_t *pid) {
     int type = 0; socklen_t size = sizeof(type);
@@ -126,22 +126,34 @@ done:
     return ok;
 }
 
+// Process Manager's canonical serial identifies one application incarnation;
+// bundle-ID resolution can instead select a daemon running the same binary.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+static OSStatus control_process_serial(pid_t pid, ProcessSerialNumber *serial) {
+    return GetProcessForPID(pid, serial);
+}
+#pragma clang diagnostic pop
+
 int cs_control_capture_manager(int32_t pid, const char *expected, CSControlManager *out) {
     if (pid <= 0 || !expected || expected[0] != '/' || !out) return 0;
     uint64_t deadline = bi_deadline_after_ms(5000); if (!deadline) return 0;
     struct proc_bsdinfo a = {0}, b = {0}; char pathA[PROC_PIDPATHINFO_MAXSIZE] = {0}, pathB[PROC_PIDPATHINFO_MAXSIZE] = {0};
+    ProcessSerialNumber serial = {0}, serial_again = {0};
     BIImagePin pin = {0}, again = {0}; uint8_t first[64] = {0}, second[64] = {0}; uint32_t n = 0, m = 0;
     if (!process_sample(pid, &a, pathA) || strcmp(pathA, expected)) return 0;
+    if (control_process_serial(pid, &serial) != noErr || !(serial.highLongOfPSN || serial.lowLongOfPSN)) return 0;
     if (bi_static_pin(expected, deadline, &pin) != BI_OK || !code_for_pid(pid, first, &n) || !code_for_pid(pid, second, &m)) return 0;
     if (n != m || n != pin.code_hash_len || memcmp(first, second, n) || memcmp(first, pin.code_hash, n)) return 0;
     if (!process_sample(pid, &b, pathB) || strcmp(pathA, pathB) || a.pbi_pid != b.pbi_pid || a.pbi_uid != b.pbi_uid || a.pbi_ruid != b.pbi_ruid || a.pbi_start_tvsec != b.pbi_start_tvsec || a.pbi_start_tvusec != b.pbi_start_tvusec) return 0;
+    if (control_process_serial(pid, &serial_again) != noErr || serial.highLongOfPSN != serial_again.highLongOfPSN || serial.lowLongOfPSN != serial_again.lowLongOfPSN) return 0;
     if (bi_static_pin(expected, deadline, &again) != BI_OK || !bi_fixture_file_equal(&pin.file, &again.file) || pin.code_hash_len != again.code_hash_len || memcmp(pin.code_hash, again.code_hash, pin.code_hash_len) || !bi_fixture_deadline_valid(deadline)) return 0;
-    CSControlManager value = { .pid = pid, .uid = a.pbi_uid, .birth_sec = a.pbi_start_tvsec, .birth_usec = a.pbi_start_tvusec, .code_hash_len = n };
+    CSControlManager value = { .pid = pid, .uid = a.pbi_uid, .psn_high = serial.highLongOfPSN, .psn_low = serial.lowLongOfPSN, .birth_sec = a.pbi_start_tvsec, .birth_usec = a.pbi_start_tvusec, .code_hash_len = n };
     memcpy(value.code_hash, first, n); *out = value; return 1;
 }
 
 int cs_control_manager_equal(const CSControlManager *a, const CSControlManager *b) {
-    return a && b && a->pid == b->pid && a->uid == b->uid && a->birth_sec == b->birth_sec && a->birth_usec == b->birth_usec && a->code_hash_len > 0 && a->code_hash_len <= 64 && a->code_hash_len == b->code_hash_len && !memcmp(a->code_hash, b->code_hash, a->code_hash_len);
+    return a && b && a->pid == b->pid && a->uid == b->uid && (a->psn_high || a->psn_low) && a->psn_high == b->psn_high && a->psn_low == b->psn_low && a->birth_sec == b->birth_sec && a->birth_usec == b->birth_usec && a->code_hash_len > 0 && a->code_hash_len <= 64 && a->code_hash_len == b->code_hash_len && !memcmp(a->code_hash, b->code_hash, a->code_hash_len);
 }
 
 int cs_control_reply_sender_matches(const void *bytes, unsigned long length, const CSControlManager *manager) {
@@ -154,22 +166,21 @@ int cs_control_reply_sender_matches(const void *bytes, unsigned long length, con
     return peer_code(&token, hash, &n) && n == manager->code_hash_len && !memcmp(hash, manager->code_hash, n);
 }
 
-#include <Carbon/Carbon.h>
 static uint64_t control_now_ns(void) {
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now)) return 0;
     return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
 }
 static int control_before(uint64_t deadline) { uint64_t now = control_now_ns(); return now && now < deadline; }
-typedef int32_t (*control_permission_query)(const char *bundle_id);
-static int32_t control_permission_native(const char *bundle_id) {
+typedef int32_t (*control_permission_query)(const ProcessSerialNumber *target);
+static int32_t control_permission_native(const ProcessSerialNumber *target) {
     AEAddressDesc address = { typeNull, NULL };
-    OSStatus status = AECreateDesc(typeApplicationBundleID, bundle_id, (Size)strlen(bundle_id), &address);
+    OSStatus status = AECreateDesc(typeProcessSerialNumber, target, sizeof(*target), &address);
     if (status == noErr) status = AEDeterminePermissionToAutomateTarget(&address, 'SFAu', 'requ', false);
     AEDisposeDesc(&address);
     return status;
 }
-static int32_t control_permission_bounded(const char *bundle_id, uint64_t timeout_ns, control_permission_query query) {
+static int32_t control_permission_bounded(const ProcessSerialNumber *target, uint64_t timeout_ns, control_permission_query query) {
     if (!timeout_ns || timeout_ns > INT64_MAX) return errAETimeout;
     // A native query is uncancellable. Limit retained workers even if the OS
     // never returns, and charge admission to the same deadline as the query.
@@ -179,15 +190,13 @@ static int32_t control_permission_bounded(const char *bundle_id, uint64_t timeou
     if (!slots) return memFullErr;
     dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout_ns);
     if (dispatch_semaphore_wait(slots, deadline)) return errAETimeout;
-    char *owned_id = strdup(bundle_id);
-    if (!owned_id) { dispatch_semaphore_signal(slots); return memFullErr; }
+    ProcessSerialNumber owned_target = *target;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    if (!done) { free(owned_id); dispatch_semaphore_signal(slots); return memFullErr; }
+    if (!done) { dispatch_semaphore_signal(slots); return memFullErr; }
     __block int32_t result = errAETimeout;
     dispatch_retain(done);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        result = query(owned_id);
-        free(owned_id);
+        result = query(&owned_target);
         dispatch_semaphore_signal(slots);
         dispatch_semaphore_signal(done);
         dispatch_release(done);
@@ -198,14 +207,15 @@ static int32_t control_permission_bounded(const char *bundle_id, uint64_t timeou
     return answer;
 }
 #if SAFARIER_CONTROL_TESTING
-static int32_t control_permission_test_slow(const char *bundle_id) {
-    (void)bundle_id;
+static int32_t control_permission_test_slow(const ProcessSerialNumber *target) {
+    (void)target;
     struct timespec delay = { .tv_sec = 0, .tv_nsec = 250000000 };
     nanosleep(&delay, NULL);
     return noErr;
 }
 int32_t cs_control_test_permission_timeout(void) {
-    return control_permission_bounded("invalid.test", 20000000ULL, control_permission_test_slow);
+    ProcessSerialNumber target = {0};
+    return control_permission_bounded(&target, 20000000ULL, control_permission_test_slow);
 }
 #endif
 static int manager_still_matches(const CSControlManager *expected, const char *path) {
@@ -233,7 +243,8 @@ int32_t cs_control_send_apple_event(const char *bundle_id, const uint8_t *reques
     TRACE("preIdentity.after");
     *phase = 2;
     TRACE("address.before");
-    OSStatus status = AECreateDesc(typeApplicationBundleID, bundle_id, (Size)bid_len, &address);
+    const ProcessSerialNumber target = {manager->psn_high, manager->psn_low};
+    OSStatus status = AECreateDesc(typeProcessSerialNumber, &target, sizeof(target), &address);
     TRACE("address.after");
     if (status != noErr) goto done;
     *phase = 3;
@@ -242,7 +253,7 @@ int32_t cs_control_send_apple_event(const char *bundle_id, const uint8_t *reques
     if (!permission_now || permission_now >= deadline) { status = errAETimeout; goto done; }
     uint64_t permission_budget = deadline - permission_now;
     if (permission_budget > 5000000000ULL) permission_budget = 5000000000ULL;
-    status = control_permission_bounded(bundle_id, permission_budget, control_permission_native);
+    status = control_permission_bounded(&target, permission_budget, control_permission_native);
     TRACE("permission.after");
     if (status != noErr) goto done;
     *phase = 4;

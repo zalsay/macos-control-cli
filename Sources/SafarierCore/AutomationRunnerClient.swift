@@ -60,9 +60,10 @@ public actor AutomationRunnerClient {
         let bytes: Data
         var minting: Bool
         var admission: SealedWriteAdmission?
-        let continuation: CheckedContinuation<AutomationReply, Error>
+        var continuation: CheckedContinuation<AutomationReply, Error>?
         let reserved: Bool
         var attempted: Bool
+        var transmitted = false
         var timer: Task<Void, Never>?
     }
     private init(owner: OwnedRunnerProcess, profileID: UUID, runnerInstanceID: UUID, channel: AutomationChannel, context: ControllerGenerationContext) {
@@ -402,6 +403,18 @@ public actor AutomationRunnerClient {
         let pendingRemainingMs = diagnosticNow < item.deadline ? (item.deadline - diagnosticNow) / 1_000_000 : 0
         fputs("INBOUND_DIAG phase=pending_deadline outboundCutoffExpired=\(outboundCutoffExpired) pendingDeadlineExpired=\(pendingDeadlineExpired) pendingRemainingMs=\(pendingRemainingMs)\n", stderr)
         #endif
+        if fixtureContext.registrationNonce != nil && item.action.isReadOnly {
+            // The complete read request is already on the authenticated channel.
+            // Its caller's deadline cannot invalidate a later correlated reply.
+            // A correlated reply also proves transmission if the writer has not
+            // resumed yet. Keep the validation deadline stable across that race.
+            pending[id]?.transmitted = true
+            if item.cancellation.isCancelled { failTimedRequest(id, generation: generation, code: .cancelled) }
+            else if DispatchTime.now().uptimeNanoseconds >= item.deadline { failTimedRequest(id, generation: generation, code: .timeout) }
+            try admission.binding.checkCommit()
+            try channel.requireOpen(before: UInt64.max)
+            return UInt64.max
+        }
         if item.cancellation.isCancelled { throw AutomationError(code: .cancelled) }
         if DispatchTime.now().uptimeNanoseconds >= item.deadline { throw AutomationError(code: .timeout) }
         try admission.binding.checkCommit()
@@ -493,6 +506,7 @@ public actor AutomationRunnerClient {
         #endif
         do {
             try await channel.sendBound(admission)
+            pending[id]?.transmitted = true
             #if SAFARIER_BOUND_LOCAL_CANDIDATE
             if hoverIsMove { hoverCoreTrace("client.move_send_after") }
             if closeIsReducing { hoverCoreTrace("close.client.send_after") }
@@ -588,7 +602,7 @@ public actor AutomationRunnerClient {
                 else { hoverCoreTrace("client.move_reply_delivered") }
             }
             #endif
-            item.continuation.resume(returning: reply)
+            item.continuation?.resume(returning: reply)
             return true
         } catch let error as AutomationError {
             #if SAFARIER_BOUND_LOCAL_CANDIDATE
@@ -641,19 +655,26 @@ public actor AutomationRunnerClient {
     }
     private func failure(for item: Pending, code: AutomationErrorCode, definitelyUnsent: Bool = false) -> AutomationError {
         if item.attempted && !definitelyUnsent {
-            switch item.action {
-            case .capabilities, .getState: break
-            default: return AutomationError(code: .indeterminateResult, sideEffects: .possible)
-            }
+            if !item.action.isReadOnly { return AutomationError(code: .indeterminateResult, sideEffects: .possible) }
         }
         return AutomationError(code: code)
     }
     private func finishFailure(_ id: UUID, code: AutomationErrorCode, definitelyUnsent: Bool = false) {
         guard let item = removePending(id) else { return }
-        item.continuation.resume(throwing: failure(for: item, code: code, definitelyUnsent: definitelyUnsent))
+        item.continuation?.resume(throwing: failure(for: item, code: code, definitelyUnsent: definitelyUnsent))
+    }
+    private func canRetireRead(_ item: Pending) -> Bool {
+        fixtureContext.registrationNonce != nil && item.action.isReadOnly && item.transmitted
     }
     private func failTimedRequest(_ id: UUID, generation: UUID, code: AutomationErrorCode) {
         guard let item = pending[id], item.generation == generation else { return }
+        if canRetireRead(item) {
+            pending[id]?.continuation = nil
+            pending[id]?.timer = nil
+            item.timer?.cancel()
+            item.continuation?.resume(throwing: AutomationError(code: code))
+            return
+        }
         if item.attempted { failConnection(code, source: "client.timer_or_cancel") } else { finishFailure(id, code: code) }
     }
     private func failConnection(_ code: AutomationErrorCode, source: String = #function) {
@@ -702,9 +723,11 @@ public actor AutomationRunnerClient {
     /// Transfers only the exact child held by this client after its authenticated commit reply.
     // Keep distinct from the App async protocol default: same-name overloads recurse into that default.
     public func takeValidatedReleasedOwner(matching receipt: ControlReleaseReceipt) throws -> OwnedRunnerProcess {
-        guard !closed, !releasedOwnerTaken, pending.isEmpty, validatedRelease == receipt,
+        guard !closed, !releasedOwnerTaken,
+              pending.values.allSatisfy({ $0.continuation == nil && canRetireRead($0) }), validatedRelease == receipt,
               receipt.target == boundTarget, owner.isRunning else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
         releasedOwnerTaken = true; validatedRelease = nil; closed = true
+        for id in Array(pending.keys) { _ = removePending(id) }
         channel.close()
         let context = fixtureContext
         context.stopFromClient(.cancelled)

@@ -23,7 +23,8 @@ int32_t cs_control_authorization(const char *bundle_id, int request_consent,
         return errAEEventNotPermitted;
     }
     AEAddressDesc address = {typeNull, NULL};
-    OSStatus status = AECreateDesc(typeApplicationBundleID, bundle_id, (Size)strlen(bundle_id), &address);
+    const ProcessSerialNumber target = {manager->psn_high, manager->psn_low};
+    OSStatus status = AECreateDesc(typeProcessSerialNumber, &target, sizeof(target), &address);
     if (status == noErr) {
         // Permission API only: exact existing event scope, never a wildcard or business send.
         status = AEDeterminePermissionToAutomateTarget(&address, 'SFAu', 'requ', request_consent == 1);

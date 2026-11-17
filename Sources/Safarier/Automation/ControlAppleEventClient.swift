@@ -4,7 +4,8 @@ import SafarierCore
 import SafarierControlSupport
 
 /// One retained destination for the lifetime of a broker. A PID is sampled only
-/// as part of the held handle's identity, never as an Apple Event address.
+/// as part of the held handle's identity. Its captured process serial number
+/// addresses this Manager incarnation without resolving a shared bundle ID.
 @MainActor
 final class ControlAppleEventClient {
     enum Failure: Error { case unavailable, indeterminate }
@@ -69,7 +70,10 @@ final class ControlAppleEventClient {
         guard Bundle(url: bundleURL)?.bundleIdentifier == expectedID else {
             Self.diagnostic("route", status: 0, sent: false, senderAudit: false); throw Failure.unavailable
         }
+        // CLI/daemon roles share this bundle but never finish NSApplication launch.
+        // Count only launched GUI applications when resolving the unique Manager.
         let matches = NSRunningApplication.runningApplications(withBundleIdentifier: expectedID)
+            .filter { $0.isFinishedLaunching && !$0.isTerminated }
         guard matches.count == 1, let manager = matches.first, !manager.isTerminated,
               manager.isFinishedLaunching, let date = manager.launchDate,
               manager.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == bundleURL else {
@@ -97,6 +101,7 @@ final class ControlAppleEventClient {
 
     private func destinationCheck() -> DestinationCheck {
         let matches = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.isFinishedLaunching && !$0.isTerminated }
         guard matches.count == 1, let only = matches.first, only == manager, !manager.isTerminated,
               manager.isFinishedLaunching, manager.launchDate == launchDate,
               manager.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == bundleURL,

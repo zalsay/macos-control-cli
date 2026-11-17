@@ -138,12 +138,11 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         replay?.renew(at: now) ?? false
     }
     private func bumpEpoch() { if epoch < UInt64.max { epoch += 1 } }
-    private func isReadOnly(_ action: AutomationAction) -> Bool { switch action { case .getState, .screenshot, .capabilities: return true; default: return false } }
     private func stop(_ reason: AutomationCloseReason, at now: Double) -> [AutomationSessionEffect] {
         guard state != .closed && state != .released && state != .stopping else { return [] }
         bumpEpoch(); var effects: [AutomationSessionEffect] = []
         if let f = flight {
-            let failure = AutomationReply(requestID: f.request.requestID, outcome: .failure(AutomationError(code: .indeterminateResult, sideEffects: isReadOnly(f.request.action) ? .none : .possible)))
+            let failure = AutomationReply(requestID: f.request.requestID, outcome: .failure(AutomationError(code: .indeterminateResult, sideEffects: f.request.action.isReadOnly ? .none : .possible)))
             _ = replayComplete(f.request, reply: failure, at: now)
             effects.append(.completion(f.ticket, failure)); flight = nil
         }
@@ -185,12 +184,24 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         if !registeredInteractive && now >= idleDeadline { return stop(.expired, at: now) }
         if let deadline = holdDeadline, now >= deadline { return stop(.heldDeadline, at: now) }
         if let deadline = releaseDeadline, now >= deadline { return stop(.expired, at: now) }
-        if let f = flight, now >= f.deadline { return stop(.expired, at: now) }
+        if let f = flight, now >= f.deadline {
+            if registeredInteractive && f.request.action.isReadOnly {
+                let reply = AutomationReply(requestID: f.request.requestID, outcome: .failure(AutomationError(code: .timeout)))
+                flight = nil
+                _ = replayComplete(f.request, reply: reply, at: now)
+                return [.completion(f.ticket, reply)]
+            }
+            return stop(.expired, at: now)
+        }
         return []
     }
     public func event(_ event: AutomationSessionEvent, at now: Double) -> [AutomationSessionEffect] {
         if state == .released { return [] }
-        let expired = tick(at: now); if !expired.isEmpty || state == .closed { return expired }
+        let expired = tick(at: now)
+        if !expired.isEmpty, registeredInteractive, state == .ready || state == .held {
+            return expired + self.event(event, at: now)
+        }
+        if !expired.isEmpty || state == .closed { return expired }
         if state == .stopping {
             if case let .cleanupFinished(ticket, receipt) = event, ticket == cleanupTicket { return finalizeCleanup(receipt, at: now) }
             if case .schedulingFailed = event { return finalizeCleanup(CleanupReceipt(cleaned: false, terminatedOwnedRunner: false), at: now) }
@@ -231,7 +242,12 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
             }
         }
         let expired = tick(at: now)
-        if !expired.isEmpty { return expired + [reply(request, reusedInFlight ? .requestIDReused : .sessionExpired)] }
+        if !expired.isEmpty {
+            if registeredInteractive, state == .ready || state == .held {
+                return expired + begin(request, permission: permission, target: observed, at: now)
+            }
+            return expired + [reply(request, reusedInFlight ? .requestIDReused : .sessionExpired)]
+        }
         if state == .closed {
             guard observed == target else { return [reply(request, .targetChanged)] }
             guard (try? AutomationCodec.encodeRequest(request)) != nil else { return [reply(request, .invalidRequest)] }
@@ -349,7 +365,7 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         guard validated else {
             return stop(.targetChanged, at: now)
         }
-        if !registeredInteractive, case .failure(let failure) = response.outcome, !isReadOnly(request.action), failure.sideEffects != .none {
+        if !registeredInteractive, case .failure(let failure) = response.outcome, !request.action.isReadOnly, failure.sideEffects != .none {
             return stop(.targetChanged, at: now)
         }
         // Navigation reserves its next viewport at dispatch. A known pre-dispatch
@@ -363,7 +379,7 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
             switch request.action { case .mouseDown: state = .held; case .mouseUp: state = .ready; holdDeadline = nil; default: break }
         } else if case .mouseDown = request.action { holdDeadline = nil }
         guard replayComplete(request, reply: response, at: now) else {
-            let failure = AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .indeterminateResult, sideEffects: isReadOnly(request.action) ? .none : .possible)))
+            let failure = AutomationReply(requestID: request.requestID, outcome: .failure(AutomationError(code: .indeterminateResult, sideEffects: request.action.isReadOnly ? .none : .possible)))
             return stop(.expired, at: now) + [.completion(ticket, failure)]
         }
         if case .success(let result) = response.outcome {
@@ -375,6 +391,11 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
                 controlReleaseCommitted = true; state = .released; releasePreparation = nil; releaseDeadline = nil; replay = nil
             default: break
             }
+        } else if registeredInteractive, case .failure(let error) = response.outcome, error.sideEffects == .none,
+                  error.code == .sessionBusy || error.code == .invalidPointerState {
+            // A rejected preparation did not start a handshake. A rejected commit
+            // retains its exact preparation so the next explicit call can finish it.
+            if case .releaseControl = request.action { releaseDeadline = nil }
         } else if case .releaseControl = request.action { return stop(.targetChanged, at: now) + [.completion(ticket, response)] }
         else if case .commitControlRelease = request.action { return stop(.targetChanged, at: now) + [.completion(ticket, response)] }
         return [.completion(ticket, response)]

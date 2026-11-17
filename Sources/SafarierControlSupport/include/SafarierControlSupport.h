@@ -21,13 +21,15 @@ int cs_control_peer_equal(const CSControlPeer *a, const CSControlPeer *b);
 typedef struct {
     int32_t pid;
     uint32_t uid;
+    uint32_t psn_high, psn_low;
     uint64_t birth_sec, birth_usec;
     uint8_t code_hash[64];
     uint32_t code_hash_len;
 } CSControlManager;
 
-/* pid is metadata from the unique held NSRunningApplication, never a target
- * address. The actual Apple Event is always addressed to a bundle identifier. */
+/* Capture the unique held NSRunningApplication's process incarnation. Its
+ * canonical process serial number addresses Apple Events even when another
+ * invocation of the same binary has registered the same bundle identifier. */
 int cs_control_capture_manager(int32_t pid, const char *expected_executable, CSControlManager *out);
 int cs_control_manager_equal(const CSControlManager *a, const CSControlManager *b);
 int cs_control_reply_sender_matches(const void *audit_bytes, unsigned long length, const CSControlManager *manager);
@@ -39,8 +41,9 @@ int32_t cs_control_authorization(const char *bundle_id, int request_consent,
                                  const CSControlManager *manager, const char *expected_executable,
                                  int *target_changed);
 
-/* TCC is checked with askUserIfNeeded=false. Address is a bundle identifier,
- * never a PID. The original manager proof is recaptured around preflight and
+/* TCC is checked with askUserIfNeeded=false. Address is the captured Manager's
+ * process serial number, never a bundle-ID lookup or bare PID. The original
+ * manager proof is recaptured around preflight and
  * send. sent is set before AESendMessage: later errors are indeterminate.
  * A reply is usable only when its OS sender audit token was verified. */
 int32_t cs_control_send_apple_event(const char *bundle_id, const uint8_t *request, unsigned long request_len,

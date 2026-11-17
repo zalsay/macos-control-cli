@@ -376,7 +376,11 @@ import Darwin
     private func cancelCall(_ id: UUID) {
         guard let call = calls[id] else { return }
         if let ticket = call.ticket, machine.currentTicket == ticket {
-            process(machine.event(.channelClosed, at: now()))
+            if machine.isRegisteredInteractive && call.request.action.isReadOnly {
+                process(machine.complete(ticket: ticket, reply: failure(call.request, .cancelled), at: now()))
+            } else {
+                process(machine.event(.channelClosed, at: now()))
+            }
         }
         if let remaining = calls[id] { finish(id, failure(remaining.request, .cancelled, effects: remaining.sinkStarted ? .possible : .none)) }
     }
