@@ -212,7 +212,9 @@ fn pause_transport(canceller: &Canceller) -> Result<Value> {
     let receipt = canceller
         .transport("transport-pause")
         .map_err(|_| control_error("CANCEL_UNCONFIRMED"))?;
-    if receipt["transportPauseVersion"] != 1
+    if receipt["externalInputPending"] == true
+        || receipt["externalInputUncertain"] == true
+        || receipt["transportPauseVersion"] != 1
         || receipt["paused"] != true
         || receipt["phase"] != "paused"
         || receipt["recovered"] != false

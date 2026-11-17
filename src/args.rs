@@ -8,6 +8,7 @@ pub enum Command {
     Help,
     Version,
     Config(Vec<String>),
+    EspBle(crate::espble::Action),
     Daemon(String),
     Host(HostCommand),
     Remote {
@@ -26,6 +27,7 @@ impl std::fmt::Debug for Command {
             Self::Help => f.write_str("Help"),
             Self::Version => f.write_str("Version"),
             Self::Config(_) => f.write_str("Config { payload: [REDACTED] }"),
+            Self::EspBle(_) => f.write_str("EspBle { payload: [REDACTED] }"),
             Self::Host(command) => f.debug_tuple("Host").field(command).finish(),
             Self::Remote { options, command } => f
                 .debug_struct("Remote")
@@ -52,6 +54,12 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
     }
     if matches!(command.as_str(), "--version" | "-V") {
         return Ok(Command::Version);
+    }
+    if command == "--eb" {
+        if scope != Scope::Desktop {
+            return Err(Error::invalid("--eb 仅支持 mcc 或 desktop-control 入口"));
+        }
+        return crate::espble::parse(args.collect()).map(Command::EspBle);
     }
     if command == "host" {
         return parse_host(args.collect());
@@ -106,11 +114,11 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
         "connect" => &["window"],
         "observe" => &["connection", "out"],
         "disconnect" => &["connection"],
-        "click" => &["connection", "frame", "x", "y", "count"],
-        "click-target" => &["connection", "target", "jev-key"],
-        "scroll" => &["connection", "frame", "x", "y", "delta-y"],
-        "type" => &["connection", "frame", "text"],
-        "press" => &["connection", "frame", "key"],
+        "click" => &["connection", "frame", "x", "y", "count", "eb"],
+        "click-target" => &["connection", "target", "jev-key", "eb"],
+        "scroll" => &["connection", "frame", "x", "y", "delta-y", "eb"],
+        "type" => &["connection", "frame", "text", "eb"],
+        "press" => &["connection", "frame", "key", "eb"],
         "select-file" => &["connection", "path"],
         _ => return Err(Error::invalid("未知命令；请运行 --help")),
     };
@@ -129,7 +137,7 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
         if options.contains_key(key) {
             return Err(Error::invalid("选项不能重复"));
         }
-        let value = if key == "request" {
+        let value = if matches!(key, "request" | "eb") {
             "true".into()
         } else {
             args.next().ok_or_else(|| Error::invalid("选项缺少值"))?
@@ -156,7 +164,7 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
             json!(value
                 .parse::<i64>()
                 .map_err(|_| Error::invalid("数字选项必须为整数"))?)
-        } else if key == "request" {
+        } else if matches!(key.as_str(), "request" | "eb") {
             json!(true)
         } else {
             json!(value)
@@ -408,6 +416,7 @@ pub const DESKTOP_HELP: &str = r#"desktop-control — macOS 通用应用桌面�
   desktop-control --config [show <name> | set <name> --url <url> --model <model> --api-key-stdin | default <name> | enable <name> | disable <name>]
   desktop-control --config window --max-width <400..1600>
   desktop-control --config chrome --profile <Chrome display name> | --clear-profile
+  desktop-control --eb [status|move|click|type|key|scroll|--help] [args...]
   desktop-control --help | --version
 
 观察返回 connectionId、frameId、imagePath 和 OCR；点击坐标使用该窗口截图的原像素，不缩放或猜偏移。
@@ -448,6 +457,13 @@ pub fn help_text(scope: Scope, program: &str) -> String {
         }
     } else {
         HELP.to_owned()
+    };
+    let ble_help = if scope == Scope::Desktop {
+        format!(
+            "\nESP32 蓝牙控制（espble）：\n  {program} --eb status\n  {program} --eb move 52,54\n  {program} --eb click 52,54\n  {program} --eb type 'Hello'\n  {program} --eb --move 52,54 --click\n  {program} --eb --help\n优先调用同目录 macos-ble-control（mbc），缺失时兼容 PATH；完整构建包含 mbc/ 源码和 BLE 客户端。\n不启动桌面 daemon/helper；坐标为 0–100 整数屏幕百分比，与普通 MCC 的窗口截图像素坐标不同。\n此分支直接透传 BLE 客户端输出及退出码，不包装为 MCC 单行 JSON；帮助不需要 BLE 客户端。\n仅支持本机命令；不通过 --remote 转发。详见 docs/ESPBLE.md。\n"
+        )
+    } else {
+        String::new()
     };
     format!(
         r#"{base}
@@ -509,6 +525,12 @@ host start 是前台服务；公网监听需显式 --listen 0.0.0.0:8765 并放�
 公共 CA 可省略 --ca-cert 使用系统信任；私有 CA 须指定客户端本地 host-ca.pem，不跳过证书校验。
 若握手返回 PROTOCOL_ERROR，先看版本/scope 错误并核对两端 --version；握手失败时换 scroll/PageDown 都不会执行。
 把 status 换为 chrome start、observe、click-target、type、press、disconnect 等桌面命令即可。
+输入命令 click、click-target、type、press、scroll 可附加无值 --eb；Host 仅该次输入使用 ESP32，省略时沿用软件输入。
+例如：{program} --remote wss://host.example:8765/mcc/v1 --ca-cert /absolute/host-ca.pem --token-file /absolute/access.token click --connection <id> --frame <id> --x 100 --y 200 --eb
+对应 Host 请求字段为 "eb":true；坐标仍是窗口截图像素，由 Host 换算，回执保持 MCC JSON。
+Host 须有匹配版本的完整包及配对的 pilot-2；截图/OCR/Jev、owner/帧/焦点校验沿用原链，不改变 host start 参数。
+当前 ESP 指针只支持主屏单显示器、整数百分比近似和单击；滚动按每 40 像素约一格换算，文本仅支持 ASCII。
+每次最多 16 个固件命令；已发送命令不能撤回，暂停/断线中发生投递不确定时保持恢复锁、不重试；详见 docs/ESPBLE.md。
 客户端不读取本地模型配置、不在客户端启动 helper/Chrome/桌面 daemon；失败不回退本机、不自动重放输入。
 远端不支持 --config、--jev-key、daemon、host、permissions --request；这些管理操作只在 Host 本地执行。
 --remote-state-dir 保存客户端会话与截图缓存，不是 Host 的 --state-dir；CA/token 路径也属于客户端。
@@ -528,6 +550,7 @@ Host 重启后旧客户端可能返回 RECOVERY_REQUIRED；不能靠清缓存/�
 断线/超时可能表示投递结果未知；sent:true/click_sent、effectVerified:false 不证明业务完成，须观察后置状态。
 
 详细说明：USAGE.md、docs/AGENT-INTEGRATION.md、docs/MODEL-CONFIG.md、docs/CHROME-PROFILES.md、docs/STABLE-INSTALL.md、docs/REMOTE-HOST.md。
+{ble_help}
 "#,
         version = env!("CARGO_PKG_VERSION")
     )

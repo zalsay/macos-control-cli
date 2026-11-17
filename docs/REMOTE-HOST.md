@@ -90,6 +90,8 @@ mcc host start \
 
 Host为前台常驻进程；默认bind为127.0.0.1:8765，公网必须显式指定可达地址并由操作者设置网络/防火墙/路由。所有监听地址都要求TLS和token，不能裸露ws://。
 
+Host 输入接口支持逐次选择 ESP32：在原 `click`、`click-target`、`type`、`press`、`scroll` 命令末尾加 `--eb`，对应请求字段 `"eb":true`；不带时仍走原输入方式，`host start` 无需增加参数。坐标继续使用窗口截图像素，截图/OCR/Jev、连接/帧/焦点与倒计时仍走原链。Host 需有匹配版本的完整构建包和配对的 `pilot-2`；单屏指针的百分比取整、ASCII、近似滚轮与投递中断限制见 [ESP BLE 接口](ESPBLE.md#per-operation-esp-input-through-host)。
+
 Host启动入口固定scope：mcc和desktop-control为desktop，copis-chrome为chrome；客户端scope不匹配拒绝，不静默提升权限。一个Host同时一个控制会话，一个活动动作；其他会话不能接管既有connectionId或frameId。Host不会为了取得控制断开他人的本地连接、kill他人daemon或重建helper绕过暂停。
 
 可选 `--state-dir <绝对私有目录>` 指定Host状态位置；不提供时在MCC_CONFIG_DIR（默认~/.config/mcc）下使用scope隔离的remote-host目录。不要在Host运行时删除恢复记录或更换状态目录规避保护。

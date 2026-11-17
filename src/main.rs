@@ -26,6 +26,17 @@ fn main() {
             return;
         }
         Ok(Command::Version) => Ok(json!({"version":env!("CARGO_PKG_VERSION")})),
+        Ok(Command::EspBle(action)) => {
+            let executable = std::env::args_os().next().unwrap_or_default();
+            let program = std::path::Path::new(&executable)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("mcc");
+            match copis_chrome::espble::execute(action, program) {
+                Ok(code) => std::process::exit(code),
+                Err(error) => Err(error),
+            }
+        }
         Ok(Command::Host(command)) => match command {
             HostCommand::TlsInit { sans, output_dir } => credentials::initialize_tls(&sans, &output_dir).map(|bundle| json!({"directory":bundle.directory,"caCert":bundle.ca_cert,"certificate":bundle.certificate,"privateKey":bundle.private_key,"caSha256":bundle.ca_sha256,"expiresAtUnix":bundle.expires_at_unix})),
             HostCommand::TokenInit { output } => credentials::initialize_token(&output),

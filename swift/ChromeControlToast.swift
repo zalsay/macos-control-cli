@@ -406,7 +406,7 @@ final class ChromeControlToast: NSObject {
             let insideControls = self.panel.map { $0.isVisible && $0.frame.contains(location) } ?? false
             guard shouldPauseChromeForPointer(sourcePID: sourcePID, helperPID: ProcessInfo.processInfo.processIdentifier,
                                               insideControls: insideControls),
-                  cancellation.pauseForUserInteraction(lease: lease, timestamp: event.timestamp) else { return }
+                  cancellation.pauseForUserInteraction(lease: lease, timestamp: event.timestamp, pointer: true) else { return }
             self.refresh(lease: lease)
         }
     }

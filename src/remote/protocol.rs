@@ -115,16 +115,35 @@ pub fn validate_action_with_files(scope: Scope, request: &Value, allow_files: bo
         "chrome-start" => &["action", "url", "profile"],
         "connect" => &["action", "windowId"],
         "observe" | "disconnect" => &["action", "connectionId"],
-        "click" => &["action", "connectionId", "frameId", "x", "y", "clickCount"],
-        "click-target" => &["action", "connectionId", "target"],
-        "scroll" => &["action", "connectionId", "frameId", "x", "y", "deltaY"],
-        "type" => &["action", "connectionId", "frameId", "text"],
-        "press" => &["action", "connectionId", "frameId", "key"],
+        "click" => &[
+            "action",
+            "connectionId",
+            "frameId",
+            "x",
+            "y",
+            "clickCount",
+            "eb",
+        ],
+        "click-target" => &["action", "connectionId", "target", "eb"],
+        "scroll" => &[
+            "action",
+            "connectionId",
+            "frameId",
+            "x",
+            "y",
+            "deltaY",
+            "eb",
+        ],
+        "type" => &["action", "connectionId", "frameId", "text", "eb"],
+        "press" => &["action", "connectionId", "frameId", "key", "eb"],
         "frame" => &["action", "connectionId", "frameId"],
         "select-file" if allow_files => &["action", "connectionId", "path"],
         _ => return Err(Error::invalid("不支持的远程命令")),
     };
     fields(request, allowed)?;
+    if request.get("eb").is_some_and(|v| !v.is_boolean()) {
+        return Err(Error::invalid("eb 必须为布尔值"));
+    }
     if (action == "apps" && scope != Scope::Desktop)
         || (action == "windows" && scope != Scope::Desktop && request.get("bundleId").is_some())
     {

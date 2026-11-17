@@ -6,6 +6,113 @@ use copis_chrome::{
 fn parse(words: &[&str]) -> copis_chrome::protocol::Result<Command> {
     args::parse_for_scope(words.iter().map(|s| s.to_string()), Scope::Chrome)
 }
+
+#[test]
+fn remote_eb_is_a_per_input_flag_without_changing_coordinates() {
+    for tail in [
+        vec![
+            "click",
+            "--connection",
+            "c",
+            "--frame",
+            "f",
+            "--x",
+            "123",
+            "--y",
+            "456",
+            "--eb",
+        ],
+        vec![
+            "type",
+            "--eb",
+            "--connection",
+            "c",
+            "--frame",
+            "f",
+            "--text",
+            "literal --eb",
+        ],
+        vec![
+            "press",
+            "--connection",
+            "c",
+            "--frame",
+            "f",
+            "--key",
+            "Enter",
+            "--eb",
+        ],
+        vec![
+            "scroll",
+            "--connection",
+            "c",
+            "--frame",
+            "f",
+            "--x",
+            "1",
+            "--y",
+            "2",
+            "--delta-y",
+            "-3",
+            "--eb",
+        ],
+        vec![
+            "click-target",
+            "--connection",
+            "c",
+            "--target",
+            "Save",
+            "--eb",
+        ],
+    ] {
+        let mut words = vec![
+            "--remote",
+            "wss://example.test",
+            "--token-file",
+            "/tmp/token",
+        ];
+        words.extend(tail);
+        let Command::Remote { command, .. } = parse(&words).unwrap() else {
+            panic!()
+        };
+        let Command::Request { request, .. } = *command else {
+            panic!()
+        };
+        assert_eq!(request["eb"], true);
+        if request["action"] == "click" {
+            assert_eq!(request["x"], 123);
+            assert_eq!(request["y"], 456);
+        }
+    }
+    assert!(parse(&["status", "--eb"]).is_err());
+    assert!(parse(&["host", "start", "--eb"]).is_err());
+    assert!(parse(&[
+        "type",
+        "--connection",
+        "c",
+        "--frame",
+        "f",
+        "--text",
+        "hi",
+        "--eb",
+        "--eb"
+    ])
+    .is_err());
+    let Command::Request { request, .. } = parse(&[
+        "type",
+        "--connection",
+        "c",
+        "--frame",
+        "f",
+        "--text",
+        "--eb",
+    ])
+    .unwrap() else {
+        panic!()
+    };
+    assert_eq!(request["text"], "--eb");
+    assert!(request.get("eb").is_none());
+}
 #[test]
 fn remote_prefix_validates_and_preserves_request() {
     let Command::Remote { options, command } = parse(&[

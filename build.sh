@@ -30,6 +30,7 @@ PACKAGE_BUILD="$PACKAGE_STAGING/$PACKAGE_NAME"
 mkdir -p "$PACKAGE_BUILD"
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --manifest-path "$PACKAGE_DIR/Cargo.toml" --target-dir "$PACKAGE_DIR/target" --target "$RUST_HOST" --profile "$BUILD_PROFILE" >&2
 swiftc -O -target "$SWIFT_TARGET" "$PACKAGE_DIR"/swift/*.swift -o "$PACKAGE_BUILD/macos-chrome-helper"
+sh "$PACKAGE_DIR/mbc/build.sh" "$PACKAGE_BUILD"
 cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/copis-chrome" "$PACKAGE_BUILD/copis-chrome"
 cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/desktop-control" "$PACKAGE_BUILD/desktop-control"
 cp "$PACKAGE_DIR/target/$RUST_HOST/$BUILD_MODE/mcc" "$PACKAGE_BUILD/mcc"
@@ -47,10 +48,16 @@ cp "$PACKAGE_DIR/USAGE.md" "$PACKAGE_BUILD/USAGE.md"
 cp "$PACKAGE_DIR/LICENSE" "$PACKAGE_BUILD/LICENSE"
 cp "$PACKAGE_DIR/README.md" "$PACKAGE_DIR/README.zh-CN.md" "$PACKAGE_BUILD/"
 cp -R "$PACKAGE_DIR/docs" "$PACKAGE_BUILD/docs"
+# At package root mbc is an executable; its source links live under source/mbc.
+sed -i '' 's|(mbc/README\.md)|(source/mbc/README.md)|g' "$PACKAGE_BUILD/README.md" "$PACKAGE_BUILD/README.zh-CN.md"
+sed -i '' 's|(\.\./mbc/README\.md)|(../source/mbc/README.md)|g' "$PACKAGE_BUILD/docs/ESPBLE.md"
 mkdir -p "$PACKAGE_BUILD/assets" "$PACKAGE_BUILD/source/assets" "$PACKAGE_BUILD/source"
 cp "$PACKAGE_DIR/assets/copis-logo.png" "$PACKAGE_BUILD/assets/copis-logo.png"
 cp "$PACKAGE_DIR/assets/copis-logo.png" "$PACKAGE_BUILD/source/assets/copis-logo.png"
 cp -R "$PACKAGE_DIR/src" "$PACKAGE_DIR/swift" "$PACKAGE_DIR/tests" "$PACKAGE_DIR/docs" "$PACKAGE_BUILD/source/"
+mkdir -p "$PACKAGE_BUILD/source/mbc/tests"
+cp "$PACKAGE_DIR"/mbc/*.swift "$PACKAGE_DIR/mbc/build.sh" "$PACKAGE_DIR/mbc/install.sh" "$PACKAGE_DIR/mbc/README.md" "$PACKAGE_BUILD/source/mbc/"
+cp "$PACKAGE_DIR"/mbc/tests/*.py "$PACKAGE_BUILD/source/mbc/tests/"
 cp "$PACKAGE_DIR/Cargo.toml" "$PACKAGE_DIR/Cargo.lock" "$PACKAGE_DIR/build.sh" "$PACKAGE_DIR/install.sh" "$PACKAGE_DIR/README.md" "$PACKAGE_DIR/README.zh-CN.md" "$PACKAGE_DIR/USAGE.md" "$PACKAGE_DIR/LICENSE" "$PACKAGE_DIR/.gitignore" "$PACKAGE_BUILD/source/"
 cat > "$PACKAGE_BUILD/module.json" <<MANIFEST
 {
@@ -61,7 +68,8 @@ cat > "$PACKAGE_BUILD/module.json" <<MANIFEST
   "minimumOsVersion": "14.0",
   "protocolVersion": 1,
   "entrypoint": "copis-chrome",
-  "helper": "macos-chrome-helper"
+  "helper": "macos-chrome-helper",
+  "bleClient": "macos-ble-control"
 }
 MANIFEST
 

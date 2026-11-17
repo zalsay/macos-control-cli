@@ -536,6 +536,70 @@ fn independent_cli_processes_preserve_connection_frame_and_host_model_policy() {
 }
 
 #[test]
+fn remote_eb_flag_reaches_host_native_input_only_for_that_request() {
+    let mut f = ProcessGuard::new();
+    f.init();
+    f.start();
+    let call = |args: &[&str]| f.remote("eb-client", "tls/host-ca.pem", "token", args);
+    let connected = ok(&call(&["connect", "--window", "42"]));
+    let id = connected["connectionId"].as_str().unwrap();
+    let observation = ok(&call(&["observe", "--connection", id]));
+    let frame = observation["frameId"].as_str().unwrap();
+    for eb in [true, false] {
+        let mut args = vec![
+            "click",
+            "--connection",
+            id,
+            "--frame",
+            frame,
+            "--x",
+            "100",
+            "--y",
+            "200",
+        ];
+        if eb {
+            args.push("--eb");
+        }
+        let result = ok(&call(&args));
+        assert_eq!(result["sent"], true);
+        assert_eq!(result.get("eb"), eb.then_some(&serde_json::json!(true)));
+        let requests: Vec<Value> = f
+            .native()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        let click = requests
+            .iter()
+            .rev()
+            .find(|r| r["action"] == "click")
+            .unwrap();
+        assert_eq!(click.get("eb"), eb.then_some(&serde_json::json!(true)));
+        assert!(click["expectedInputEpoch"].is_u64());
+    }
+    let other = json(&f.remote(
+        "other-eb-client",
+        "tls/host-ca.pem",
+        "token",
+        &[
+            "click",
+            "--connection",
+            id,
+            "--frame",
+            frame,
+            "--x",
+            "100",
+            "--y",
+            "200",
+            "--eb",
+        ],
+    ));
+    assert_ne!(other["ok"], true);
+    assert_eq!(native_action_count(&f, "click"), 2);
+    ok(&call(&["disconnect", "--connection", id]));
+    f.isolated();
+}
+
+#[test]
 fn simultaneous_other_sessions_cannot_steal_existing_control() {
     let mut f = ProcessGuard::new();
     f.init();

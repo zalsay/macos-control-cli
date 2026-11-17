@@ -801,7 +801,7 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
     use serde_json::{Map, Value};
     fn valid(name: &str, v: &Value) -> bool {
         match name {
-            "ok" | "running" | "connected" | "sent" | "effectVerified" | "untrusted"
+            "eb" | "ok" | "running" | "connected" | "sent" | "effectVerified" | "untrusted"
             | "truncated" | "created" | "selected" | "dialogClosed" | "screenRecording"
             | "accessibility" | "requested" | "granted" | "dynamicEndpoint" => v.is_boolean(),
             "protocolVersion" | "width" | "height" | "capturedAtMs" | "confidence"
@@ -904,9 +904,10 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
     let source = value.as_object().ok_or_else(|| fail("INVALID_ARGUMENT"))?;
     let mut out = fields(source, &["ok", "protocolVersion", "scope"], &[])?;
     let action_fields: &[&str] = match action {
-        "click" | "scroll" | "type" | "press" => &["sent", "connectionId", "frameId"],
+        "click" | "scroll" | "type" | "press" => &["sent", "connectionId", "frameId", "eb"],
         "click-target" => &[
             "sent",
+            "eb",
             "status",
             "connectionId",
             "frameId",
