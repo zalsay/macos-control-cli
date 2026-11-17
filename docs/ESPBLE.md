@@ -30,6 +30,10 @@ mcc --eb --dry-run --move 52,54 --click
 
 Only the first bare subcommand is translated. Use MBC flags for subsequent actions; for example, use `move 52,54 --click`, not `move 52,54 click`.
 
+## JSON scripts
+
+`mcc script --connection <id> --file /absolute/flow.json` also works with the existing `--remote` prefix. Set `"eb":true` on each desired input step; other steps retain the original backend. Script coordinates are window screenshot pixels, as for per-operation Host input. See [JSON format, examples and execution limits](SCRIPT.md).
+
 ## Coordinates and input
 
 - Coordinates are integer screen percentages from **0 to 100**, not ordinary MCC's window-frame pixels. The current ESP firmware is configured for one 3440×1440 screen. S3 computes the existing mouse curves.

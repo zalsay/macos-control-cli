@@ -122,6 +122,7 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
     let allowed: &[&str] = match command.as_str() {
         "chrome-start" | "firefox-start" => &["url", "profile"],
         "status" => &[],
+        "script" => &["connection", "frame", "file"],
         "apps" if scope == Scope::Desktop => &[],
         "windows" if scope == Scope::Desktop => &["app"],
         "windows" => &[],
@@ -242,6 +243,15 @@ pub fn parse_for_scope(args: impl IntoIterator<Item = String>, scope: Scope) -> 
             json!(value)
         };
         request.insert(name.into(), value);
+    }
+    if command == "script" {
+        let path = absolute(
+            options
+                .get("file")
+                .ok_or_else(|| Error::invalid("script 需要 --file"))?,
+        )?;
+        request.insert("script".into(), crate::script::load(&path)?);
+        crate::script::validate_request(scope, &Value::Object(request.clone()))?;
     }
     if command == "actions" {
         use std::io::Read;
@@ -681,6 +691,15 @@ pub fn help_text(scope: Scope, program: &str) -> String {
   {program} disconnect --connection <connectionId>
 已有窗口可先 windows，再 connect --window <windowId>；chrome start 返回本次新窗口的连接。
 本机任务完成先 disconnect；仅需结束本任务自建 daemon 时，执行 {program} daemon stop，再用 {program} daemon status 确认 running:false；勿停止常驻 Host 或他人的 daemon。
+
+JSON 多步脚本（本机或一次提交给 Host）：
+  {program} script --connection <connectionId> --file /absolute/flow.json [--frame <frameId>]
+  {program} --remote wss://host.example:8765/mcc/v1 --ca-cert /absolute/host-ca.pem --token-file /absolute/access.token script --connection <connectionId> --file /absolute/flow.json
+文件为 {{"version":1,"steps":[{{"action":"observe"}},{{"action":"click","x":100,"y":200,"eb":true}},{{"action":"wait","ms":500}}]}}。
+步骤沿用连接和最近成功帧；eb:true 仅该步使用 ESP，坐标为窗口截图像素。
+全文件先校验；最多 32KiB / 64 步，等待合计最多 10 秒，timeoutMs 默认/上限 40000。
+失败或暂停即停止后续步骤，回执含 completedSteps/failedStep；不会自动重试或回滚，sent 不证明页面效果。
+脚本结果不含截图/OCR；完整格式与限制见 docs/SCRIPT.md。
 
 滚动方向与回执：
 --delta-y 是 [-1200,1200] 内的非零整数，正数向下、负数向上；不是“负数向下”。

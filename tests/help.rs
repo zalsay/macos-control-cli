@@ -150,6 +150,7 @@ fn help_aliases_and_remote_host_help_never_create_runtime_config_or_credentials(
         &["-h"],
         &["help"],
         &["host", "start", "--help"],
+        &["script", "--file", "/missing/flow.json", "--help"],
         &["--remote", "wss://host.example:8765/mcc/v1", "--help"],
     ];
     for (program, executable, scope) in ENTRIES {

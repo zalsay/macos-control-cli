@@ -420,3 +420,36 @@ fn permissions_query_and_explicit_request_report_chrome_automation() {
         assert_eq!(result["chromeAutomation"]["granted"], true);
     }
 }
+
+#[test]
+fn local_script_cli_inlines_file_executes_existing_steps_and_reports_partial_failure() {
+    let env = Environment::new();
+    let id = env.connection();
+    let path = env.root.join("flow.json");
+    std::fs::write(&path,r#"{"version":1,"steps":[{"action":"observe"},{"action":"click","x":10,"y":20,"eb":true},{"action":"type","text":"Hello"},{"action":"press","key":"Enter","eb":true}]}"#).unwrap();
+    let receipt = env.call(&[
+        "script",
+        "--connection",
+        &id,
+        "--file",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(receipt["ok"], true, "{receipt}");
+    assert_eq!(receipt["completedSteps"], 4);
+    assert_eq!(receipt["steps"][1]["eb"], true);
+    assert!(receipt["steps"][2].get("eb").is_none());
+    std::fs::write(&path,r#"{"version":1,"steps":[{"action":"observe"},{"action":"type","text":"paused"},{"action":"press","key":"Enter"}]}"#).unwrap();
+    let receipt = env.call(&[
+        "script",
+        "--connection",
+        &id,
+        "--file",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(receipt["ok"], false);
+    assert_eq!(receipt["error"]["reason"], "USER_PAUSED");
+    assert_eq!(receipt["error"]["receipt"]["completedSteps"], 1);
+    assert_eq!(receipt["error"]["receipt"]["failedStep"], 2);
+    assert!(!receipt.to_string().contains("secret fixture"));
+    env.call(&["disconnect", "--connection", &id]);
+}

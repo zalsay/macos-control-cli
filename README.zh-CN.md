@@ -12,6 +12,8 @@
 
 **0.2.3** 新增默认命令 **`mcc`**、用户级 `sh` 安装脚本和[受控原生授权弹窗](docs/NATIVE-DIALOGS.md)支持。`mcc` 与 `desktop-control` 共用通用模式；**`copis-chrome` 保持仅支持 Chrome**，旧入口与 JSON 协议 **1** 均兼容。
 
+**JSON 多步脚本：** `mcc script --connection <id> --file /absolute/flow.json` 在本机或 `--remote` Host 一次执行多步，输入步骤用 `"eb":true` 选择 ESP。格式、示例、暂停及失败进度见 [脚本说明](docs/SCRIPT.md)。
+
 ## 通用模型配置与 Chrome 固定布局（v0.3.0）
 
 `mcc --config` 管理 `~/.config/mcc/models.toml` 的完整 Decisions `url`、`api_key`、`model`；支持 `set <name> --url <url> --model <model> --api-key-stdin`、`show <name>`、`default <name>`。文件0600，回执脱敏；不再隐式读 `.env`/环境 API key，`--jev-key` 仅覆盖已配置 profile 的本次调用。迁移与格式见 [通用模型配置](docs/MODEL-CONFIG.md)。

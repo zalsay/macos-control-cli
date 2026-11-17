@@ -6,6 +6,10 @@ Ubuntu 22.04 Docker 桌面可使用同一 WSS Host 和客户端控制普通 Fire
 
 Docker 的独立桌面不因普通 noVNC 键鼠、失焦或控制 owner 在命令之间空闲 300 秒而进入持续人工暂停，也不等待三秒倒计时；每条新输入先激活目标。下文的自动人工接管和空闲暂停描述适用于 macOS Host。Docker 仍保留明确暂停/取消、在途心跳和传输故障停止、输入释放及恢复锁。
 
+## JSON 多步脚本
+
+`mcc --remote … script --connection <id> --file /absolute/flow.json` 将客户端本地 JSON 一次交给 Host 按序执行，支持逐步 `"eb":true`。沿用当前会话、连接、帧及暂停机制，错误返回已完成步骤和失败位置。格式、能力协商与限制见 [脚本说明](SCRIPT.md)。
+
 ## 运行方式和信任边界
 
 ```text

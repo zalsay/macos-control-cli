@@ -1348,10 +1348,16 @@ fn handle_remote(
             if registry.active.as_ref().is_some_and(|a| a.id == operation) {
                 registry.active = None;
             }
-            let result = if was_cancelled && result.is_ok() {
-                Err(Error::new("USER_PAUSED", USER_PAUSED_PUBLIC_MESSAGE))
-            } else {
-                result
+            let result = match result {
+                Ok(value) if was_cancelled => {
+                    let error = Error::new("USER_PAUSED", USER_PAUSED_PUBLIC_MESSAGE);
+                    Err(if value.get("totalSteps").is_some() {
+                        error.with_receipt(value)
+                    } else {
+                        error
+                    })
+                }
+                other => other,
             };
             let mut safe_failed_connect = false;
             match native_state(canceller) {

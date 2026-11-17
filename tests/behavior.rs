@@ -7,6 +7,8 @@ type CoordinateMarkers = Option<(Option<Value>, Option<Value>)>;
 
 #[derive(Clone)]
 struct Desktop {
+    paused: Arc<Mutex<bool>>,
+    input_error: Arc<Mutex<Option<Error>>>,
     calls: Arc<Mutex<Vec<Value>>>,
     moved: Arc<Mutex<bool>>,
     missing: Arc<Mutex<bool>>,
@@ -17,6 +19,8 @@ struct Desktop {
 impl Default for Desktop {
     fn default() -> Self {
         Self {
+            paused: Arc::new(Mutex::new(false)),
+            input_error: Arc::new(Mutex::new(None)),
             calls: Arc::new(Mutex::new(Vec::new())),
             moved: Arc::new(Mutex::new(false)),
             missing: Arc::new(Mutex::new(false)),
@@ -49,6 +53,12 @@ impl Native for Desktop {
         };
         let window = json!({"windowId":42,"pid":123,"title":"Example","bounds":bounds});
         match request["action"].as_str().unwrap() {
+            "transport-state" => Ok(
+                json!({"transportPauseVersion":1,"inputEpoch":0,"paused":*self.paused.lock().unwrap(),"recoveryRequired":false}),
+            ),
+            "type" if self.input_error.lock().unwrap().is_some() => {
+                Err(self.input_error.lock().unwrap().clone().unwrap())
+            }
             "permissions" => Ok(json!({"screenRecording":true,"accessibility":true})),
             "windows" => Ok(json!({"windows":[window]})),
             "window" if *self.missing.lock().unwrap() => {
@@ -616,4 +626,96 @@ fn given_same_frame_ocr_when_observing_then_forward_text_without_triggering_inpu
     assert_eq!(frame["ocr"]["status"], "unavailable");
     assert!(frame["frameId"].is_string());
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn script_inherits_latest_frame_and_routes_each_eb_step_independently() {
+    let (mut service, desktop, path) = setup();
+    let connection = connect(&mut service);
+    let result=service.execute(json!({"action":"script","connectionId":connection,"script":{"version":1,"steps":[{"action":"observe"},{"action":"click","x":10,"y":20,"eb":true},{"action":"observe"},{"action":"type","text":"secret text"},{"action":"press","key":"Enter","eb":true},{"action":"wait","ms":1}]}})).unwrap();
+    assert_eq!(result["completedSteps"], 6);
+    assert_eq!(result["totalSteps"], 6);
+    let steps = result["steps"].as_array().unwrap();
+    assert_eq!(steps[1]["frameId"], steps[0]["frameId"]);
+    assert_eq!(steps[3]["frameId"], steps[2]["frameId"]);
+    assert_eq!(result["frameId"], steps[2]["frameId"]);
+    assert!(!result.to_string().contains("secret text"));
+    let calls = desktop.calls.lock().unwrap();
+    let click = calls.iter().find(|r| r["action"] == "click").unwrap();
+    assert_eq!(click["eb"], true);
+    let typed = calls.iter().find(|r| r["action"] == "type").unwrap();
+    assert!(typed.get("eb").is_none());
+    let press = calls.iter().find(|r| r["action"] == "press").unwrap();
+    assert_eq!(press["eb"], true);
+    drop(calls);
+    let _ = std::fs::remove_dir_all(path);
+}
+#[test]
+fn script_prevalidates_late_invalid_step_without_delivering_earlier_click() {
+    let (mut service, desktop, path) = setup();
+    let connection = connect(&mut service);
+    let frame = observe(&mut service, &connection);
+    let error=service.execute(json!({"action":"script","connectionId":connection,"frameId":frame,"script":{"version":1,"steps":[{"action":"click","x":10,"y":20},{"action":"scroll","x":10,"y":20,"deltaY":0}]}})).unwrap_err();
+    assert_eq!(error.receipt.unwrap()["failedStep"], 2);
+    assert!(!desktop
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r["action"] == "click"));
+    let _ = std::fs::remove_dir_all(path);
+}
+#[test]
+fn script_stops_on_native_failure_preserving_progress_and_uncertainty() {
+    let (mut service, desktop, path) = setup();
+    let connection = connect(&mut service);
+    *desktop.input_error.lock().unwrap()=Some(Error::new("INPUT_STATE_UNKNOWN","native failed").with_receipt(json!({"backend":"x11","dispatchState":"unknown","completedSteps":0,"inputState":"unknown","effectVerified":false})));
+    let error=service.execute(json!({"action":"script","connectionId":connection,"script":{"version":1,"steps":[{"action":"observe"},{"action":"type","text":"private input"},{"action":"press","key":"Enter"}]}})).unwrap_err();
+    assert_eq!(error.code, "INPUT_STATE_UNKNOWN");
+    let receipt = error.receipt.unwrap();
+    assert_eq!(receipt["completedSteps"], 1);
+    assert_eq!(receipt["failedStep"], 2);
+    assert_eq!(receipt["nativeReceipt"]["dispatchState"], "unknown");
+    assert!(!desktop
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r["action"] == "press"));
+    let _ = std::fs::remove_dir_all(path);
+}
+#[test]
+fn script_wait_honors_pause_and_deadline_without_later_input() {
+    for paused in [false, true] {
+        let (mut service, desktop, path) = setup();
+        let connection = connect(&mut service);
+        let frame = observe(&mut service, &connection);
+        let flag = desktop.paused.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            if paused {
+                *flag.lock().unwrap() = true;
+            }
+        });
+        let start = std::time::Instant::now();
+        let error=service.execute(json!({"action":"script","connectionId":connection,"frameId":frame,"script":{"version":1,"timeoutMs":150,"steps":[{"action":"wait","ms":1000},{"action":"click","x":10,"y":20}]}})).unwrap_err();
+        worker.join().unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(
+            error.code,
+            if paused {
+                "USER_PAUSED"
+            } else {
+                "SCRIPT_TIMEOUT"
+            }
+        );
+        assert_eq!(error.receipt.unwrap()["failedStep"], 1);
+        assert!(!desktop
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r["action"] == "click"));
+        let _ = std::fs::remove_dir_all(path);
+    }
 }

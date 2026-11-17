@@ -1,3 +1,5 @@
+mod script;
+
 use crate::protocol::{
     fields, integer, random_id, string, Error, Result, Scope, USER_PAUSED_PUBLIC_MESSAGE,
 };
@@ -13,6 +15,7 @@ use std::sync::{
 pub trait Native: Send {
     fn request(&mut self, request: Value) -> Result<Value>;
     fn set_input_epoch(&mut self, _epoch: Option<u64>) {}
+    fn set_request_deadline(&mut self, _deadline: Option<std::time::Instant>) {}
     fn set_owner_guard(&mut self, _guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>) {}
 }
 
@@ -171,7 +174,13 @@ impl<N: Native> Service<N> {
             .check_operation_cancelled()
             .and_then(|()| self.execute(request))
             .and_then(|value| {
-                self.check_operation_cancelled()?;
+                self.check_operation_cancelled().map_err(|error| {
+                    if value.get("totalSteps").is_some() {
+                        error.with_receipt(value.clone())
+                    } else {
+                        error
+                    }
+                })?;
                 Ok(value)
             });
         self.operation_cancel = None;
@@ -195,6 +204,16 @@ impl<N: Native> Service<N> {
     pub fn execute(&mut self, request: Value) -> Result<Value> {
         let action = string(&request, "action")?;
         let allowed: &[&str] = match action {
+            "script" => &[
+                "action",
+                "connectionId",
+                "frameId",
+                "script",
+                "jevKey",
+                "jevUrl",
+                "jevModel",
+                "jevProtocol",
+            ],
             "chrome-start" => &["action", "url", "maxWidthPx", "profile"],
             "firefox-start" => &["action", "url", "profile"],
             "control" => &["action", "command"],
@@ -255,9 +274,11 @@ impl<N: Native> Service<N> {
             return Err(Error::invalid("eb 必须为布尔值"));
         }
         let result = match action {
+            "script" => self.execute_script(&request),
             "status" => {
                 let mut status = json!({"running":true,"connected":self.connection.is_some(),"window":self.connection.as_ref().map(|c| &c.window),
                     "version":env!("CARGO_PKG_VERSION"),"jev":{"protocol":crate::jev::DECISION_PROTOCOL,"dynamicEndpoint":true}});
+                status["scriptProtocol"] = json!(1);
                 if crate::execution::container_desktop_enabled(self.scope) {
                     if let Some(connection) = &self.connection {
                         status["connectionId"] = json!(connection.id);

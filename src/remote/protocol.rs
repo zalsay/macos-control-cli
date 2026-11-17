@@ -114,6 +114,10 @@ pub fn validate_action_with_files(scope: Scope, request: &Value, allow_files: bo
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::invalid("缺少命令"))?;
+    if action == "script" {
+        crate::script::validate_request(scope, request)?;
+        return Ok(());
+    }
     let allowed: &[&str] = match action {
         "status" | "apps" | "session" => &["action"],
         "windows" => &["action", "bundleId"],
@@ -267,6 +271,9 @@ pub fn validate_action_with_files(scope: Scope, request: &Value, allow_files: bo
 }
 
 pub fn required_capability(request: &Value) -> Option<&'static str> {
+    if request["action"] == "script" {
+        return Some(crate::script::CAPABILITY);
+    }
     if request["action"] == "file-put" || request.get("fileId").is_some() {
         return Some("remote.files.v1");
     }
@@ -280,7 +287,7 @@ pub fn required_capability(request: &Value) -> Option<&'static str> {
     }
 }
 pub fn host_capabilities(scope: Scope) -> Vec<String> {
-    let mut capabilities = vec!["remote-v1".to_owned()];
+    let mut capabilities = vec!["remote-v1".to_owned(), crate::script::CAPABILITY.to_owned()];
     if crate::execution::container_desktop_enabled(scope) {
         capabilities.extend([
             "firefox.x11.v1".to_owned(),
@@ -290,6 +297,13 @@ pub fn host_capabilities(scope: Scope) -> Vec<String> {
     capabilities
 }
 pub fn require_capability(request: &Value, capabilities: &[String]) -> Result<()> {
+    if request["action"] == "script" {
+        if let Some(steps) = request["script"]["steps"].as_array() {
+            for step in steps {
+                require_capability(step, capabilities)?;
+            }
+        }
+    }
     if required_capability(request).is_some_and(|name| !capabilities.iter().any(|c| c == name)) {
         return Err(Error::new(
             "ACTION_UNSUPPORTED",

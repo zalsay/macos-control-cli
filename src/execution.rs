@@ -75,7 +75,9 @@ fn execute_request_inner(
         ));
     }
     let runtime = Runtime::from_env_for_scope(scope)?;
-    if request["action"] == "click-target" {
+    let script_needs_model = request["action"] == "script"
+        && crate::script::validate_request(scope, &request)?.needs_model();
+    if request["action"] == "click-target" || script_needs_model {
         let model = crate::config::Store::from_env()?
             .resolve_model(request.get("jevKey").and_then(Value::as_str))?;
         request["jevKey"] = json!(model.api_key);
@@ -98,6 +100,7 @@ fn execute_request_inner(
         daemon::start(&runtime)?;
     }
     if request["action"] == "click-target"
+        || request["action"] == "script"
         || request["action"] == "chrome-start"
         || request["action"] == "firefox-start"
         || request["action"] == "permissions"
@@ -105,10 +108,13 @@ fn execute_request_inner(
         // Reuse the version gate for new startup protocol, and authenticate
         // dynamic endpoint support before any per-call key is sent.
         let status = daemon::call(&runtime, json!({"action":"status"}))?;
-        let incompatible_decisions = request["action"] == "click-target"
+        let incompatible_decisions = (request["action"] == "click-target" || script_needs_model)
             && (status["jev"]["protocol"] != crate::jev::DECISION_PROTOCOL
                 || status["jev"]["dynamicEndpoint"] != true);
-        if status["version"] != env!("CARGO_PKG_VERSION") || incompatible_decisions {
+        if status["version"] != env!("CARGO_PKG_VERSION")
+            || incompatible_decisions
+            || (request["action"] == "script" && status["scriptProtocol"] != 1)
+        {
             return Err(Error::new("DAEMON_UPGRADE_REQUIRED", "现有 daemon 版本或动态 Decisions 配置契约不匹配；尚未发送密钥、请求授权或创建窗口，请仅结束自己持有的旧 daemon 后重新连接"));
         }
     }

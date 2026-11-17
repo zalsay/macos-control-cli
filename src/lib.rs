@@ -23,3 +23,5 @@ pub mod execution;
 pub mod firefox;
 #[cfg(target_os = "linux")]
 pub mod linux;
+
+pub mod script;

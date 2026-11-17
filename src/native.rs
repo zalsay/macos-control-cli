@@ -162,6 +162,7 @@ pub struct Helper {
     reader: Option<JoinHandle<()>>,
     sequence: u64,
     timeout: Duration,
+    request_deadline: Option<Instant>,
     overflowed: Arc<AtomicBool>,
     input_epoch: Option<u64>,
     owner_guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
@@ -286,6 +287,7 @@ impl Helper {
             receiver,
             reader: Some(reader),
             sequence: 0,
+            request_deadline: None,
             timeout,
             overflowed,
             input_epoch: None,
@@ -301,6 +303,9 @@ impl Helper {
     }
 }
 impl Native for Helper {
+    fn set_request_deadline(&mut self, deadline: Option<Instant>) {
+        self.request_deadline = deadline;
+    }
     fn set_input_epoch(&mut self, epoch: Option<u64>) {
         self.input_epoch = epoch;
     }
@@ -320,7 +325,17 @@ impl Native for Helper {
         if self.overflowed.load(Ordering::Acquire) {
             return Err(Error::new("HELPER_PROTOCOL", "原生 helper 响应队列溢出"));
         }
-        let deadline = Instant::now() + self.timeout;
+        let deadline = self
+            .request_deadline
+            .map_or(Instant::now() + self.timeout, |limit| {
+                limit.min(Instant::now() + self.timeout)
+            });
+        if Instant::now() >= deadline {
+            return Err(Error::new(
+                "SCRIPT_TIMEOUT",
+                "脚本已达到执行时限，未发送原生请求",
+            ));
+        }
         if let Some(epoch) = self.input_epoch {
             if request["action"] == "cancel" {
                 request["action"] = json!("transport-disconnect");

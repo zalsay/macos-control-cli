@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "timeoutMs": 40000,
+  "steps": [
+    { "action": "observe" },
+    { "action": "click", "x": 100, "y": 200, "eb": true },
+    { "action": "wait", "ms": 500 },
+    { "action": "type", "text": "Hello", "eb": true },
+    { "action": "press", "key": "Enter" },
+    { "action": "observe" }
+  ]
+}

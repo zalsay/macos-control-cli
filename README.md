@@ -30,6 +30,8 @@ Version **0.2.3** adds the default **`mcc`** command, a user-level `sh` installe
 
 **ESP32 BLE:** `mcc --eb status`, `mcc --eb move 52,54`, `mcc --eb click 52,54`, and `mcc --eb type 'Hello'` reuse the [MBC client in this project](mbc/README.md). Ordinary Host input commands also accept per-operation `--eb` (`eb:true` in requests), retaining screenshot-pixel coordinates and MCC JSON. Full builds bundle `mbc` and `macos-ble-control`; `--eb` prefers its sibling client and retains PATH lookup for compatibility. The standalone prefix form uses integer screen percentages and passes through MBC's output and exit status without starting a desktop daemon. Run `mcc --eb --help` or see [ESP BLE commands](docs/ESPBLE.md). Installed MCC is not updated automatically.
 
+**JSON scripts:** `mcc script --connection <id> --file /absolute/flow.json` runs multiple existing operations locally or through `--remote` in one Host request. Each input step can select ESP using `"eb":true`. See [format, examples and limits](docs/SCRIPT.md).
+
 ## Features
 
 - List ordinary applications/windows and bind a connection to an exact window/PID/bundle ID.

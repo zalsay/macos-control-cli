@@ -573,7 +573,10 @@ pub fn parse_hello(
             !valid_id(v)
                 && !matches!(
                     v.as_str(),
-                    "firefox.x11.v1" | "firefox.system-input.v1" | "remote.files.v1"
+                    "firefox.x11.v1"
+                        | "firefox.system-input.v1"
+                        | "remote.files.v1"
+                        | "remote.script.v1"
                 )
         })
     {

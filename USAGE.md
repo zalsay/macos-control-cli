@@ -6,6 +6,10 @@
 
 其他 Agent 的安装定位、调用流程、图像接入、错误恢复和 Python 示例见 [Agent 接入指南](docs/AGENT-INTEGRATION.md)（源码目录入口；独立功能包中对应 `source/docs/AGENT-INTEGRATION.md`）。
 
+## JSON 多步脚本
+
+`mcc script --connection <id> --file /absolute/flow.json` 一次执行 JSON 步骤；加原有 `--remote` 前缀则整份交给 Host 执行。步骤用 `"eb":true` 选择 ESP，省略仍使用原输入方式。支持观察、点击、文本、按键、滚动和等待；格式、示例及进度回执见 [脚本说明](docs/SCRIPT.md)。
+
 ## ESP32 BLE 接口
 
 `mcc --eb status` 查询 `pilot-2`；`mcc --eb move 52,54` / `mcc --eb click 52,54` 使用 0–100 整数屏幕百分比，`mcc --eb type 'Hello'` 输入文本。支持 `key`、`scroll` 及 `mcc --eb --move 52,54 --click` 组合参数。底层优先调用 MCC 同目录的 `macos-ble-control`（`mbc`），缺失时兼容 PATH，直接透传输出和退出码，不增加 MCC JSON 包装。客户端源码位于 `mbc/`，完整构建包包含两个 BLE 可执行入口及 `source/mbc/` 源码，不必另装 MBC；也可执行 `sh mbc/build.sh` 独立构建到 `target/mbc/`。专项帮助 `mcc --eb --help` 不要求安装 BLE 客户端；坐标、输入和本机调用边界见 [ESP BLE 接口](docs/ESPBLE.md)。

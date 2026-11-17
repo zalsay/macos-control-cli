@@ -1124,6 +1124,29 @@ fn serve_connection(
         owner.initial_reservation = false;
     }
     let cached = matches!(begin, Begin::Cached(_));
+    if action == "script" {
+        let progress = if response["ok"] == true {
+            &response
+        } else {
+            &response["error"]["receipt"]
+        };
+        if let (Some(connection), Some(frame)) = (
+            progress["connectionId"].as_str(),
+            progress["frameId"].as_str(),
+        ) {
+            let registration = {
+                let mut c = locked(&core)?;
+                if !cached && c.manager.authorize_frame(&sid, connection, frame).is_ok() {
+                    Ok(()) // The script may reuse its already registered initial frame.
+                } else {
+                    register_result_frame(&mut c.manager, &sid, connection, frame, cached)
+                }
+            };
+            if let Err(error) = registration {
+                response = cached_frame_failure(cached, scope, error)?;
+            }
+        }
+    }
     if response["ok"] == true && action == "click-target" {
         let connection = response["connectionId"]
             .as_str()

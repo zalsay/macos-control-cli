@@ -981,7 +981,22 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
     }
     let source = value.as_object().ok_or_else(|| fail("INVALID_ARGUMENT"))?;
     let mut out = fields(source, &["ok", "protocolVersion", "scope"], &[])?;
+    if action == "script" && value["ok"] == true {
+        let progress = crate::script::project_progress(value)?;
+        if progress["completedSteps"] != progress["totalSteps"]
+            || progress.get("failedStep").is_some()
+        {
+            return Err(fail("INVALID_ARGUMENT"));
+        }
+        out.extend(
+            progress
+                .as_object()
+                .ok_or_else(|| fail("INVALID_ARGUMENT"))?
+                .clone(),
+        );
+    }
     let action_fields: &[&str] = match action {
+        "script" => &[],
         "click" | "scroll" | "type" | "press" => &["sent", "connectionId", "frameId", "eb"],
         "move" | "hover" | "drag" | "actions" => &["sent", "connectionId", "frameId"],
         "click-target" => &[
@@ -1239,7 +1254,11 @@ fn project_receipt(action: &str, value: &serde_json::Value) -> Result<serde_json
             "远程操作失败，请查看错误代码"
         };
         error.insert("message".into(), Value::String(controlled.into()));
-        if let Some(receipt) = obj(
+        if action == "script" {
+            if let Some(receipt) = src.get("receipt") {
+                error.insert("receipt".into(), crate::script::project_progress(receipt)?);
+            }
+        } else if let Some(receipt) = obj(
             src,
             "receipt",
             &[

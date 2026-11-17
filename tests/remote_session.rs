@@ -630,3 +630,49 @@ fn status_receipt_version_stays_bounded_and_rejects_whitespace_and_injection() {
         assert_eq!(error.code, "INVALID_ARGUMENT");
     }
 }
+
+#[test]
+fn script_receipt_cache_preserves_typed_progress_and_drops_private_payloads() {
+    use serde_json::{json, Value};
+    for failed in [false, true] {
+        let mut m = SessionManager::new("boot", false).unwrap();
+        m.issue("s", Scope::Desktop, 0).unwrap();
+        m.claim_control("s", "c", 0).unwrap();
+        let request=serde_json::to_vec(&json!({"action":"script","connectionId":"c","script":{"version":1,"steps":[{"action":"observe"},{"action":"type","text":"secret"}]}})).unwrap();
+        m.begin("s", 1, "script-1", &request, 1).unwrap();
+        let progress = if failed {
+            json!({"connectionId":"c","frameId":"f","totalSteps":2,"completedSteps":1,"failedStep":2,"steps":[{"index":1,"action":"observe","frameId":"f","imagePath":"/private/host"}],"nativeReceipt":{"backend":"x11","dispatchState":"unknown","completedSteps":0,"inputState":"unknown","effectVerified":false,"secret":"bad"},"private":"bad"})
+        } else {
+            json!({"connectionId":"c","frameId":"f","totalSteps":2,"completedSteps":2,"steps":[{"index":1,"action":"observe","frameId":"f"},{"index":2,"action":"type","frameId":"f","sent":true,"eb":true,"text":"secret"}],"private":"bad"})
+        };
+        let source = if failed {
+            json!({"ok":false,"error":{"code":"INPUT_STATE_UNKNOWN","message":"private helper text","receipt":progress}})
+        } else {
+            let mut p = progress;
+            p["ok"] = json!(true);
+            p
+        };
+        m.complete("s", 1, "script-1", &serde_json::to_vec(&source).unwrap(), 2)
+            .unwrap();
+        let permit = m.ack("s", 1, "script-1", 3).unwrap();
+        m.normal_close("s", 1, "script-1", permit).unwrap();
+        let Begin::Cached(bytes) = m.begin("s", 1, "script-1", &request, 4).unwrap() else {
+            panic!("must not execute again")
+        };
+        let projected: Value = serde_json::from_slice(&bytes).unwrap();
+        let progress = if failed {
+            &projected["error"]["receipt"]
+        } else {
+            &projected
+        };
+        assert_eq!(progress["frameId"], "f");
+        assert_eq!(progress["completedSteps"], if failed { 1 } else { 2 });
+        if failed {
+            assert_eq!(progress["nativeReceipt"]["dispatchState"], "unknown");
+        }
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("secret"));
+        assert!(!text.contains("private"));
+        assert!(!text.contains("bad"));
+    }
+}

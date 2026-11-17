@@ -2001,3 +2001,242 @@ fn host_auto_takeover_recovers_soft_pause_on_new_input_but_not_explicit_manual_s
     assert_eq!(native_action_count(&f, "transport-recover"), 0);
     f.isolated();
 }
+
+#[test]
+fn remote_script_runs_once_on_host_with_per_step_eb_and_registers_final_frame() {
+    use serde_json::json;
+    let mut f = ProcessGuard::new();
+    f.init();
+    f.start();
+    let call = |args: &[&str]| f.remote("script-client", "tls/host-ca.pem", "token", args);
+    let connected = ok(&call(&["connect", "--window", "42"]));
+    let id = connected["connectionId"].as_str().unwrap();
+    let path = f.root.join("flow.json");
+    fs::write(&path,json!({"version":1,"steps":[{"action":"observe"},{"action":"click","x":100,"y":200,"eb":true},{"action":"type","text":"script private text"},{"action":"press","key":"Enter","eb":true}]}).to_string()).unwrap();
+    let receipt = ok(&call(&["script", "--connection", id, "--file", s(&path)]));
+    assert_eq!(receipt["completedSteps"], 4);
+    assert_eq!(receipt["steps"][1]["eb"], true);
+    assert!(!receipt.to_string().contains("script private text"));
+    let requests: Vec<Value> = f
+        .native()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    let actions: Vec<&Value> = requests
+        .iter()
+        .filter(|r| matches!(r["action"].as_str(), Some("click" | "type" | "press")))
+        .collect();
+    assert_eq!(actions.len(), 3);
+    assert_eq!(actions[0]["eb"], true);
+    assert!(actions[1].get("eb").is_none());
+    assert_eq!(actions[2]["eb"], true);
+    assert!(actions.iter().all(|r| r["expectedInputEpoch"].is_u64()));
+    let frame = receipt["frameId"].as_str().unwrap();
+    ok(&call(&[
+        "click",
+        "--connection",
+        id,
+        "--frame",
+        frame,
+        "--x",
+        "100",
+        "--y",
+        "200",
+    ]));
+    let foreign = json(&f.remote(
+        "script-foreign",
+        "tls/host-ca.pem",
+        "token",
+        &["script", "--connection", id, "--file", s(&path)],
+    ));
+    assert_ne!(foreign["ok"], true);
+    assert_eq!(native_action_count(&f, "type"), 1);
+    ok(&call(&["disconnect", "--connection", id]));
+    f.isolated();
+}
+
+#[test]
+fn remote_script_failure_keeps_progress_and_rejects_later_steps() {
+    use serde_json::json;
+    let mut f = ProcessGuard::new();
+    f.init();
+    f.start();
+    let call = |args: &[&str]| f.remote("script-failure", "tls/host-ca.pem", "token", args);
+    let connected = ok(&call(&["connect", "--window", "42"]));
+    let id = connected["connectionId"].as_str().unwrap();
+    let path = f.root.join("flow.json");
+    fs::write(&path,json!({"version":1,"steps":[{"action":"observe"},{"action":"click","x":999999,"y":200,"eb":true},{"action":"type","text":"must not send"}]}).to_string()).unwrap();
+    let failure = json(&call(&["script", "--connection", id, "--file", s(&path)]));
+    assert_eq!(failure["ok"], false);
+    assert_eq!(failure["error"]["receipt"]["completedSteps"], 1);
+    assert_eq!(failure["error"]["receipt"]["failedStep"], 2);
+    assert_eq!(native_action_count(&f, "click"), 0);
+    assert_eq!(native_action_count(&f, "type"), 0);
+    let frame = failure["error"]["receipt"]["frameId"].as_str().unwrap();
+    ok(&call(&[
+        "click",
+        "--connection",
+        id,
+        "--frame",
+        frame,
+        "--x",
+        "100",
+        "--y",
+        "200",
+    ]));
+    ok(&call(&["disconnect", "--connection", id]));
+    f.isolated();
+}
+
+#[test]
+fn remote_script_replay_does_not_repeat_inputs_or_revive_evicted_frames() {
+    use serde_json::json;
+    let mut f = ProcessGuard::new();
+    f.init();
+    f.start();
+    let (sid, boot, connected, _) = replay_rpc(
+        &f,
+        None,
+        "connect-script",
+        1,
+        json!({"action":"connect","windowId":42}),
+    );
+    let id = connected["response"]["connectionId"].as_str().unwrap();
+    let request = json!({"action":"script","connectionId":id,"script":{"version":1,"steps":[{"action":"observe"},{"action":"click","x":100,"y":200,"eb":true}]}});
+    let (_, _, first, _) = replay_rpc(&f, Some((&sid, &boot)), "script-replay", 2, request.clone());
+    assert_eq!(first["response"]["ok"], true);
+    let (_, _, replay, _) =
+        replay_rpc(&f, Some((&sid, &boot)), "script-replay", 2, request.clone());
+    assert_eq!(first["response"], replay["response"]);
+    assert_eq!(native_action_count(&f, "click"), 1);
+    let frame = first["response"]["frameId"].as_str().unwrap();
+    let (_, _, reused, _) = replay_rpc(
+        &f,
+        Some((&sid, &boot)),
+        "script-reuse-frame",
+        3,
+        json!({"action":"script","connectionId":id,"frameId":frame,"script":{"version":1,"steps":[{"action":"type","text":"Hello"}]}}),
+    );
+    assert_eq!(reused["response"]["ok"], true, "{reused}");
+    // One new bounded script can retire all 32 retained frames, without replaying input.
+    let (_, _, fresh, _) = replay_rpc(
+        &f,
+        Some((&sid, &boot)),
+        "script-many-frames",
+        4,
+        json!({"action":"script","connectionId":id,"script":{"version":1,"steps":vec![json!({"action":"observe"});33]}}),
+    );
+    assert_eq!(fresh["response"]["ok"], true);
+    let (_, _, stale, _) = replay_rpc(&f, Some((&sid, &boot)), "script-replay", 2, request);
+    // Manager may retain the old registration while Service has evicted it; a replay
+    // must not re-run any step, and subsequent real input still checks Service frames.
+    assert_eq!(native_action_count(&f, "click"), 1);
+    assert_eq!(native_action_count(&f, "observe"), 34);
+    assert_eq!(stale["response"], first["response"]);
+    let (_, _, expired, _) = replay_rpc(
+        &f,
+        Some((&sid, &boot)),
+        "expired-script-frame",
+        5,
+        json!({"action":"click","connectionId":id,"frameId":frame,"x":100,"y":200}),
+    );
+    assert_eq!(expired["response"]["error"]["code"], "FRAME_UNKNOWN");
+    assert_eq!(native_action_count(&f, "click"), 1);
+    let (_, _, end, _) = replay_rpc(
+        &f,
+        Some((&sid, &boot)),
+        "disconnect-script",
+        6,
+        json!({"action":"disconnect","connectionId":id}),
+    );
+    assert_eq!(end["response"]["ok"], true);
+}
+
+#[test]
+fn remote_script_explicit_pause_during_wait_stops_remaining_inputs() {
+    use serde_json::json;
+    let mut f = ProcessGuard::new();
+    f.init();
+    fs::write(f.root.join("fixture-auto-takeover"), b"enabled").unwrap();
+    f.start();
+    let connected = ok(&f.remote(
+        "script-paused",
+        "tls/host-ca.pem",
+        "token",
+        &["connect", "--window", "42"],
+    ));
+    let id = connected["connectionId"].as_str().unwrap();
+    let path = f.root.join("flow.json");
+    fs::write(&path,json!({"version":1,"steps":[{"action":"observe"},{"action":"wait","ms":2000},{"action":"click","x":10,"y":20,"eb":true}]}).to_string()).unwrap();
+    let child = f
+        .remote_command(
+            "script-paused",
+            "tls/host-ca.pem",
+            "token",
+            &["script", "--connection", id, "--file", s(&path)],
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    while native_action_count(&f, "observe") == 0 {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(f.root.join("manual-pause"), b"pause").unwrap();
+    let output = finish(child, Duration::from_secs(5));
+    let response = json(&output);
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["reason"], "USER_PAUSED");
+    assert_eq!(response["error"]["receipt"]["failedStep"], 2);
+    assert_eq!(native_action_count(&f, "click"), 0);
+    assert_eq!(native_action_count(&f, "transport-auto-resume"), 0);
+}
+
+#[test]
+fn remote_script_click_target_uses_host_model_and_eb_without_client_config() {
+    use serde_json::json;
+    let mut f = ProcessGuard::new();
+    f.init();
+    let cloud = FakeCloud::new(false);
+    enable_fake_cloud(&f, &cloud);
+    f.start();
+    let call = |args: &[&str]| f.remote("script-model", "tls/host-ca.pem", "token", args);
+    let connected = ok(&call(&["connect", "--window", "42"]));
+    let id = connected["connectionId"].as_str().unwrap();
+    let path = f.root.join("flow.json");
+    fs::write(&path,json!({"version":1,"steps":[{"action":"click-target","target":"Save","eb":true},{"action":"press","key":"Enter"}]}).to_string()).unwrap();
+    let receipt = ok(&call(&["script", "--connection", id, "--file", s(&path)]));
+    verify_cloud_request(&cloud.request.recv_timeout(LIMIT).unwrap());
+    assert!(cloud.request.try_recv().is_err());
+    assert!(cloud.closed.recv_timeout(LIMIT).unwrap());
+    assert_eq!(receipt["completedSteps"], 2);
+    assert_eq!(receipt["steps"][0]["eb"], true);
+    assert_eq!(native_action_count(&f, "observe"), 1);
+    assert_eq!(native_action_count(&f, "click"), 1);
+    assert!(!receipt.to_string().contains("test-key"));
+    ok(&call(&["disconnect", "--connection", id]));
+    f.isolated();
+}
+
+#[test]
+fn remote_script_backend_preflight_returns_late_failure_before_any_steps() {
+    use serde_json::json;
+    let mut f = ProcessGuard::new();
+    f.init();
+    f.start();
+    let call = |args: &[&str]| f.remote("script-preflight", "tls/host-ca.pem", "token", args);
+    let connected = ok(&call(&["connect", "--window", "42"]));
+    let id = connected["connectionId"].as_str().unwrap();
+    let path = f.root.join("flow.json");
+    fs::write(&path, json!({"version":1,"steps":[{"action":"observe"},{"action":"type","text":"must not send"},{"action":"press","key":"ctrl+a"}]}).to_string()).unwrap();
+    let failure = json(&call(&["script", "--connection", id, "--file", s(&path)]));
+    assert_eq!(failure["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(failure["error"]["receipt"]["completedSteps"], 0);
+    assert_eq!(failure["error"]["receipt"]["failedStep"], 3);
+    assert_eq!(native_action_count(&f, "observe"), 0);
+    assert_eq!(native_action_count(&f, "type"), 0);
+    ok(&call(&["disconnect", "--connection", id]));
+    f.isolated();
+}
