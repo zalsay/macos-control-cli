@@ -55,6 +55,7 @@ public enum ControlProtocol {
         case .connect(let id): name = "connect"; params["profile"] = id.uuidString
         case .state(let c): name = "state"; params["connection"] = c.uuidString
         case .observe(let c): name = "observe"; params["connection"] = c.uuidString
+        case .selectFile(let c, let paths): name = "select-file"; params["connection"] = c.uuidString; params["paths"] = paths
         case .clickTarget(let c,let target): name = "click-target"; params["connection"] = c.uuidString; params["target"] = target
         case .cancel(let c): name = "cancel"; params["connection"] = c.uuidString
         case .disconnect(let c): name = "disconnect"; params["connection"] = c.uuidString
@@ -82,6 +83,7 @@ public enum ControlProtocol {
         case "status", "capabilities", "daemonStop": expected = []
         case "connect": expected = ["profile"]
         case "state", "observe", "cancel", "disconnect", "release": expected = ["connection"]
+        case "select-file": expected = ["connection", "paths"]
         case "click-target": expected = ["connection","target"]
         case "navigate": expected = ["connection","url"]
         case "move", "mouseDown", "mouseUp": expected = ["connection","frame","x","y"]
@@ -98,6 +100,10 @@ public enum ControlProtocol {
         if name == "clickAndWait" { args.append("--wait-navigation") }
         for key in expected.sorted() {
             guard let value = params[key] else { throw ControlError.invalidRequest }
+            if key == "paths" {
+                guard let paths = value as? [String], AutomationFileSelection.valid(paths) else { throw ControlError.invalidRequest }
+                for path in paths { args += ["--path", path] }; continue
+            }
             if key == "shift" {
                 guard let n = value as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { throw ControlError.invalidRequest }
                 if n.boolValue { args.append("--shift") }; continue

@@ -16,6 +16,9 @@ import SafarierCore
         catch { fatalError("registered preparation exhausted its remaining budget before binding: \(error)") }
         context.delay = .zero
         guard case .success(.state) = await slot.handle(AutomationRequest(action: .getState)) else { fatalError("prepared service was not dispatched") }
+        guard case .success(.state) = await slot.handle(AutomationRequest(action: .selectFiles(["/tmp/cover.png"]))) else {
+            fatalError("registered slot did not dispatch selection to its bound service")
+        }
         precondition(session.creations == 1)
         do {
             try await slot.prepare(context: context, profile: profile, spec: spec, workspace: workspace)

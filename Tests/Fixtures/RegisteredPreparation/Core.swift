@@ -14,13 +14,14 @@ public struct RunnerPreparationPlan: Sendable {
 public struct SafarierWorkspace { public init() {} }
 public enum AutomationLimits { public static let cleanupSeconds = 2.0 }
 public struct AutomationError: Error {
-    public enum Code { case targetChanged, sessionExpired, cancelled, runnerExited, uiPolicyUnavailable, indeterminateResult, timeout }
+    public enum Code { case targetChanged, sessionExpired, cancelled, runnerExited, uiPolicyUnavailable, fileDialogUnsupported, indeterminateResult, timeout }
     public enum SideEffects { case possible }
     public let code: Code
     public init(code: Code, sideEffects: SideEffects? = nil) { self.code = code }
 }
 public enum AutomationAction {
     case capabilities, openSession, getState, screenshot, navigate, navigateByInput, move, mouseDown, mouseUp
+    case selectFiles([String])
     case click, insertText, key, cancel, closeSession, releaseControl, commitControlRelease, unsupported
 }
 public struct AutomationRequest { public let action: AutomationAction; public init(action: AutomationAction) { self.action = action } }

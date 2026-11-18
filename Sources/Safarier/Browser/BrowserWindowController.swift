@@ -1456,6 +1456,9 @@ final class BrowserWindowController: NSObject, NSWindowDelegate, NSToolbarDelega
     }
 
     func windowWillClose(_ notification: Notification) {
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        dismissRegisteredFileChooser()
+        #endif
         cancelPageRetry()
         if controllerPolicy == .automationBackground {
             onAutomationNavigation?(.closed)
@@ -1545,6 +1548,51 @@ final class BrowserWindowController: NSObject, NSWindowDelegate, NSToolbarDelega
         return alert
     }
 
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+    private struct RegisteredFileChooser {
+        let leaseID: UUID
+        let panel: NSOpenPanel
+        let complete: ([URL]?) -> Void
+    }
+    private var registeredFileChooser: RegisteredFileChooser?
+
+    /// Consume only the chooser that WebKit opened during this window's live lease.
+    /// AppKit dismissal and the WebKit completion are deliberately separate: the
+    /// panel's URLs describe manual selection, while these URLs came from the CLI.
+    func selectRegisteredFiles(_ paths: [String], leaseID: UUID) throws -> Int {
+        guard Self.registeredPresentationValid(window: window, webView: webView, leaseID: leaseID) else {
+            throw AutomationError(code: .targetChanged)
+        }
+        guard let chooser = registeredFileChooser, chooser.leaseID == leaseID, window.attachedSheet === chooser.panel else {
+            throw AutomationError(code: .fileDialogNotFound, retryable: true)
+        }
+        guard !chooser.panel.canChooseDirectories, paths.count == 1 || chooser.panel.allowsMultipleSelection else {
+            throw AutomationError(code: .fileDialogUnsupported)
+        }
+        guard AutomationFileSelection.valid(paths) else { throw AutomationError(code: .invalidRequest) }
+        let urls = try paths.map { path in
+            let url = URL(fileURLWithPath: path, isDirectory: false).resolvingSymlinksInPath()
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isReadableKey])
+            guard values?.isRegularFile == true, values?.isReadable == true else {
+                throw AutomationError(code: .fileNotReadable, retryable: true)
+            }
+            return url
+        }
+        guard !Task.isCancelled else { throw AutomationError(code: .cancelled) }
+        registeredFileChooser = nil
+        window.endSheet(chooser.panel, returnCode: .cancel)
+        chooser.complete(urls)
+        return urls.count
+    }
+
+    private func dismissRegisteredFileChooser() {
+        guard let chooser = registeredFileChooser else { return }
+        registeredFileChooser = nil
+        if window.attachedSheet === chooser.panel { window.endSheet(chooser.panel, returnCode: .cancel) }
+        chooser.complete(nil)
+    }
+    #endif
+
     /// <input type=file>
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
         guard routeUI(parameters.allowsDirectories ? .directorySelection : .fileSelection, perform: { true }, deny: { completionHandler(nil); return false }) else { return }
@@ -1552,6 +1600,18 @@ final class BrowserWindowController: NSObject, NSWindowDelegate, NSToolbarDelega
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
         panel.canChooseDirectories = parameters.allowsDirectories
         panel.canChooseFiles = true
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if webView === self.webView, let leaseID = Self.registeredLeaseID(window: window) {
+            guard window.attachedSheet == nil, registeredFileChooser == nil else { completionHandler(nil); return }
+            registeredFileChooser = RegisteredFileChooser(leaseID: leaseID, panel: panel, complete: completionHandler)
+            panel.beginSheetModal(for: window) { [weak self, weak panel] response in
+                guard let panel, let chooser = self?.registeredFileChooser, chooser.panel === panel else { return }
+                self?.registeredFileChooser = nil
+                chooser.complete(response == .OK ? panel.urls : nil)
+            }
+            return
+        }
+        #endif
         panel.beginSheetModal(for: window) { completionHandler($0 == .OK ? panel.urls : nil) }
     }
 
@@ -1715,6 +1775,9 @@ final class BrowserWindowController: NSObject, NSWindowDelegate, NSToolbarDelega
         traceRegisteredLoad("didStart", navigation: navigation)
         #endif
         if let navigation, pageRetry.isRetired(navigation) { return }
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        dismissRegisteredFileChooser()
+        #endif
         if let navigation, !pageRetry.matches(navigation) { cancelPageRetry() }
         hasAutofilledCurrentPage = false
         if controllerPolicy == .automationBackground { onAutomationNavigation?(.started(navigation)) }
@@ -1776,6 +1839,9 @@ final class BrowserWindowController: NSObject, NSWindowDelegate, NSToolbarDelega
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        dismissRegisteredFileChooser()
+        #endif
         cancelPageRetry()
         // Automation treats process termination as target loss, never as a reload.
         if controllerPolicy == .automationBackground { onAutomationNavigation?(.processTerminated) }

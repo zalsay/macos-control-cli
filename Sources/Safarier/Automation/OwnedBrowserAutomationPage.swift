@@ -523,6 +523,11 @@ final class OwnedBrowserAutomationPage: RunnerAutomationPage {
             guard let input else { throw AutomationError(code: .targetChanged) }
             guard version == expectedViewport.viewVersion else { throw AutomationDocumentChanged.stale }
             switch action {
+            case .selectFiles(let paths):
+                let (_, controller, _, window) = try checkedObjects()
+                guard let leaseID = BrowserWindowController.registeredLeaseID(window: window),
+                      presentationValid(window) else { throw AutomationError(code: .targetChanged) }
+                return .filesSelected(count: try controller.selectRegisteredFiles(paths, leaseID: leaseID))
             case .navigate(let url):
                 guard let webView, !Task.isCancelled else { throw AutomationError(code: .targetChanged) }
                 guard webView.load(URLRequest(url: url)) != nil else { throw AutomationError(code: .backendUnavailable, sideEffects: .possible) }

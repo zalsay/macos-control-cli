@@ -18,6 +18,7 @@ struct ControlBrokerReply: Codable {
     var timingMs: UInt64?
     var sent: Bool?
     var effectVerified: Bool?
+    var filesSelected: Int?
     var navigationSubmitted: Bool?
     var state: AutomationState?
     var capabilities: AutomationCapabilities?
@@ -139,6 +140,7 @@ final class ControlBroker {
              (.move, .nativeDelivered), (.mouseDown, .nativeDelivered), (.mouseUp, .nativeDelivered),
              (.click, .nativeDelivered), (.insertText, .nativeDelivered), (.key, .nativeDelivered),
              (.cancel, .sessionClosed), (.closeSession, .sessionClosed): return true
+        case let (.selectFiles(paths), .filesSelected(count)): return count == paths.count
         case (.releaseControl, .controlReleased): return true
         default: return false
         }
@@ -209,7 +211,7 @@ final class ControlBroker {
         }
         let connection: UUID
         switch request.operation {
-        case let .state(c), let .observe(c), let .clickTarget(c, _), let .cancel(c), let .disconnect(c), let .release(c), let .navigate(c, _),
+        case let .state(c), let .observe(c), let .clickTarget(c, _), let .selectFile(c, _), let .cancel(c), let .disconnect(c), let .release(c), let .navigate(c, _),
              let .move(c, _, _, _), let .mouseDown(c, _, _, _), let .mouseUp(c, _, _, _),
              let .click(c, _, _, _, _), let .type(c, _, _), let .press(c, _, _, _),
              let .pressEnterAndWait(c, _), let .clickAndWait(c, _, _, _): connection = c
@@ -266,6 +268,7 @@ final class ControlBroker {
             switch request.operation {
             case .state: action = .getState
             case .observe: action = .screenshot
+            case .selectFile(_, let paths): action = .selectFiles(paths)
             case .cancel: action = .cancel
             case .disconnect: action = .closeSession
             case .release: action = .releaseControl
@@ -310,6 +313,8 @@ final class ControlBroker {
                 session.viewport = AutomationViewport(viewportWidthPoints: old.viewportWidthPoints, viewportHeightPoints: old.viewportHeightPoints, pixelWidth: old.pixelWidth, pixelHeight: old.pixelHeight, scaleX: old.scaleX, scaleY: old.scaleY, pageZoom: old.pageZoom, viewVersion: version)
                 result.viewVersion = version
                 if case .navigationSubmitted = value { result.navigationSubmitted = true; result.effectVerified = false }
+            case .filesSelected(let count):
+                result.filesSelected = count; result.sent = true; result.effectVerified = false
             case let .nativeDelivered(sequence, buttons, version):
                 result.sequence = sequence; result.buttons = buttons; result.viewVersion = version
                 result.sent = true; result.effectVerified = false

@@ -309,6 +309,7 @@ import AppKit
         guard case .success(let result) = reply.outcome else { return true }
         switch (action, result) {
         case (.getState, .stateRead(let state)): return state.target == target
+        case let (.selectFiles(paths), .filesSelected(count)): return count == paths.count
         case (.navigate, .navigationSubmitted), (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished), (.navigateByInput, .nativeDelivered), (.screenshot, .snapshotWritten),
              (.move, .nativeDelivered), (.mouseDown, .nativeDelivered), (.mouseUp, .nativeDelivered),
              (.click, .nativeDelivered), (.scroll, .nativeDelivered), (.insertText, .nativeDelivered),

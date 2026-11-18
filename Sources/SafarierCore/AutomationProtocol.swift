@@ -25,10 +25,19 @@ public enum AutomationNavigationInput: Equatable, Sendable {
     case enter
     case click(point: ViewportPoint)
 }
+public enum AutomationFileSelection {
+    public static let maxCount = 20
+    public static func valid(_ paths: [String]) -> Bool {
+        (1...maxCount).contains(paths.count) && paths.allSatisfy {
+            $0.hasPrefix("/") && $0.utf8.count <= 4096 && !$0.utf8.contains(0)
+        } && paths.reduce(0, { $0 + $1.utf8.count }) <= AutomationLimits.textBytes
+    }
+}
 public enum AutomationAction: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     case launchInteractive(profileID: UUID, url: URL?, spi: String?)
     case capabilities, openSession(profileID: UUID), getState, navigate(url: URL), screenshot
     case navigateByInput(input: AutomationNavigationInput, viewVersion: UInt64)
+    case selectFiles([String])
     case move(point: ViewportPoint, viewVersion: UInt64), mouseDown(point: ViewportPoint, viewVersion: UInt64), mouseUp(point: ViewportPoint, viewVersion: UInt64)
     case click(point: ViewportPoint, viewVersion: UInt64, count: Int)
     case scroll(point: ViewportPoint, viewVersion: UInt64, deltaX: Double, deltaY: Double)
@@ -60,6 +69,7 @@ public struct AutomationRequest: Equatable, Sendable, CustomStringConvertible, C
     public var debugDescription: String { description }
 }
 public enum AutomationErrorCode: String, Codable, Sendable {
+    case fileDialogNotFound = "FILE_DIALOG_NOT_FOUND", fileDialogUnsupported = "FILE_DIALOG_UNSUPPORTED", fileNotReadable = "FILE_NOT_READABLE"
     case invalidRequest = "INVALID_REQUEST", unsupportedProtocol = "UNSUPPORTED_PROTOCOL", unauthorized = "UNAUTHORIZED", profileNotAllowed = "PROFILE_NOT_ALLOWED", profileAlreadyRunning = "PROFILE_ALREADY_RUNNING", sessionNotFound = "SESSION_NOT_FOUND", sessionExpired = "SESSION_EXPIRED", sessionBusy = "SESSION_BUSY", sessionBlocked = "SESSION_BLOCKED", requestIDReused = "REQUEST_ID_REUSED", replayWindowFull = "REPLAY_WINDOW_FULL", backendUnavailable = "BACKEND_UNAVAILABLE", backgroundLaunchUnverified = "BACKGROUND_LAUNCH_UNVERIFIED", uiPolicyUnavailable = "UI_POLICY_UNAVAILABLE", interactionRequired = "INTERACTION_REQUIRED", targetChanged = "TARGET_CHANGED", invalidPointerState = "INVALID_POINTER_STATE", outOfBounds = "OUT_OF_BOUNDS", timeout = "TIMEOUT", cancelled = "CANCELLED", runnerExited = "RUNNER_EXITED", indeterminateResult = "INDETERMINATE_RESULT"
 }
 public enum AutomationSideEffects: String, Codable, Sendable { case none, possible, delivered }
@@ -128,6 +138,7 @@ public enum AutomationResult: Equatable, Sendable, CustomStringConvertible, Cust
     case sessionOpened(sessionID: String, target: AutomationTargetIdentity, viewport: AutomationViewport)
     case interactiveLaunched(profileID: UUID)
     case nativeDelivered(sequence: UInt64, buttons: Int, viewVersion: UInt64)
+    case filesSelected(count: Int)
     case navigationSubmitted(viewVersion: UInt64)
     case navigationFinished(viewVersion: UInt64)
     case snapshotWritten(path: String, viewport: AutomationViewport)
@@ -273,6 +284,8 @@ public enum AutomationCodec {
             try keys(["x","y","viewVersion","count"]); let (pt,v) = try point(); guard let n = integer(p["count"]), n == 1 || n == 2 else { throw bad }; action = .click(point: pt, viewVersion: v, count: Int(n))
         case "scroll":
             try keys(["x","y","viewVersion","deltaX","deltaY"]); let (pt,v) = try point(); guard let dx = number(p["deltaX"]), let dy = number(p["deltaY"]), abs(dx) <= 1000, abs(dy) <= 1000 else { throw bad }; action = .scroll(point: pt, viewVersion: v, deltaX: dx, deltaY: dy)
+        case "selectFiles":
+            try keys(["paths"]); guard let paths = p["paths"] as? [String], AutomationFileSelection.valid(paths) else { throw bad }; action = .selectFiles(paths)
         case "insertText": try keys(["text"]); guard let s = p["text"] as? String, s.utf8.count <= AutomationLimits.textBytes else { throw bad }; action = .insertText(s)
         case "key":
             try keys(["name","shift"]); guard let s = p["name"] as? String, let key = AutomationKey(rawValue: s), let n = p["shift"] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { throw bad }; let shift = n.boolValue; guard !shift || [.tab,.left,.right,.up,.down,.home,.end].contains(key) else { throw bad }; action = .key(name: key, shift: shift)
@@ -316,6 +329,7 @@ public enum AutomationCodec {
         case let .mouseUp(p,v): name = "mouseUp"; params = point(p,v)
         case let .click(p,v,n): name = "click"; params = point(p,v); params["count"] = n
         case let .scroll(p,v,x,y): name = "scroll"; params = point(p,v); params["deltaX"] = x; params["deltaY"] = y
+        case .selectFiles(let paths): name = "selectFiles"; params = ["paths":paths]
         case .insertText(let text): name = "insertText"; params = ["text":text]
         case let .key(key,shift): name = "key"; params = ["name":key.rawValue,"shift":shift]
         case .cancel: name = "cancel"
@@ -381,6 +395,10 @@ public enum AutomationCodec {
             try AutomationJSONBoundary.exact(result, ["sessionID","target","viewport"]); guard let session = result["sessionID"] as? String, AutomationSessionToken.isCanonical(session) else { throw bad }
             try target(result["target"])
             value = .sessionOpened(sessionID: session, target: try typed(AutomationTargetIdentity.self,dict(result["target"])), viewport: try viewport(result["viewport"]))
+        case "filesSelected":
+            try AutomationJSONBoundary.exact(result, ["count"])
+            guard let count = integer(result["count"]), (1...UInt64(AutomationFileSelection.maxCount)).contains(count) else { throw bad }
+            value = .filesSelected(count: Int(count))
         case "nativeDelivered":
             try AutomationJSONBoundary.exact(result, ["sequence","buttons","viewVersion"])
             struct Native: Decodable { let sequence: UInt64; let buttons: Int; let viewVersion: UInt64 }
@@ -431,6 +449,9 @@ public enum AutomationCodec {
             switch result {
             case .interactiveLaunched(let id): root["effect"] = "interactiveLaunched"; root["result"] = ["profileID": id.uuidString]
             case let .sessionOpened(sessionID, target, viewport): guard AutomationSessionToken.isCanonical(sessionID) else { throw AutomationError(code: .invalidRequest) }; try validateViewport(viewport, screenshot: false); root["effect"] = "sessionOpened"; root["result"] = ["sessionID":sessionID,"target":try object(target),"viewport":try object(viewport)]
+            case .filesSelected(let count):
+                guard (1...AutomationFileSelection.maxCount).contains(count) else { throw AutomationError(code: .invalidRequest) }
+                root["effect"] = "filesSelected"; root["result"] = ["count":count]
             case let .nativeDelivered(sequence, buttons, viewVersion): try validateButtons(buttons); root["effect"] = "nativeDelivered"; root["result"] = ["sequence":sequence,"buttons":buttons,"viewVersion":viewVersion]
             case .navigationSubmitted(let v): root["effect"] = "navigationSubmitted"; root["result"] = ["viewVersion":v]
             case .navigationFinished(let v): root["effect"] = "navigationFinished"; root["result"] = ["viewVersion":v]

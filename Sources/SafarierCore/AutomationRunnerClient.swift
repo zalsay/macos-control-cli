@@ -712,6 +712,7 @@ public actor AutomationRunnerClient {
         case (.openSession, .sessionOpened(_, let target, _)): return matches(target)
         case (.getState, .stateRead(let state)): return matches(state.target)
         case (.navigate, .navigationSubmitted), (.navigate, .navigationFinished), (.navigateByInput, .navigationFinished), (.navigateByInput, .nativeDelivered), (.screenshot, .snapshotWritten): return true
+        case let (.selectFiles(paths), .filesSelected(count)): return count == paths.count
         case (.move, .nativeDelivered), (.mouseDown, .nativeDelivered), (.mouseUp, .nativeDelivered), (.click, .nativeDelivered), (.scroll, .nativeDelivered), (.insertText, .nativeDelivered), (.key, .nativeDelivered): return true
         case (.cancel, .sessionClosed), (.closeSession, .sessionClosed): return true
         case (.releaseControl, .controlReleasePrepared(let value)): return matches(value.target)

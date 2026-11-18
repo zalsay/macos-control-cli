@@ -14,6 +14,7 @@ enum ControlCLI {
       move|mouseDown|mouseUp --connection CONNECTION_UUID --frame FRAME_UUID --x PIXEL_X --y PIXEL_Y
       click --connection CONNECTION_UUID --frame FRAME_UUID --x PIXEL_X --y PIXEL_Y [--count 1|2] [--wait-navigation]
       click-target --connection CONNECTION_UUID --target TEXT
+      select-file --connection CONNECTION_UUID --path ABSOLUTE_FILE [--path ABSOLUTE_FILE ...]
       type --connection CONNECTION_UUID --frame FRAME_UUID (--text TEXT | --text-stdin)
       press --connection CONNECTION_UUID --frame FRAME_UUID --key KEY [--shift]
       press --connection CONNECTION_UUID --frame FRAME_UUID --key Enter --wait-navigation
@@ -23,6 +24,8 @@ enum ControlCLI {
     observe also returns optional local Vision OCR; unavailable OCR does not prevent a screenshot.
     click-target sends the target and recognized candidate IDs/text to the configured HTTPS model;
     it never sends the screenshot or coordinates. Successful native delivery is not proof of page effect.
+    select-file supplies up to 20 local files to the open file chooser of the registered page.
+    No frame is required. Use observe to confirm upload results.
     Coordinates are screenshot pixels for that frame; the latest 32 frames are retained.
     Use observe to judge page effects and decide when a fresh screenshot is needed.
     For registered browsers, --wait-navigation is a compatibility spelling for sending Enter or one click;

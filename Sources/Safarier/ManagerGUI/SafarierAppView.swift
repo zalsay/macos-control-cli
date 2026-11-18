@@ -496,7 +496,16 @@ struct ProfileSidebarItem: View {
             ProfileRow(
                 profile: profile,
                 proxy: model.proxyBinding(for: profile),
-                state: model.runState(profile.id)
+                state: model.runState(profile.id),
+                isRowHovered: isHovered,
+                onLaunch: {
+                    model.selection = .profile(profile.id)
+                    model.launch(profile)
+                },
+                onStop: {
+                    model.selection = .profile(profile.id)
+                    model.stop(profile)
+                }
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
@@ -1559,9 +1568,12 @@ struct ProfileRow: View {
     let profile: Profile
     let proxy: ProxyBinding
     let state: RunState
+    var isRowHovered: Bool = false
+    var onLaunch: (() -> Void)? = nil
+    var onStop: (() -> Void)? = nil
 
     var body: some View {
-        HStack(spacing: 11) {
+        HStack(alignment: .top, spacing: 10) {
             ZStack(alignment: .bottomTrailing) {
                 ProfileAvatar(profile: profile, size: 34)
                 if state != .stopped {
@@ -1593,7 +1605,16 @@ struct ProfileRow: View {
                 .lineLimit(1)
             }
 
-            Spacer(minLength: 0)
+            Spacer(minLength: 4)
+
+            if let onLaunch, let onStop {
+                ProfileRunActionButton(
+                    state: state,
+                    isRowHovered: isRowHovered,
+                    onLaunch: onLaunch,
+                    onStop: onStop
+                )
+            }
         }
         .padding(.vertical, 3)
     }
@@ -1604,6 +1625,88 @@ struct ProfileRow: View {
         case .proxy: return "network"
         case .node: return "antenna.radiowaves.left.and.right"
         case .missing, .missingNode: return "exclamationmark.triangle"
+        }
+    }
+}
+
+/// 环境列表项右上角的启动/停止快捷按钮
+struct ProfileRunActionButton: View {
+    let state: RunState
+    var isRowHovered: Bool = false
+    let onLaunch: () -> Void
+    let onStop: () -> Void
+
+    @State private var isButtonHovered = false
+
+    var body: some View {
+        Button {
+            switch state {
+            case .stopped:
+                onLaunch()
+            case .starting:
+                break
+            case .running:
+                onStop()
+            }
+        } label: {
+            ZStack {
+                switch state {
+                case .stopped:
+                    Circle()
+                        .fill(isButtonHovered ? Color.green.opacity(0.22) : (isRowHovered ? Color.green.opacity(0.12) : Color.primary.opacity(0.04)))
+                        .frame(width: 22, height: 22)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(isButtonHovered ? Color.green.opacity(0.60) : (isRowHovered ? Color.green.opacity(0.30) : Color.primary.opacity(0.10)), lineWidth: 0.8)
+                        )
+
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundStyle(isButtonHovered ? Color.green : (isRowHovered ? Color.green : Color.secondary))
+                        .offset(x: 0.75)
+
+                case .starting:
+                    Circle()
+                        .fill(Color.orange.opacity(0.12))
+                        .frame(width: 22, height: 22)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(Color.orange.opacity(0.35), lineWidth: 0.8)
+                        )
+
+                    ProgressView()
+                        .controlSize(.mini)
+
+                case .running:
+                    Circle()
+                        .fill(isButtonHovered ? Color(red: 0xEB / 255.0, green: 0x47 / 255.0, blue: 0x47 / 255.0).opacity(0.26) : Color(red: 0xEB / 255.0, green: 0x47 / 255.0, blue: 0x47 / 255.0).opacity(0.14))
+                        .frame(width: 22, height: 22)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(isButtonHovered ? Color(red: 0xFF / 255.0, green: 0x60 / 255.0, blue: 0x60 / 255.0).opacity(0.70) : Color(red: 0xFF / 255.0, green: 0x60 / 255.0, blue: 0x60 / 255.0).opacity(0.35), lineWidth: 0.8)
+                        )
+
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(isButtonHovered ? Color(red: 0xFF / 255.0, green: 0x5A / 255.0, blue: 0x5A / 255.0) : Color(red: 0xFF / 255.0, green: 0x6A / 255.0, blue: 0x6A / 255.0))
+                }
+            }
+            .frame(width: 22, height: 22)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(state == .starting)
+        .help(tooltipText)
+        .onHover { isButtonHovered = $0 }
+        .animation(.easeInOut(duration: 0.15), value: isButtonHovered)
+        .animation(.easeInOut(duration: 0.15), value: isRowHovered)
+    }
+
+    private var tooltipText: String {
+        switch state {
+        case .stopped: return "启动浏览器"
+        case .starting: return "正在启动…"
+        case .running: return "结束运行"
         }
     }
 }

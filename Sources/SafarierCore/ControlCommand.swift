@@ -9,6 +9,7 @@ public enum ControlOperation: Equatable, Sendable, CustomStringConvertible, Cust
     case help, daemonStart, daemonServe, daemonStop, status, capabilities
     case connect(profileID: UUID), state(connection: UUID), observe(connection: UUID), navigate(connection: UUID, url: URL)
     case clickTarget(connection: UUID, target: String)
+    case selectFile(connection: UUID, paths: [String])
     case move(connection: UUID, frame: UUID, x: Double, y: Double)
     case mouseDown(connection: UUID, frame: UUID, x: Double, y: Double)
     case mouseUp(connection: UUID, frame: UUID, x: Double, y: Double)
@@ -31,7 +32,7 @@ public enum ControlCLIParser {
         var args = arguments
         if args.first == "control" { args.removeFirst() }
         var globals: [String: String] = [:], rest: [String] = []
-        let valuedOptions: Set<String> = ["--profile", "--connection", "--frame", "--url", "--x", "--y", "--count", "--text", "--key", "--target"]
+        let valuedOptions: Set<String> = ["--profile", "--connection", "--frame", "--url", "--x", "--y", "--count", "--text", "--key", "--target", "--path"]
         var i = 0
         while i < args.count {
             let item = args[i]
@@ -55,10 +56,15 @@ public enum ControlCLIParser {
             return ParsedControlCommand(options: options, operation: op)
         }
         var values: [String:String] = [:], flags = Set<String>()
+        var paths: [String] = []
         i = 0
         while i < rest.count {
             let key = rest[i]
             guard key.hasPrefix("--"), values[key] == nil, !flags.contains(key) else { throw ControlError.invalidRequest }
+            if command == "select-file", key == "--path" {
+                guard i + 1 < rest.count, paths.count < AutomationFileSelection.maxCount else { throw ControlError.invalidRequest }
+                paths.append(rest[i+1]); i += 2; continue
+            }
             if key == "--shift" || key == "--text-stdin" || key == "--wait-navigation" { flags.insert(key); i += 1 }
             else { guard i+1 < rest.count, (key == "--text" || !rest[i+1].hasPrefix("--")) else { throw ControlError.invalidRequest }; values[key] = rest[i+1]; i += 2 }
         }
@@ -75,6 +81,10 @@ public enum ControlCLIParser {
         case "state", "observe", "cancel", "disconnect", "release":
             try require(["--connection"]); let c = try uuid("--connection")
             switch command { case "state": op = .state(connection:c); case "observe": op = .observe(connection:c); case "cancel": op = .cancel(connection:c); case "release": op = .release(connection:c); default: op = .disconnect(connection:c) }
+        case "select-file":
+            try require(["--connection"])
+            guard AutomationFileSelection.valid(paths) else { throw ControlError.invalidRequest }
+            op = .selectFile(connection: try uuid("--connection"), paths: paths)
         case "click-target":
             try require(["--connection","--target"])
             guard let target = values["--target"], !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, target.unicodeScalars.count <= 512, target.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else { throw ControlError.invalidRequest }

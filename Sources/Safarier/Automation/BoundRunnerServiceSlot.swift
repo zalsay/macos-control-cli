@@ -70,6 +70,8 @@ final class BoundRunnerServiceSlot {
     func handle(_ request: AutomationRequest) async -> AutomationOutcome {
         guard !closed, let context, let service else { return .failure(AutomationError(code: .runnerExited)) }
         switch request.action {
+        case .selectFiles:
+            guard registeredSession != nil else { return .failure(AutomationError(code: .fileDialogUnsupported)) }
         #if SAFARIER_INTERNAL_TEST_APP
         case .capabilities, .openSession, .getState, .screenshot, .navigate, .navigateByInput, .move, .mouseDown, .mouseUp, .click, .insertText, .key, .cancel, .closeSession, .releaseControl, .commitControlRelease:
             break

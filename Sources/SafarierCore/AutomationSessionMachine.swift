@@ -318,6 +318,9 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         case .commitControlRelease: if state != .ready { return [reply(request, .invalidPointerState)] }
         case .mouseDown: if state == .held { return [reply(request, .invalidPointerState)] }
         case .mouseUp: if state != .held { return [reply(request, .invalidPointerState)] }
+        case .selectFiles:
+            guard registeredInteractive else { return [reply(request, .fileDialogUnsupported)] }
+            if state == .held { return [reply(request, .invalidPointerState)] }
         case .click: if state == .held { return [reply(request, .invalidPointerState)] }
         case .navigate, .navigateByInput: if state == .held { return (registeredInteractive ? [] : stop(.targetChanged, at: now)) + [reply(request, .invalidPointerState)] }
         default: break
@@ -412,6 +415,7 @@ public final class AutomationSessionMachine: CustomStringConvertible, CustomDebu
         case let (.screenshot, .snapshotWritten(_, value)): return registeredInteractive || value == viewport
         case let (.navigate, .navigationSubmitted(v)), let (.navigate, .navigationFinished(v)), let (.navigateByInput, .navigationFinished(v)): return registeredInteractive || v == viewport?.viewVersion
         case (.navigateByInput, .nativeDelivered): return registeredInteractive
+        case let (.selectFiles(paths), .filesSelected(count)): return registeredInteractive && count == paths.count
         case let (.mouseDown, .nativeDelivered(_, buttons, v)): return buttons == 1 && (registeredInteractive || v == viewport?.viewVersion)
         case let (.mouseUp, .nativeDelivered(_, buttons, v)): return buttons == 0 && (registeredInteractive || v == viewport?.viewVersion)
         case let (.move, .nativeDelivered(_, buttons, v)), let (.scroll, .nativeDelivered(_, buttons, v)), let (.insertText, .nativeDelivered(_, buttons, v)), let (.key, .nativeDelivered(_, buttons, v)):

@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import SafarierCore
 import SafarierNetwork
 @testable import Safarier
@@ -98,5 +99,47 @@ final class ManagerFixesTests: XCTestCase {
         XCTAssertNotNil(E.customRegionError(languageSource: .system, languages: "", timeZoneSource: .custom, timeZone: "  "))
         XCTAssertNil(E.customRegionError(languageSource: .custom, languages: "th-TH, th", timeZoneSource: .custom, timeZone: "Asia/Bangkok"))
         XCTAssertNil(E.customRegionError(languageSource: .proxy, languages: "", timeZoneSource: .system, timeZone: ""))
+    }
+
+    /// 环境列表行右上角的启动/停止按钮交互测试
+    func testProfileRowRunActionCallbacks() throws {
+        let profile = Profile(name: "Test Profile", mode: .ephemeral)
+        var launched = false
+        var stopped = false
+
+        let stoppedRow = ProfileRow(
+            profile: profile,
+            proxy: .direct,
+            state: .stopped,
+            isRowHovered: false,
+            onLaunch: { launched = true },
+            onStop: { stopped = true }
+        )
+        let stoppedHosting = NSHostingView(rootView: stoppedRow)
+        stoppedHosting.frame = NSRect(x: 0, y: 0, width: 250, height: 50)
+        stoppedHosting.layoutSubtreeIfNeeded()
+        XCTAssertFalse(launched)
+        XCTAssertFalse(stopped)
+
+        let actionButton = ProfileRunActionButton(
+            state: .stopped,
+            isRowHovered: false,
+            onLaunch: { launched = true },
+            onStop: { stopped = true }
+        )
+        let buttonHosting = NSHostingView(rootView: actionButton)
+        buttonHosting.frame = NSRect(x: 0, y: 0, width: 22, height: 22)
+        buttonHosting.layoutSubtreeIfNeeded()
+        actionButton.onLaunch()
+        XCTAssertTrue(launched)
+
+        let runningButton = ProfileRunActionButton(
+            state: .running,
+            isRowHovered: true,
+            onLaunch: { launched = true },
+            onStop: { stopped = true }
+        )
+        runningButton.onStop()
+        XCTAssertTrue(stopped)
     }
 }

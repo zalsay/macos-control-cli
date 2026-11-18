@@ -120,6 +120,16 @@ ctl click-target --connection "$CONNECTION_UUID" --target "页面上明确的目
 click-target 使用本地 OCR 与真实 JEV 模型选择，再走原 native click；只发送目标与候选 ID/文字，不发送截图或坐标。它不支持 `--wait-navigation`；模型拒绝或候选不确定时不能声称已点击。成功后仍需截图核实效果。
 JEV 默认读 `~/.config/mcc/models.toml`，也可由 daemon 启动环境 `MCC_CONFIG_DIR` 指向绝对私有目录（目录0700、文件0600）；不要输出密钥。Manager“设置”/“JEV 模型配置…”使用同一配置。改配置目录需重启对应 daemon；不要为测试通关擅改用户模型设置。
 
+点击网页的“上传”按钮打开原生选档窗口后，用同一连接传入本机绝对文件路径：
+
+```sh
+ctl select-file --connection "$CONNECTION_UUID" \
+  --path "/绝对路径/封面.png" --path "/绝对路径/内页.png"
+ctl observe --connection "$CONNECTION_UUID"
+```
+
+`select-file` 不需要截图 `frame`。每个文件使用一个 `--path`，最多 20 个，网页必须允许多选才能一次传入多个文件。仅选择当前连接期间由此网页打开的文件选取面板；目录选择不支持。没有待选面板返回 `FILE_DIALOG_NOT_FOUND`，文件不可读或不是普通文件返回 `FILE_NOT_READABLE`；文件校验失败时保留面板，可修正路径后再次调用。回执 `filesSelected` 表示交给网页的文件数，`effectVerified: false` 表示不确认上传或发布结果，由 agent 通过 `observe` 判断。
+
 ## 5. 释放控制，保留窗口
 
 操作完成及时交回人工，不关闭浏览器窗口：

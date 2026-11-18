@@ -42,6 +42,8 @@ public struct AutomationReplayCache: CustomStringConvertible, CustomDebugStringC
         switch (lhs.action, rhs.action) {
         case let (.insertText(a), .insertText(b)):
             return a.utf8.elementsEqual(b.utf8)
+        case let (.selectFiles(a), .selectFiles(b)):
+            return a.count == b.count && zip(a, b).allSatisfy { $0.0.utf8.elementsEqual($0.1.utf8) }
         case let (.navigate(a), .navigate(b)):
             return a.absoluteString.utf8.elementsEqual(b.absoluteString.utf8)
         default:
