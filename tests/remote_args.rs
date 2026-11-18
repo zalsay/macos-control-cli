@@ -1,6 +1,7 @@
 use copis_chrome::{
     args::{self, Command},
     protocol::Scope,
+    remote::options::HostCommand,
 };
 
 fn parse(words: &[&str]) -> copis_chrome::protocol::Result<Command> {
@@ -144,6 +145,7 @@ fn remote_prefix_validates_and_preserves_request() {
         vec!["daemon", "status"],
         vec!["--config"],
         vec!["host", "recover"],
+        vec!["host", "disconnect-all"],
         vec!["--remote", "wss://x"],
         vec![
             "click-target",
@@ -177,6 +179,17 @@ fn host_commands_validate_options() {
         parse(&["host", "recover"]).unwrap(),
         Command::Host(_)
     ));
+    assert!(matches!(
+        parse(&["host", "disconnect-all"]).unwrap(),
+        Command::Host(HostCommand::DisconnectAll { state_dir: None })
+    ));
+    assert!(matches!(
+        parse(&["host", "disconnect-all", "--state-dir", "/tmp/host-state"]).unwrap(),
+        Command::Host(HostCommand::DisconnectAll { state_dir: Some(path) })
+            if path == std::path::Path::new("/tmp/host-state")
+    ));
+    assert!(parse(&["host", "disconnect-all", "--state-dir", "relative"]).is_err());
+    assert!(parse(&["host", "disconnect-all", "--listen", "127.0.0.1:8765"]).is_err());
     assert!(parse(&[
         "host",
         "tls",

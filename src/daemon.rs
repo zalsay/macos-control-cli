@@ -63,6 +63,10 @@ enum RemoteContext {
     Release {
         owner: String,
     },
+    /// Host-local administrative disconnect. It is never accepted from WSS.
+    DisconnectAll {
+        owner: String,
+    },
     Recover {
         owner: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,6 +285,48 @@ fn native_state(canceller: &Canceller) -> Result<Value> {
         return Err(control_error("HELPER_UPGRADE_REQUIRED"));
     }
     Ok(state)
+}
+fn ensure_admin_cancel_confirmed(state: &Value) -> Result<()> {
+    if state["externalInputPending"] != false || state["externalInputUncertain"] != false {
+        return Err(control_error("CANCEL_UNCONFIRMED"));
+    }
+    Ok(())
+}
+/// A host-wide disconnect first ACKs native cancellation. If that leaves the
+/// helper's old transport fence paused, release only that now-unleased fence so
+/// a fresh Host owner can attach; never recover an MBC delivery marked uncertain.
+fn release_admin_transport_pause(canceller: &Canceller, state: &Value) -> Result<Value> {
+    ensure_admin_cancel_confirmed(state)?;
+    if state["paused"] == false
+        && state["recoveryRequired"] == false
+        && state["lease"].is_null()
+        && state["phase"] == "awaitingCountdown"
+    {
+        return Ok(json!({"connected":false}));
+    }
+    let recovered = canceller
+        .transport("transport-recover")
+        .map_err(|_| control_error("CANCEL_UNCONFIRMED"))?;
+    if recovered["transportPauseVersion"] != 1
+        || recovered["paused"] != false
+        || recovered["recoveryRequired"] != false
+        || recovered["phase"] != "awaitingCountdown"
+        || !recovered.get("lease").is_some_and(Value::is_null)
+        || recovered["externalInputPending"] != false
+        || recovered["externalInputUncertain"] != false
+    {
+        return Err(control_error("CANCEL_UNCONFIRMED"));
+    }
+    let verified = native_state(canceller).map_err(|_| control_error("CANCEL_UNCONFIRMED"))?;
+    ensure_admin_cancel_confirmed(&verified)?;
+    if verified["paused"] != false
+        || verified["recoveryRequired"] != false
+        || !verified["lease"].is_null()
+        || verified["phase"] != "awaitingCountdown"
+    {
+        return Err(control_error("CANCEL_UNCONFIRMED"));
+    }
+    Ok(json!({"connected":false}))
 }
 fn pause_transport(canceller: &Canceller) -> Result<Value> {
     let receipt = canceller
@@ -508,6 +554,16 @@ pub fn remote_release(runtime: &Runtime, owner: &str) -> Result<Value> {
         runtime,
         json!({"action":"remote-control"}),
         Some(RemoteContext::Release {
+            owner: owner.into(),
+        }),
+    )
+}
+/// Explicit Host-local release of the existing native connection and owner.
+pub(crate) fn remote_disconnect_all(runtime: &Runtime, owner: &str) -> Result<Value> {
+    call_context(
+        runtime,
+        json!({"action":"remote-control"}),
+        Some(RemoteContext::DisconnectAll {
             owner: owner.into(),
         }),
     )
@@ -1006,6 +1062,7 @@ fn handle_remote(
         | RemoteContext::Pause { owner, .. }
         | RemoteContext::State { owner }
         | RemoteContext::Release { owner }
+        | RemoteContext::DisconnectAll { owner }
         | RemoteContext::Recover { owner, .. } => owner,
     };
     if !valid_capability(owner) {
@@ -1047,7 +1104,10 @@ fn handle_remote(
             ..
         }
     );
-    if matches!(context, RemoteContext::Release { .. }) {
+    if matches!(
+        context,
+        RemoteContext::Release { .. } | RemoteContext::DisconnectAll { .. }
+    ) {
         // Release is intentionally side-effect-free on rejection. The independent
         // watchdog, not this request, handles a dead or unverifiable owner.
         let owner_alive = registry.owner_identity.is_some_and(|owner| {
@@ -1066,6 +1126,7 @@ fn handle_remote(
             | RemoteContext::Reserve { .. }
             | RemoteContext::Abandon { .. }
             | RemoteContext::Release { .. }
+            | RemoteContext::DisconnectAll { .. }
     ) && (registry.owner_dead || registry.owner_identity != Some(caller))
     {
         return Err(control_error("RECOVERY_REQUIRED"));
@@ -1225,6 +1286,70 @@ fn handle_remote(
             registry.owner = None;
             registry.owner_identity = None;
             Ok(json!({"released":true}))
+        }
+        RemoteContext::DisconnectAll { .. } => {
+            if registry.active.is_some() || registry.active_read.is_some() {
+                return Err(control_error("BUSY"));
+            }
+            let mut service = service.try_lock().map_err(|_| control_error("BUSY"))?;
+            let before = native_state(canceller).map_err(|_| {
+                registry.require_recovery();
+                control_error("CANCEL_UNCONFIRMED")
+            })?;
+            if ensure_admin_cancel_confirmed(&before).is_err() {
+                registry.require_recovery();
+                return Err(control_error("CANCEL_UNCONFIRMED"));
+            }
+            if let Some(connection) = service.remote_connection_id().map(str::to_owned) {
+                let receipt = match service.execute(json!({
+                    "action":"disconnect",
+                    "connectionId":connection
+                })) {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        registry.require_recovery();
+                        return Err(error);
+                    }
+                };
+                if receipt["connected"] != false || service.connected() {
+                    return Err(control_error("CANCEL_UNCONFIRMED"));
+                }
+                // Disconnect ACK must include no outstanding or uncertain MBC
+                // input before the owner capability or session is discarded.
+                let after = native_state(canceller).map_err(|_| {
+                    registry.require_recovery();
+                    control_error("CANCEL_UNCONFIRMED")
+                })?;
+                if ensure_admin_cancel_confirmed(&after).is_err() {
+                    registry.require_recovery();
+                    return Err(control_error("CANCEL_UNCONFIRMED"));
+                }
+                let released = match release_admin_transport_pause(canceller, &after) {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        registry.require_recovery();
+                        return Err(error);
+                    }
+                };
+                if released["connected"] != false {
+                    return Err(control_error("CANCEL_UNCONFIRMED"));
+                }
+                *registry = RemoteControl::default();
+                Ok(json!({"disconnected":true,"connected":false}))
+            } else {
+                // A failed first connect can leave only a reservation. Release it
+                // only when native state independently proves no live lease.
+                if !before["lease"].is_null()
+                    || before["paused"] != false
+                    || before["recoveryRequired"] != false
+                    || before["phase"] != "awaitingCountdown"
+                {
+                    registry.require_recovery();
+                    return Err(control_error("RECOVERY_REQUIRED"));
+                }
+                *registry = RemoteControl::default();
+                Ok(json!({"disconnected":false,"connected":false,"released":true}))
+            }
         }
         RemoteContext::Recover {
             daemon_pid,

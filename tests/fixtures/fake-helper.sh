@@ -82,7 +82,11 @@ while IFS= read -r line; do
           if [ -n "${MCC_FAKE_HOST_AUTO_BAD_ACK:-}" ] && [ -f "$MCC_FAKE_HOST_AUTO_BAD_ACK" ]; then extra=',"autoResumed":true,"lease":999'; fi ;;
       esac
       if [ "${MCC_FAKE_HOST_AUTO_TAKEOVER:-0}" = 1 ]; then extra="$extra,\"hostAutoTakeoverVersion\":1,\"pauseReason\":\"$transport_reason\""; fi
-      data="{\"transportPauseVersion\":1,\"paused\":$transport_paused,\"phase\":\"$transport_phase\",\"inputEpoch\":$transport_epoch,\"lease\":$transport_lease,\"recoveryRequired\":$transport_recovery$extra}" ;;
+      external_uncertain=false
+      if [ -n "${MCC_FAKE_EXTERNAL_INPUT_UNCERTAIN:-}" ] && [ -f "$MCC_FAKE_EXTERNAL_INPUT_UNCERTAIN" ]; then
+        external_uncertain=true
+      fi
+      data="{\"transportPauseVersion\":1,\"paused\":$transport_paused,\"phase\":\"$transport_phase\",\"inputEpoch\":$transport_epoch,\"lease\":$transport_lease,\"recoveryRequired\":$transport_recovery,\"externalInputPending\":false,\"externalInputUncertain\":$external_uncertain$extra}" ;;
     *'"action":"permissions"'*)
       requested=false
       case "$line" in *'"request":true'*) requested=true ;; esac

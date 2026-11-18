@@ -144,6 +144,22 @@ impl SessionManager {
     pub fn state(&self) -> State {
         self.state
     }
+    /// Invalidate every session and cached resource after native cancellation
+    /// has been confirmed by the Host-local administrative path.
+    pub(crate) fn acknowledge_disconnect_all(&mut self) -> Result<()> {
+        if self.flight.is_some() || !self.closes.is_empty() {
+            return Err(fail("BUSY"));
+        }
+        self.sessions.clear();
+        self.owner = None;
+        self.reservation_high = None;
+        self.connection = None;
+        self.frames.clear();
+        self.flight = None;
+        self.closes.clear();
+        self.state = State::Ready;
+        Ok(())
+    }
     /// Host generates a unique cryptographically random credential after authentication.
     pub fn issue(&mut self, credential: &str, scope: Scope, now: u64) -> Result<()> {
         self.check_time(now)?;
