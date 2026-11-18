@@ -348,4 +348,23 @@ impl FileStore {
             false
         });
     }
+    pub(crate) fn release_all(&mut self) {
+        for (_, entry) in self.entries.drain() {
+            if let Ok(file) = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&entry.path)
+            {
+                if file
+                    .metadata()
+                    .is_ok_and(|m| (m.dev(), m.ino()) == entry.identity)
+                {
+                    let _ = private_files::remove_created_file(&entry.path, &file);
+                }
+            }
+            if let Some(parent) = entry.path.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
 }

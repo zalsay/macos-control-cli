@@ -42,6 +42,7 @@ fn main() {
             HostCommand::TokenInit { output } => credentials::initialize_token(&output),
             HostCommand::Start(options) => host::run(options, scope),
             HostCommand::Recover { state_dir } => host::recover(state_dir, scope),
+            HostCommand::DisconnectAll { state_dir } => host::disconnect_all(state_dir, scope),
         },
         Ok(Command::Remote { options, command }) => match *command {
             Command::Request { request, output } => client::run(options, request, output, scope),

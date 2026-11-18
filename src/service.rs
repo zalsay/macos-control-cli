@@ -115,6 +115,11 @@ impl<N: Native> Service<N> {
     pub(crate) fn connected(&self) -> bool {
         self.connection.is_some()
     }
+    pub(crate) fn remote_connection_id(&self) -> Option<&str> {
+        self.connection
+            .as_ref()
+            .map(|connection| connection.id.as_str())
+    }
     /// Pure connection/frame eligibility only. Real identity, geometry, focus,
     /// permissions and countdown remain in the original native input path.
     pub(crate) fn allows_host_soft_takeover(&self, intent: &Value) -> bool {

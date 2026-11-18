@@ -157,6 +157,20 @@ mcc host recover --state-dir /absolute/private/host-state
 
 ## 7. 文件与管理接口
 
+### 在 Host 本机断开所有控制连接
+
+```sh
+mcc host disconnect-all
+# Host 启动时指定过 --state-dir，则使用同一个目录：
+mcc host disconnect-all --state-dir /absolute/private/host-state
+```
+
+该命令适用于 macOS Host。请在 Host 本机以运行 Host 的同一系统用户执行。该命令不需要 `connectionId` 或远程 token，不作为 WSS 接口开放。它释放此 Host 持有的控制连接并使旧会话、帧与回执失效，不停止 Host，也不关闭 Chrome 或其他应用。客户端随后须重新附着并重新观察，不要重放旧动作。
+
+成功回执含 `connected:false`。若仍有请求在途，返回 `BUSY`；等待当前请求结束后再执行。若无法确认停止（包括 MBC 输入仍在途或结果不确定），不视为已断开，先查看实际状态，不要删除恢复记录。
+
+### 远程文件与原生文件选择
+
 默认拒绝文件传输和远端 `select-file`。Host 可显式启用私有文件接收目录：
 
 ```sh
