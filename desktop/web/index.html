@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MCC 控制台</title><link rel="stylesheet" href="style.css"><script defer src="app.js"></script></head>
+<body>
+<div class="shell">
+  <aside class="rail">
+    <div class="brand"><div class="logo">M</div><div><strong>MCC</strong><small>控制台</small></div></div>
+    <span class="rail-label">工作台</span>
+    <nav aria-label="工作台页面">
+      <button class="nav active" data-page="host" aria-current="page"><span aria-hidden="true">◈</span> Host 服务</button>
+      <button class="nav" data-page="ble"><span aria-hidden="true">⌁</span> 蓝牙设备</button>
+      <button class="nav" data-page="scripts"><span aria-hidden="true">{ }</span> 脚本库</button>
+    </nav>
+    <div class="rail-footer"><span class="dot"></span> 本机配置 <span class="version">0.1</span></div>
+  </aside>
+  <main>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <section id="host" aria-labelledby="host-title">
+      <header><div class="eyebrow">MCC / HOST</div><h1 id="host-title">Host 服务</h1><p>配置监听地址、端口和访问凭据，管理从本面板启动的服务。</p></header>
+      <div class="status-bar"><div class="status-group"><i id="host-dot" class="dot"></i><div><strong id="host-state">检查中</strong><small id="host-detail"></small></div></div><div class="buttons"><button id="host-stop" disabled>停止</button><button id="host-start" class="primary" disabled>启动 Host</button></div></div>
+      <form id="host-form">
+        <div class="card">
+          <h2>监听与构建包</h2>
+          <div class="grid"><label>监听地址<input id="address" value="127.0.0.1" required spellcheck="false"></label><label>端口<input id="port" type="number" min="1" max="65535" value="8765" required></label></div>
+          <label for="bin_dir">MCC / MBC 完整构建包目录</label><div class="field"><input id="bin_dir" required><button type="button" data-pick="bin_dir">选择目录</button></div>
+          <small>默认使用本机 MCC 安装目录，也可以指向解压后的完整构建包。</small>
+        </div>
+        <div class="card">
+          <h2>访问凭据</h2>
+          <label for="token_file">Token 文件</label><div class="field"><input id="token_file" required><button type="button" data-pick="token_file">选择</button><button type="button" id="token">生成</button></div>
+          <label for="certificate">TLS 证书</label><div class="field"><input id="certificate" required><button type="button" data-pick="certificate">选择</button></div>
+          <label for="private_key">TLS 私钥</label><div class="field"><input id="private_key" required><button type="button" data-pick="private_key">选择</button></div>
+          <label for="identity">新证书的客户端访问域名或 IP</label><div class="field"><input id="identity" value="127.0.0.1" autocomplete="off"><button type="button" id="tls">生成证书</button></div>
+          <small>配置只保存文件路径。生成操作会创建新的凭据，不覆盖已有文件。</small>
+        </div>
+        <div class="actions"><small id="save-state">保存后在下次启动时应用。</small><button class="primary" type="submit">保存 Host 配置</button></div>
+      </form>
+    </section>
+    <section id="ble" aria-labelledby="ble-title" hidden>
+      <header><div class="eyebrow">MBC / BLUETOOTH</div><h1 id="ble-title">蓝牙设备</h1><p>为本机 MBC、MCC 和本机 Host 的 ESP 步骤选定同一台设备。</p></header>
+      <div class="status-bar"><div class="status-group"><i class="dot"></i><div><strong id="ble-current">默认：pilot-2</strong><small id="ble-id">尚未指定设备 UUID</small></div></div><button id="ble-reset">恢复默认</button></div>
+      <div class="card"><div class="card-heading"><div><h2>附近设备</h2><small>扫描支持 MBC 命令服务的 BLE 设备。</small></div><button id="scan" class="primary">扫描设备</button></div>
+      <div id="device-list" class="item-list"><p class="empty">点击“扫描设备”查找 ESP32。</p></div>
+      <label for="device-id">或输入此 Mac 上的设备 UUID</label><div class="field"><input id="device-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" spellcheck="false"></div>
+      <div class="actions"><small>测试只读取固件状态，不发送键鼠输入。</small><div class="buttons"><button id="ble-test">测试连接</button><button id="ble-save" class="primary">测试并保存</button></div></div>
+      </div>
+      <p class="footnote">键鼠 HID 配对仍在 macOS「系统设置 → 蓝牙」完成。命令服务连接成功不代表键鼠已配对。</p>
+    </section>
+    <section id="scripts" aria-labelledby="scripts-title" hidden>
+      <header><div class="eyebrow">MCC / WORKFLOWS</div><h1 id="scripts-title">脚本库</h1><p>管理可复用的 JSON 操作流程，支持在每一步选择 ESP。</p></header>
+      <div class="library">
+        <div class="card library-list"><div class="card-heading"><h2>我的脚本</h2><span class="count" id="script-count">0</span></div><input id="search" aria-label="搜索脚本" placeholder="搜索脚本"><div class="buttons compact"><button id="script-new">新建</button><button id="script-import" class="primary">导入 JSON</button></div><div id="script-list" class="item-list"></div></div>
+        <div class="card editor"><label for="script-name">脚本名称</label><input id="script-name" autocomplete="off"><div class="card-heading editor-heading"><label for="script-json">JSON 编辑器</label><small id="esp-steps">ESP：无</small></div><textarea id="script-json" rows="13" spellcheck="false" aria-label="JSON 编辑器"></textarea><p id="script-error" class="error" role="status" hidden></p>
+          <div class="buttons compact wrap"><button id="script-save" class="primary">校验并保存</button><button id="script-copy" data-saved>复制副本</button><button id="script-export" data-saved>导出</button><button id="script-command" data-saved>CLI 命令</button><button id="script-delete" data-saved class="danger">删除</button></div>
+          <div id="command-group" hidden><label for="command-text">复制后替换连接 ID，再用终端执行</label><input id="command-text" readonly></div>
+        </div>
+      </div>
+      <p class="footnote">导入时保留原文件。脚本的正式运行由 MCC CLI 完成。</p>
+    </section>
+  </main>
+</div>
+</body></html>

@@ -7,7 +7,32 @@ let serviceID = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
 let rxID = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
 let txID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
 
-final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+private struct DeviceChoice: Codable {
+    let id: UUID
+    let name: String
+
+    static func saved() throws -> DeviceChoice? {
+        let env = ProcessInfo.processInfo.environment
+        let path = env["MCC_CONFIG_DIR"] ?? (NSHomeDirectory() + "/.config/mcc")
+        guard path.hasPrefix("/") else { throw MBCError.invalid("MCC_CONFIG_DIR 必须为绝对路径") }
+        let descriptor = open(path + "/ble-device.json", O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        if descriptor < 0 {
+            if errno == ENOENT { return nil }
+            throw MBCError.invalid("无法读取 BLE 设备配置")
+        }
+        let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? file.close() }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == geteuid(), (info.st_mode & 0o077) == 0, info.st_size <= 4096,
+              let data = try file.read(upToCount: 4097), data.count <= 4096 else {
+            throw MBCError.invalid("BLE 设备配置必须为当前用户的私有普通文件")
+        }
+        return try JSONDecoder().decode(Self.self, from: data)
+    }
+}
+
+private final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     var central: CBCentralManager!
     var peripheral: CBPeripheral?
     var rx: CBCharacteristic?
@@ -22,10 +47,16 @@ final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     var deadline = Date(timeIntervalSinceNow: 20)
     let hostControlled: Bool
     var commandNumber = 0
+    let device: DeviceChoice?
+    let discovering: Bool
+    var discovered: [UUID: DeviceChoice] = [:]
+    var scanStarted = false
 
-    init(actions: [BLEAction], hostControlled: Bool = false) {
+    init(actions: [BLEAction], hostControlled: Bool = false, device: DeviceChoice? = nil, discovering: Bool = false) {
         self.actions = actions
         self.hostControlled = hostControlled
+        self.device = device
+        self.discovering = discovering
         super.init()
         central = CBCentralManager(delegate: self, queue: nil)
     }
@@ -53,7 +84,21 @@ final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
         let devices = manager.retrieveConnectedPeripherals(withServices: [serviceID, CBUUID(string: "1812")])
-        if let p = devices.first(where: { $0.name == "pilot-2" }) {
+        guard !scanStarted else { return }
+        scanStarted = true
+        if discovering {
+            for p in devices where p.name == "pilot-2" {
+                discovered[p.identifier] = DeviceChoice(id: p.identifier, name: "pilot-2")
+            }
+            for p in manager.retrieveConnectedPeripherals(withServices: [serviceID]) {
+                discovered[p.identifier] = DeviceChoice(id: p.identifier, name: p.name ?? "ESP32")
+            }
+            // Existing pilot-2 firmware advertises HID, not its command service.
+            manager.scanForPeripherals(withServices: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self.done = true }
+        } else if let p = devices.first(where: { matches($0.identifier, $0.name) }) {
+            connect(p)
+        } else if let device, let p = manager.retrievePeripherals(withIdentifiers: [device.id]).first {
             connect(p)
         } else {
             manager.scanForPeripherals(withServices: nil)
@@ -61,10 +106,20 @@ final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
     func centralManager(_ manager: CBCentralManager, didDiscover p: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
         let name = p.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String
-        if name == "pilot-2" { connect(p) }
+        if discovering {
+            let advertised = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+            guard name == "pilot-2" || advertised.contains(serviceID) else { return }
+            if discovered.count < 128 || discovered[p.identifier] != nil {
+                discovered[p.identifier] = DeviceChoice(id: p.identifier, name: name ?? "ESP32")
+            }
+        } else if matches(p.identifier, name) { connect(p) }
+    }
+    private func matches(_ id: UUID, _ name: String?) -> Bool {
+        if let device { return device.id == id }
+        return name == "pilot-2"
     }
     func centralManager(_ manager: CBCentralManager, didConnect p: CBPeripheral) {
-        print("Connected to \(p.name ?? "pilot-2") via BLE")
+        print("Connected to \(p.name ?? device?.name ?? "pilot-2") via BLE")
         p.discoverServices([serviceID])
     }
     func centralManager(_ manager: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
@@ -194,20 +249,51 @@ enum MBCMain {
             var args = Array(CommandLine.arguments.dropFirst())
             let hostControlled = args.first == "--host-controlled"
             if hostControlled { args.removeFirst() }
-            let options = try MBCOptions.parse(args, legacy: legacy)
-            if options.help { print(MBCOptions.usage, terminator: ""); return }
+            var expectedDevice: String?
+            if hostControlled && args.first == "--expected-device" {
+                guard args.count >= 2 else { throw MBCError.invalid("缺少预检的设备标识") }
+                expectedDevice = args[1]
+                args.removeFirst(2)
+            }
+            let discovery = !hostControlled && args == ["--discover-json"]
+            let probe = !hostControlled && args.first == "--probe-json"
+            var explicit: DeviceChoice?
+            // Use a leading option to keep arguments consumed by --type intact.
+            if !hostControlled, args.first == "--device" || probe {
+                guard args.count >= 2, let id = UUID(uuidString: args[1]), !probe || args.count == 2 else {
+                    throw MBCError.invalid("需要有效的蓝牙设备 UUID")
+                }
+                explicit = DeviceChoice(id: id, name: "ESP32")
+                args.removeFirst(2)
+            }
+            let options = try MBCOptions.parse(probe ? ["--status"] : discovery ? ["--help"] : args, legacy: legacy)
+            if !discovery && options.help { print(MBCOptions.usage, terminator: ""); return }
+            let device = discovery ? nil : try explicit ?? DeviceChoice.saved()
+            let selection = device?.id.uuidString ?? "default"
+            if let expectedDevice, selection.caseInsensitiveCompare(expectedDevice) != .orderedSame {
+                throw MBCError.invalid("BLE 设备在预检后已变更，未发送输入")
+            }
             if options.dryRun {
-                let data = try JSONSerialization.data(withJSONObject: ["device": "pilot-2", "commands": options.actions.map(\.preview)], options: [.sortedKeys])
+                var preview: [String: Any] = ["device": device?.name ?? "pilot-2", "deviceSelection": selection, "commands": options.actions.map(\.preview)]
+                if let device { preview["deviceId"] = device.id.uuidString }
+                let data = try JSONSerialization.data(withJSONObject: preview, options: [.sortedKeys])
                 print(String(decoding: data, as: UTF8.self))
                 return
             }
-            let client = Client(actions: options.actions, hostControlled: hostControlled)
+            let client = Client(actions: options.actions, hostControlled: hostControlled, device: device, discovering: discovery)
             while !client.done && Date() < client.deadline {
                 RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
             }
             if !client.done { client.fail("Timed out after 20 seconds; execution uncertain, not retried") }
             client.close()
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+            if !client.failed && discovery {
+                let devices = client.discovered.values.sorted { ($0.name, $0.id.uuidString) < ($1.name, $1.id.uuidString) }
+                print(String(decoding: try JSONEncoder().encode(devices), as: UTF8.self))
+            } else if !client.failed && probe, let p = client.peripheral {
+                let selected = DeviceChoice(id: p.identifier, name: p.name ?? "ESP32")
+                print(String(decoding: try JSONEncoder().encode(selected), as: UTF8.self))
+            }
             exit(client.failed ? 1 : 0)
         } catch {
             FileHandle.standardError.write(Data("ERROR: \(error)\n".utf8))

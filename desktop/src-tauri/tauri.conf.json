@@ -1,0 +1,12 @@
+{
+  "productName": "MCC Control Panel",
+  "version": "0.1.0",
+  "identifier": "com.copis.mcc.control-panel",
+  "build": { "frontendDist": "../web" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "title": "MCC 控制台", "width": 990, "height": 700, "minWidth": 690, "minHeight": 550 }],
+    "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'" }
+  },
+  "bundle": { "active": true, "targets": ["app"], "icon": ["icons/icon.png", "icons/icon.icns"], "macOS": { "minimumSystemVersion": "14.0" } }
+}

@@ -44,6 +44,7 @@ struct ESPBleInput {
     let plan: ESPBlePlan
     let client: URL
     let commands: [String]
+    let expectedDevice: String?
 
     static func clientURL(executable: URL = URL(fileURLWithPath: CommandLine.arguments[0]),
                           path: String = ProcessInfo.processInfo.environment["PATH"] ?? "") throws -> URL {
@@ -81,17 +82,27 @@ struct ESPBleInput {
         process.standardError = FileHandle.nullDevice
         let data = try collect(process, output: output, timeout: 2, check: {})
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              object["device"] as? String == "pilot-2", let commands = object["commands"] as? [String],
+              let device = object["device"] as? String, !device.isEmpty,
+              let commands = object["commands"] as? [String],
               !commands.isEmpty, commands.count <= 16 else {
             throw HelperFailure(code: "BLE_UNSUPPORTED", message: "ESP 输入须为受支持字符和按键，单次最多 16 个固件命令，请缩短文本")
         }
-        return ESPBleInput(plan: plan, client: client, commands: commands)
+        let expectedDevice = object["deviceSelection"] as? String
+        if let expectedDevice {
+            guard expectedDevice == "default" ? device == "pilot-2" : UUID(uuidString: expectedDevice) != nil else {
+                throw HelperFailure(code: "BLE_CLIENT_FAILED", message: "BLE 客户端设备选择回执无效")
+            }
+        } else if object["deviceSelection"] != nil || device != "pilot-2" {
+            throw HelperFailure(code: "BLE_CLIENT_FAILED", message: "BLE 客户端设备选择回执无效")
+        }
+        return ESPBleInput(plan: plan, client: client, commands: commands, expectedDevice: expectedDevice)
     }
 
     func send(cancellation: InputCancellation, permit: ChromeInputPermit, verify: @escaping () throws -> Void) throws {
         let process = Process(), output = Pipe(), input = Pipe()
         process.executableURL = client
-        process.arguments = ["--host-controlled"] + plan.arguments
+        // Fail before any input if the saved selection changed after preflight.
+        process.arguments = ["--host-controlled"] + (expectedDevice.map { ["--expected-device", $0] } ?? []) + plan.arguments
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         process.standardInput = input

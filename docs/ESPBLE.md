@@ -30,6 +30,10 @@ mcc --eb --dry-run --move 52,54 --click
 
 Only the first bare subcommand is translated. Use MBC flags for subsequent actions; for example, use `move 52,54 --click`, not `move 52,54 click`.
 
+## Local device selection
+
+Use the [macOS control panel](CONTROL-PANEL.md) to discover candidates, test firmware status and save a device UUID for this Mac. The new MBC also accepts `--discover-json`, `--probe-json <UUID>` (status only), and a leading `--device <UUID>` before standalone actions. Saved selection applies to both standalone MBC and the local helper's Host-controlled mode, using `ble-device.json` in the MCC config directory. An explicit standalone `--device` overrides it for that invocation. With no selection, MBC still looks for `pilot-2`; a configured UUID does not fall back to another device. These settings do not change macOS HID pairing.
+
 ## JSON scripts
 
 `mcc script --connection <id> --file /absolute/flow.json` also works with the existing `--remote` prefix. Set `"eb":true` on each desired input step; other steps retain the original backend. Script coordinates are window screenshot pixels, as for per-operation Host input. See [JSON format, examples and execution limits](SCRIPT.md).

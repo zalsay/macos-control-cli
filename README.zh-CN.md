@@ -6,7 +6,7 @@
 
 此前补丁：Git tag 为 **0.3.5.1**，Cargo/功能包/CLI 版本为 **0.3.5+1**（Cargo 不接受四段版本号）。本补丁更新 `--help`，修复状态回执对版本元数据 `+` 的兼容，不改变输入与安全门禁。见[版本说明](docs/RELEASE-0.3.5.1.md)。
 
-[English](README.md) · [完整使用说明](USAGE.md) · [Agent 接入指南](docs/AGENT-INTEGRATION.md)
+[English](README.md) · [完整使用说明](USAGE.md) · [Agent 接入指南](docs/AGENT-INTEGRATION.md) · [macOS 配置面板](docs/CONTROL-PANEL.md)
 
 使用 **Rust + Swift** 实现的独立 macOS 应用窗口自动化 CLI。面向能执行命令、读取本地图片的 Agent，**不依赖 Electron、Node.js、Bun、浏览器扩展或 Chrome 远程调试端口**。
 

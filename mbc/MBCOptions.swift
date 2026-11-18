@@ -42,6 +42,9 @@ struct MBCOptions {
       mbc --move 52,54 --click
       mbc --click 52,54
       mbc --type 'Hello 123!' --key enter
+      macos-ble-control --discover-json
+      macos-ble-control --probe-json <UUID>
+      macos-ble-control --device <UUID> --status
       macos-ble-control --status
 
     操作按参数顺序执行，逐条等待固件回执。每次连接/每条命令超时 20 秒；

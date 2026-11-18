@@ -1430,6 +1430,14 @@ pub fn run(options: HostOptions, scope: Scope) -> Result<Value> {
         .map_err(|_| fail("REMOTE_SIGNAL_FAILED"))?;
         signals.0.push(id);
     }
+    // The desktop supervisor opts in; existing CLI callers retain one final JSON line.
+    if std::env::var_os("MCC_HOST_READY").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        use std::io::Write;
+        let mut output = std::io::stdout().lock();
+        writeln!(output, "{}", json!({"hostReady":true,"listen":options.listen.to_string(),"recoveryRequired":recovery}))
+            .and_then(|()| output.flush())
+            .map_err(|e| crate::protocol::Error::io("无法写入 Host 启动回执", e))?;
+    }
     let admission = Admission::new();
     let backends: BackendThreads = Arc::new(Mutex::new(Vec::new()));
     let mut workers = Vec::new();

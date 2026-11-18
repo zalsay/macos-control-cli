@@ -69,7 +69,9 @@ func fixture(_ mode: String, count: Int = 2) throws -> (URL, URL) {
     import json,sys,time
     commands = ['move 15 28', 'scroll -3'] if \(count) == 2 else ['key space'] * \(count)
     if '--dry-run' in sys.argv:
-        print(json.dumps({'device':'pilot-2', 'commands':commands})); sys.exit(0)
+        selection = {'device': 'ESP Lab', 'deviceSelection': 'CD579B26-0054-4C51-9E71-04FA92234E60'} if '\(mode)' == 'selected' else {'device': 'pilot-2'}
+        print(json.dumps(dict(selection, commands=commands))); sys.exit(0)
+    if '\(mode)' == 'selected' and sys.argv[1:4] != ['--host-controlled', '--expected-device', 'CD579B26-0054-4C51-9E71-04FA92234E60']: sys.exit(4)
     for index, command in enumerate(commands):
         print('HOST_READY ' + str(index if '\(mode)' != 'bad-ready' else 99), flush=True)
         if sys.stdin.readline().strip() != 'GO ' + str(index): sys.exit(2)
@@ -92,6 +94,11 @@ let delivered = try String(contentsOf: trace, encoding: .utf8)
 require(verified == 2 && delivered == "0\n1\n", "authorize each packet once after verifying focus")
 require(success.canConfirmInputStopped, "complete ACKs clear pending delivery")
 require(success.pauseForUserInteraction(lease: successPermit.lease, timestamp: 5, pointer: true), "physical pointer monitoring resumes outside BLE packet intervals")
+
+let (selectedClient, selectedTrace) = try fixture("selected")
+let (selectedControl, selectedPermit) = try control()
+try ESPBleInput.preflight(plan: ble.plan, client: selectedClient).send(cancellation: selectedControl, permit: selectedPermit, verify: {})
+require(try String(contentsOf: selectedTrace, encoding: .utf8) == "0\n1\n", "Host pins selected UUID from preflight through dispatch")
 
 let (pausedClient, pausedTrace) = try fixture("success")
 let (paused, pausedPermit) = try control()

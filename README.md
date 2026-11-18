@@ -6,7 +6,7 @@ Version **4.0.0** includes persistent Firefox profiles, system mouse/keyboard ev
 
 Previous patch: Git tag **0.3.5.1**, Cargo/package/CLI version **0.3.5+1** (Cargo requires three-component SemVer). This patch refreshes `--help` and accepts numeric build metadata in status receipts; existing input and security behavior is unchanged. See [release notes](docs/RELEASE-0.3.5.1.md).
 
-[简体中文](README.zh-CN.md) · [Usage reference](USAGE.md) · [Agent integration](docs/AGENT-INTEGRATION.md)
+[简体中文](README.zh-CN.md) · [Usage reference](USAGE.md) · [Agent integration](docs/AGENT-INTEGRATION.md) · [macOS control panel](docs/CONTROL-PANEL.md)
 
 A standalone **Rust + Swift** CLI for observing and controlling local macOS application windows. Designed for agents that can execute commands and read local images. **No Electron, Node.js, Bun, browser extension, or Chrome remote-debugging port is required.**
 
