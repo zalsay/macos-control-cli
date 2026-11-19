@@ -10,6 +10,7 @@
       <button class="nav active" data-page="host" aria-current="page"><span aria-hidden="true">◈</span> Host 服务</button>
       <button class="nav" data-page="ble"><span aria-hidden="true">⌁</span> 蓝牙设备</button>
       <button class="nav" data-page="scripts"><span aria-hidden="true">{ }</span> 脚本库</button>
+      <button class="nav" data-page="settings"><span aria-hidden="true">⚙</span> 客户端设置</button>
     </nav>
     <div class="rail-footer"><span class="dot"></span> 本机配置 <span class="version">0.1</span></div>
   </aside>
@@ -56,6 +57,28 @@
         </div>
       </div>
       <p class="footnote">导入时保留原文件。脚本的正式运行由 MCC CLI 完成。</p>
+    </section>
+    <section id="settings" aria-labelledby="settings-title" hidden>
+      <header><div class="eyebrow">MCC / CLIENT</div><h1 id="settings-title">客户端设置</h1><p>管理此 Mac 上用于语义点击的 Jev 模型配置。</p></header>
+      <div class="card">
+        <div class="card-heading"><div><h2>Jev / Decisions API</h2><small id="jev-default">尚未读取默认配置</small></div><button id="jev-refresh" type="button">刷新</button></div>
+        <div id="jev-profiles" class="item-list" aria-label="Jev 配置项"></div>
+        <button id="jev-new" type="button">新建配置</button>
+      </div>
+      <form id="jev-form">
+        <div class="card jev-editor">
+          <fieldset id="jev-fields">
+            <legend id="jev-editor-title">新建配置</legend>
+            <label for="jev-name">配置名称</label><input id="jev-name" pattern="[A-Za-z0-9_\-]{1,64}" maxlength="64" placeholder="jev" required autocomplete="off" spellcheck="false">
+            <label for="jev-url">Decisions API 完整 URL</label><input id="jev-url" type="url" placeholder="https://provider.example/api/decisions" maxlength="2048" required autocomplete="off" spellcheck="false">
+            <label for="jev-model">模型名称</label><input id="jev-model" maxlength="256" placeholder="provider/model" required autocomplete="off" spellcheck="false">
+            <label for="jev-key">API key</label><input id="jev-key" type="password" maxlength="1024" required autocomplete="new-password" spellcheck="false">
+            <small id="jev-key-note">新配置需要 API key。</small>
+            <div class="buttons wrap jev-actions"><button id="jev-save" type="submit" class="primary">保存配置</button><button id="jev-make-default" type="button" hidden>设为默认</button><button id="jev-toggle" type="button" hidden>停用</button></div>
+          </fieldset>
+        </div>
+      </form>
+      <p class="footnote">本机运行和本机 Host 使用这份配置。通过 <code>--remote</code> 发起操作时，由远端 Host 读取它自己的 Jev 配置。</p>
     </section>
   </main>
 </div>

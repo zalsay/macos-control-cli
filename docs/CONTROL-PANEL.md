@@ -1,6 +1,6 @@
 # MCC 控制台（macOS）
 
-MCC 控制台是单独构建的 Tauri App，管理本机 Host、MBC 的 ESP32 目标和 JSON 脚本库。要求 macOS 14 或更新版本。App 本身不包含 MCC、MBC 或原生 helper；请用同一份源码构建完整 MCC 包，再在 App 里选择包目录。
+MCC 控制台是单独构建的 Tauri App，管理本机 Host、MBC 的 ESP32 目标、JSON 脚本库和 Jev 配置。要求 macOS 14 或更新版本。App 本身不包含 MCC、MBC 或原生 helper；请用同一份源码构建完整 MCC 包，再在 App 里选择包目录。
 
 ## 构建并打开
 
@@ -32,3 +32,9 @@ open 'src-tauri/target/debug/bundle/macos/MCC Control Panel.app'
 可新建、导入、校验、搜索、编辑、复制和导出 [MCC JSON 脚本](SCRIPT.md)。`eb: true` 的步骤会在编辑器顶部标出；校验失败会显示步骤编号（如适用）。删除只移除库内副本。保存后点「CLI 命令」复制模板，将连接 ID（需要时也包括帧 ID）替换为当前会话的实际值。流程仍通过 `mcc script` 执行；面板中没有运行脚本的入口。
 
 面板配置和脚本库存于 `<MCC_CONFIG_DIR>/control-panel/`，默认 `~/.config/mcc/control-panel/`。CLI 命令使用的库内导出路径会在再次复制命令时更新，独立导出文件则不随库变更。
+
+## 客户端设置：Jev
+
+在「客户端设置」新建或编辑配置，填写完整 Decisions API URL、模型名称和 API key。可选择默认配置，也可分别启用或停用已有配置。保存到 MCC 共用的 `models.toml`，不需要重启服务。已有密钥只显示 `sk-********` 这样的掩码提示；端点不变时留空可保留原密钥，更换端点时须重新输入密钥。保存配置不会发送模型请求。
+
+本机命令及使用同一 `MCC_CONFIG_DIR` 的本机 Host 共享此配置。连接其他机器时，`mcc --remote` 使用远端 Host 自己的配置。完整字段和限制见 [Jev 模型配置](MODEL-CONFIG.md)。

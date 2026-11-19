@@ -271,21 +271,32 @@ impl Store {
         }
         Ok(models)
     }
-    fn summary(&self) -> Result<Value> {
+    /// Desktop-only view: show a short key prefix without returning the key or its length.
+    pub fn model_summary_for_panel(&self) -> Result<Value> {
+        self.model_summary(|model| {
+            json!({"url":model.url,"model":model.model,"enabled":model.enabled,
+                "key_preview": key_preview(&model.api_key)})
+        })
+    }
+    fn model_summary(&self, project: impl Fn(&Model) -> Value) -> Result<Value> {
         let models = self.models()?;
-        let (max_width_px, profile) = self.chrome_start_settings()?;
         let mut views = BTreeMap::new();
         for (name, model) in &models.models {
-            views.insert(name, masked(model));
+            views.insert(name, project(model));
         }
-        let mut summary = json!({
+        Ok(json!({
             "models_path":self.directory.join("models.toml"),
-            "config_path":self.directory.join("config.toml"),
             "configured":models.default_model.is_some(),
             "default_model":models.default_model,
-            "models":views,
-            "chrome":{"window":{"position":"left","height":"available","max_width_px":max_width_px}}
-        });
+            "models":views
+        }))
+    }
+    fn summary(&self) -> Result<Value> {
+        let mut summary = self.model_summary(masked)?;
+        let (max_width_px, profile) = self.chrome_start_settings()?;
+        summary["config_path"] = json!(self.directory.join("config.toml"));
+        summary["chrome"] =
+            json!({"window":{"position":"left","height":"available","max_width_px":max_width_px}});
         if let Some(profile) = profile {
             summary["chrome"]["profile"] = json!(profile);
         }
@@ -382,6 +393,19 @@ struct Lock(PathBuf);
 impl Drop for Lock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+fn key_preview(key: &str) -> String {
+    // Validated model keys are ASCII. Never reveal the whole prefix of a short key.
+    const MASK: &str = "********";
+    if key.len() <= 3 {
+        return MASK.into();
+    }
+    let prefix: String = key.chars().take(3).take_while(|&c| c != '-').collect();
+    if prefix.is_empty() {
+        MASK.into()
+    } else {
+        format!("{prefix}-{MASK}")
     }
 }
 fn masked(model: &Model) -> Value {

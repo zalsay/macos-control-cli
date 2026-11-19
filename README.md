@@ -1,36 +1,62 @@
 # macOS Control CLI
 
-Version **4.0.0** adds an isolated Ubuntu 22.04 desktop with Xvfb, Openbox, Firefox/X11 and noVNC. See the [Docker guide](docs/MCC-DOCKER.md) for startup, password setup and CLI usage. This mode controls applications inside its container.
+[简体中文](README.zh-CN.md) · [Command reference](USAGE.md) · [Agent integration](docs/AGENT-INTEGRATION.md) · [macOS control panel](docs/CONTROL-PANEL.md)
 
-Version **4.0.0** includes persistent Firefox profiles, system mouse/keyboard events without WebDriver, authenticated remote Host control, file transfer for web uploads, shared model configuration, and idle Docker connection handoff. See [release notes](docs/RELEASE-4.0.0.md) for validation boundaries. Host soft-pause takeover from 0.3.6 is retained; explicit stops, transport uncertainty and recovery locks remain blocked.
+**MCC** controls application windows on macOS: inspect a window with screenshots and OCR, send native mouse and keyboard input, or hand an operation to an authenticated remote Host. The macOS CLI uses Rust and Swift and does not require a browser extension or Chrome remote debugging. Use `mcc` (or `desktop-control`) for ordinary app windows; use `copis-chrome` for the Chrome-only entry point.
 
-Previous patch: Git tag **0.3.5.1**, Cargo/package/CLI version **0.3.5+1** (Cargo requires three-component SemVer). This patch refreshes `--help` and accepts numeric build metadata in status receipts; existing input and security behavior is unchanged. See [release notes](docs/RELEASE-0.3.5.1.md).
+The `4.0.0` baseline also supports an [isolated Ubuntu desktop in Docker](docs/MCC-DOCKER.md) with Firefox/X11 and noVNC. It controls applications inside the container. See the [4.0.0 release notes](docs/RELEASE-4.0.0.md) for coverage and validation limits.
 
-[简体中文](README.zh-CN.md) · [Usage reference](USAGE.md) · [Agent integration](docs/AGENT-INTEGRATION.md) · [macOS control panel](docs/CONTROL-PANEL.md)
+## Feature availability
 
-A standalone **Rust + Swift** CLI for observing and controlling local macOS application windows. Designed for agents that can execute commands and read local images. **No Electron, Node.js, Bun, browser extension, or Chrome remote-debugging port is required.**
+The `main` branch includes the JSON script runner, macOS control panel with Jev settings, and dynamic BLE display sync. Build from `main` to use these features; existing installations and older release packages do not pick them up automatically.
 
-Version **0.2.3** adds the default **`mcc`** command, a user-level `sh` installer and [verified native authorization dialogs](docs/NATIVE-DIALOGS.md). `mcc` and `desktop-control` share desktop mode; **`copis-chrome` remains Chrome-only**. Existing entry points and JSON protocol **1** stay compatible.
+## JSON workflows
 
-## Model configuration and controlled Chrome launch (v0.3.0)
+Save operations in a versioned [JSON step file](docs/SCRIPT.md), then use an existing connection:
 
-`mcc --config` manages private `~/.config/mcc/models.toml` profiles with full Decisions API `url`, `api_key`, and `model`. Use `--config set <name> --url <url> --model <model> --api-key-stdin` then `--config default <name>`. No implicit `.env`/environment credential fallback; `--jev-key` overrides only the current configured call. Keys are masked in output.
+```bash
+mcc script --connection "$CONNECTION_ID" --file /absolute/flow.json
+```
 
-`mcc chrome start --url https://example.com/` creates a **new** verified Chrome window, lays it out at the main usable desktop's left edge and full usable height, then returns the original connection contract. Width defaults to at most1600 original pixels (`mcc --config window --max-width 1600`); it never moves another window. Original-pixel capture limits are width1600/height8192 and JPEG<1MiB; no resampling.
+Example of an observation followed by a single ESP click. Replace the sample coordinates with a point in the target window screenshot:
 
-`mcc click-target --connection <id> --target 'Save'` sends only target and OCR ID/label pairs to the configured Decisions endpoint. The returned ID resolves coordinates locally and follows the original click safety path, with no additional OCR recheck. `click_sent` / `effectVerified:false` is event delivery, **not business completion**. See [model configuration](docs/MODEL-CONFIG.md), [Chrome startup](docs/CHROME-START.md), and [semantic click/privacy](docs/JEV-CLICK-TARGET.md).
+```json
+{
+  "version": 1,
+  "steps": [
+    { "action": "observe" },
+    { "action": "click", "x": 100, "y": 200, "eb": true }
+  ]
+}
+```
 
-**v0.3.1:** `permissions` now reports Chrome automation alongside screen recording/accessibility; `permissions --request` explicitly requests all three. Normal startup only checks. See [authorization and live validation](docs/V031-VERIFICATION.md).
+The runner reuses the connection and latest frame. Use `--frame` if the first input needs an existing frame. It checks the entire file before dispatch. A step failure or pause stops later steps and reports progress; completed input is not rolled back or automatically retried. Limits: 32 KiB per file, 64 steps, and 10 seconds of explicit waits in total. Add the [usual `--remote` options](docs/REMOTE-HOST.md) before `script` to submit the whole file to a compatible Host in one request.
 
-**v0.3.2:** `chrome start --profile <Chrome display name>` selects an existing Chrome profile. Optional defaults use `--config chrome --profile <name>` / `--clear-profile`; unknown or duplicate names fail instead of falling back. See [Chrome profiles](docs/CHROME-PROFILES.md).
+## ESP32 BLE input
 
-**v0.3.3:** Model profiles support `enabled` and local `--config enable <name>` / `disable <name>` commands. Legacy profiles default to enabled; a disabled default blocks `click-target` with `MODEL_DISABLED` before daemon/model activity without affecting ordinary OCR or coordinate clicks. See [model configuration](docs/MODEL-CONFIG.md).
+The macOS package includes [`mbc` / `macos-ble-control`](mbc/README.md). Standalone commands use `0–100` integer percentages of the main display:
 
-**v0.3.4:** Built-in authenticated WSS Host and explicit `--remote` client, private CA/IP certificate and token provisioning, cross-process sessions, bounded screenshot transfer, and pause-preserving cancellation through the original executor. Browser/OCR/Jev/input run on the Host; no local helper or local model configuration is used. See [remote Host setup and validation boundaries](docs/REMOTE-HOST.md).
+```bash
+mcc --eb status
+mbc --move 52,54
+mbc --click 52,54
+```
 
-**ESP32 BLE:** `mcc --eb status`, `mcc --eb move 52,54`, `mcc --eb click 52,54`, and `mcc --eb type 'Hello'` reuse the [MBC client in this project](mbc/README.md). Ordinary Host input commands also accept per-operation `--eb` (`eb:true` in requests), retaining screenshot-pixel coordinates and MCC JSON. Full builds bundle `mbc` and `macos-ble-control`; `--eb` prefers its sibling client and retains PATH lookup for compatibility. The standalone prefix form uses integer screen percentages and passes through MBC's output and exit status without starting a desktop daemon. Run `mcc --eb --help` or see [ESP BLE commands](docs/ESPBLE.md). Installed MCC is not updated automatically.
+Ordinary MCC input operations that support `--eb`, and JSON steps with `"eb": true`, still use the existing window and frame checks. In this mode, `x` and `y` are **window screenshot pixels**. For standalone commands and Host input, the Mac that receives the HID events sends its current main-display dimensions to pilot‑2 and waits for an acknowledgement before moving or clicking. The remote caller's display size is irrelevant.
 
-**JSON scripts:** `mcc script --connection <id> --file /absolute/flow.json` runs multiple existing operations locally or through `--remote` in one Host request. Each input step can select ESP using `"eb":true`. See [format, examples and limits](docs/SCRIPT.md).
+Dynamic sync requires **both an updated MBC and pilot‑2 firmware that supports `screen`**. MCC ships the Mac client, not the firmware source or image. Old firmware rejects the sync, so the new client stops before sending pointer input. See [ESP BLE commands and limits](docs/ESPBLE.md).
+
+## macOS control panel
+
+The [Tauri control panel](docs/CONTROL-PANEL.md) manages a local Host's listen address, port, TLS and token file; tests and selects an ESP32 device; and imports, edits, validates and exports JSON scripts. The library manages scripts; execution stays in `mcc script`. The `.app` is built separately and uses the complete MCC package selected in its Host page.
+
+Use **Client Settings → Jev** for managing the Decisions endpoint, model, API key, default profile and enablement. It shares MCC's `models.toml` and shows saved keys only as a mask such as `sk-********`. A remote operation always uses the remote Host's Jev settings.
+
+## Model configuration and Chrome launch
+
+Use `mcc --config` to manage [named Jev profiles](docs/MODEL-CONFIG.md). The CLI uses `--api-key-stdin` to receive keys, and `--config default <name>` to select a profile. A disabled default blocks `click-target` without affecting ordinary OCR or coordinate input. [`click-target`](docs/JEV-CLICK-TARGET.md) sends the requested target and OCR ID/label pairs to the configured Decisions endpoint.
+
+[`mcc chrome start --url …`](docs/CHROME-START.md) opens and connects to a new Chrome window. It accepts `--profile <display-name>` for an [existing Chrome profile](docs/CHROME-PROFILES.md). Historical CLI changes are documented in the [0.3.5.1 release notes](docs/RELEASE-0.3.5.1.md) and [earlier verification notes](docs/README.md).
 
 ## Features
 
@@ -40,7 +66,7 @@ Version **0.2.3** adds the default **`mcc`** command, a user-level `sh` installe
 - Click, scroll, type Unicode text, and send a restricted set of keys.
 - Select a local file through the connected Chrome window's native Open dialog.
 - Run a local daemon over a private Unix socket; reuse a connection across CLI calls.
-- Show a native control panel with a three-second takeover countdown, pause/resume, and close controls.
+- Show a native window overlay with a three-second takeover countdown, pause/resume, and close controls.
 - Pause input when the user takes over the mouse or switches applications. Existing queued input is not replayed.
 
 This is **desktop GUI automation**, not DOM automation or an isolated browser. Input may activate the selected application and use the real desktop mouse and keyboard. Observation does not require bringing it to the foreground.
@@ -84,12 +110,12 @@ Identical reinstalls preserve the installed version. Unrelated commands and diff
 | Build | Rust 1.89 or later and Xcode Command Line Tools |
 | Architectures | Build natively on Apple Silicon or Intel; no cross-platform package substitution |
 
-Binary users do not need Rust or Xcode. Apple Silicon has been exercised locally; Intel distribution needs a native Intel build and validation. Other applications require per-app validation; this does not promise compatibility with every macOS application. Windows and Linux desktop automation are not supported.
+Binary users do not need Rust or Xcode. Apple Silicon has been exercised locally; Intel distribution needs a native Intel build and validation. Other applications require per-app validation; this does not promise compatibility with every macOS application. The table describes the macOS build. On Linux, see the separate Docker/X11 mode described above. Windows is unsupported.
 
 ## Build from source
 
 ```bash
-git clone git@github.com:zalsay/macos-control-cli.git
+git clone --branch main git@github.com:zalsay/macos-control-cli.git
 cd macos-control-cli
 bash ./build.sh
 ```
@@ -205,10 +231,13 @@ This is a format example, not a complete CLI response. `bbox` encloses **text**,
 | Command | Purpose |
 |---|---|
 | `permissions [--request]` | Inspect/request macOS permissions |
-| `windows` | List eligible Chrome windows |
+| `windows` | List eligible windows in the current scope |
 | `connect --window <id>` | Connect to one window |
 | `observe --connection <id> [--out <new.jpg>]` | Capture a frame and OCR text; optionally export the image |
-| `click` / `scroll` / `type` / `press` | Input using a connection and frame |
+| `click` / `scroll` / `type` / `press` | Input using a connection and frame; add `--eb` for supported ESP input |
+| `click-target --connection <id> --target <description>` | Jev semantic click using window OCR |
+| `script --connection <id> --file <absolute-json>` | Run the JSON steps locally or through Host |
+| `mcc --eb status` / `mbc --help` | Check ESP32 status or view standalone BLE commands |
 | `select-file --connection <id> --path <absolute-file>` | Complete an already-open native file picker |
 | `disconnect --connection <id>` | Release the connection and temporary frames |
 | `daemon start\|stop\|status` | Manage the local daemon |
@@ -279,7 +308,7 @@ These file-picker fixtures do not upload files. See [documentation index](docs/R
 - Minimized windows, other Spaces, locking the screen, or real overlays may prevent capture/input.
 - Exact native window/pointer ownership uses non-public macOS symbols. OS updates can break this mapping; uncertain ownership is rejected, not bypassed.
 - The `copis-chrome` name, Copis logo, default `~/.copis/chrome-desktop-cli` runtime, and AGPL license are retained from the original independent Copis component. Existing integrations remain compatible. Prefer a private runtime for standalone use.
-- This repository builds the component itself. Copis Electron/COS deployment scripts are **not included or required**; related documents are marked historical integration notes.
+- This repository builds MCC, MBC and the separate Tauri control panel. Copis Electron/COS deployment scripts are **not included or required**; related documents are marked historical integration notes.
 
 ## License
 

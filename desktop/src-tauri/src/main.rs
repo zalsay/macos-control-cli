@@ -1,3 +1,5 @@
+mod jev;
+
 mod host;
 mod store;
 
@@ -21,6 +23,37 @@ struct App {
     host: Arc<host::Host>,
     quitting: AtomicBool,
     ble: Arc<std::sync::Mutex<()>>,
+}
+
+#[tauri::command]
+fn jev_summary(app: State<'_, App>) -> Result<Value> {
+    jev::summary(&copis_chrome::config::Store::new(app.store.shared.clone()))
+}
+
+#[tauri::command]
+fn jev_save(
+    app: State<'_, App>,
+    name: String,
+    url: String,
+    model: String,
+    key: Option<String>,
+) -> Result<Value> {
+    jev::save(
+        &copis_chrome::config::Store::new(app.store.shared.clone()),
+        &name,
+        &url,
+        &model,
+        key.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn jev_change(app: State<'_, App>, name: String, operation: jev::Operation) -> Result<Value> {
+    jev::change(
+        &copis_chrome::config::Store::new(app.store.shared.clone()),
+        &name,
+        operation,
+    )
 }
 
 #[tauri::command]
@@ -268,6 +301,9 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            jev_summary,
+            jev_save,
+            jev_change,
             settings,
             save_settings,
             choose_path,

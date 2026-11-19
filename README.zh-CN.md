@@ -1,36 +1,62 @@
 # macOS Control CLI
 
-**4.0.0** 提供独立的 Ubuntu 22.04 容器桌面：Xvfb、Openbox、Firefox/X11 与 noVNC。启动、密码设置和命令见 [Docker 使用说明](docs/MCC-DOCKER.md)，从宿主调用见 [mccd 使用指南](docs/MCCD-USAGE.md)。此模式控制容器内应用，不连接宿主桌面。
+[English](README.md) · [命令手册](USAGE.md) · [Agent 接入](docs/AGENT-INTEGRATION.md) · [macOS 控制台](docs/CONTROL-PANEL.md)
 
-**4.0.0** 包含 Firefox profile 持久化、无 WebDriver 的系统键鼠事件、远程 Host 控制、网页上传文件通道、模型配置及 Docker 空闲连接跨客户端续用。验证边界见 [版本说明](docs/RELEASE-4.0.0.md)。保留 0.3.6 的 Host 软暂停自动接管；明确停止、传输不确定状态和恢复锁不自动解除。
+**MCC** 用于观察和控制 macOS 应用窗口：截图、OCR、原生键鼠输入，也可把操作交给通过身份验证的远程 Host。macOS CLI 使用 Rust + Swift，无需浏览器扩展或 Chrome 远程调试。普通应用窗口用 `mcc`（或 `desktop-control`），仅控制 Chrome 的兼容入口是 `copis-chrome`。
 
-此前补丁：Git tag 为 **0.3.5.1**，Cargo/功能包/CLI 版本为 **0.3.5+1**（Cargo 不接受四段版本号）。本补丁更新 `--help`，修复状态回执对版本元数据 `+` 的兼容，不改变输入与安全门禁。见[版本说明](docs/RELEASE-0.3.5.1.md)。
+`4.0.0` 基线也支持 [Docker 独立 Ubuntu 桌面](docs/MCC-DOCKER.md)，通过 Firefox/X11 和 noVNC 操作容器内应用。宿主调用方式见 [mccd 指南](docs/MCCD-USAGE.md)，验证范围见 [4.0.0 版本说明](docs/RELEASE-4.0.0.md)。
 
-[English](README.md) · [完整使用说明](USAGE.md) · [Agent 接入指南](docs/AGENT-INTEGRATION.md) · [macOS 配置面板](docs/CONTROL-PANEL.md)
+## 源码与安装包
 
-使用 **Rust + Swift** 实现的独立 macOS 应用窗口自动化 CLI。面向能执行命令、读取本地图片的 Agent，**不依赖 Electron、Node.js、Bun、浏览器扩展或 Chrome 远程调试端口**。
+`main` 已包含 JSON 脚本、带 Jev 设置的 macOS 控制台和蓝牙动态主屏同步。要使用这些功能，请从 `main` 构建；既有安装和旧安装包不会自动更新。
 
-**0.2.3** 新增默认命令 **`mcc`**、用户级 `sh` 安装脚本和[受控原生授权弹窗](docs/NATIVE-DIALOGS.md)支持。`mcc` 与 `desktop-control` 共用通用模式；**`copis-chrome` 保持仅支持 Chrome**，旧入口与 JSON 协议 **1** 均兼容。
+## JSON 多步脚本
 
-**JSON 多步脚本：** `mcc script --connection <id> --file /absolute/flow.json` 在本机或 `--remote` Host 一次执行多步，输入步骤用 `"eb":true` 选择 ESP。格式、示例、暂停及失败进度见 [脚本说明](docs/SCRIPT.md)。
+将操作写进带版本的 [JSON 步骤文件](docs/SCRIPT.md)，然后指定已有连接：
 
-## 通用模型配置与 Chrome 固定布局（v0.3.0）
+```bash
+mcc script --connection "$CONNECTION_ID" --file /absolute/flow.json
+```
 
-`mcc --config` 管理 `~/.config/mcc/models.toml` 的完整 Decisions `url`、`api_key`、`model`；支持 `set <name> --url <url> --model <model> --api-key-stdin`、`show <name>`、`default <name>`。文件0600，回执脱敏；不再隐式读 `.env`/环境 API key，`--jev-key` 仅覆盖已配置 profile 的本次调用。迁移与格式见 [通用模型配置](docs/MODEL-CONFIG.md)。
+下面先观察窗口，再用 ESP 点击一次。示例坐标应换成目标窗口截图中的实际像素位置：
 
-`mcc chrome start --url https://creator.xiaohongshu.com/` **新建并验证**本次 Chrome 窗口，主屏可用区左对齐、占满可用高度，再返回原 connect 的 connectionId。宽度默认最多1600原像素，可用 `mcc --config window --max-width 1600` 配置，不移动其他旧窗、不持续钉回。截图保留原像素，宽1600/高8192与JPEG<1MiB的上限仍明确拒绝，不缩图兜底。详见 [Chrome启动与布局](docs/CHROME-START.md)。
+```json
+{
+  "version": 1,
+  "steps": [
+    { "action": "observe" },
+    { "action": "click", "x": 100, "y": 200, "eb": true }
+  ]
+}
+```
 
-`mcc click-target --connection <id> --target '保存按钮'` 将 target 与 OCR ID/文字交给配置的 Decisions 端点，返回ID后本地查同帧坐标，直接复用原点击链路；没有新增OCR复核，原窗口/焦点/暂停等安全门禁不变。允许有效的截断OCR；`click_sent` / `effectVerified:false` 只表示投递，不证明登录等业务完成。完整隐私、阈值与限制见 [Jev点击契约](docs/JEV-CLICK-TARGET.md)。
+脚本沿用同一个连接和最近的帧。若要从已有帧开始输入，可加 `--frame`。执行前先校验整个文件；某步失败或暂停就停止后续操作，并返回进度。已投递的动作不回滚、不自动重试。每个文件最多 32 KiB、64 步，显式等待合计最多 10 秒。将[现有 `--remote` 参数](docs/REMOTE-HOST.md)放到 `script` 前，可一次把整份脚本交给兼容的 Host 执行。
 
-**v0.3.1修复：** `permissions` 查询三项权限（含Chrome自动化），`permissions --request` 统一显式申请，由本人确认；普通启动只读检查。授权与新窗布局已完成本机实测，见 [v0.3.1验证](docs/V031-VERIFICATION.md)。
+## ESP32 蓝牙输入
 
-**v0.3.2新增：** `chrome start --profile <Chrome显示名称>` 指定已有profile；`--config chrome --profile <名称>` / `--clear-profile` 设置或清除可选默认值。缺失/重名拒绝，不创建profile或静默换账号。见 [Chrome profile说明](docs/CHROME-PROFILES.md)。
+macOS 功能包自带 [`mbc` / `macos-ble-control`](mbc/README.md)。独立命令使用主屏的 `0–100` 整数百分比：
 
-**v0.3.3新增：** 模型profile支持`enabled`布尔配置，`mcc --config enable <名称>` / `disable <名称>`启用或禁用。旧配置默认启用；禁用默认模型时`click-target`返回`MODEL_DISABLED`，普通OCR/坐标点击不受影响。见 [模型配置](docs/MODEL-CONFIG.md)。
+```bash
+mcc --eb status
+mbc --move 52,54
+mbc --click 52,54
+```
 
-**v0.3.4新增：** 内置公网WSS Host与显式`--remote`客户端，支持私有CA/IP证书和独立token初始化、跨CLI会话、截图回传及原执行器保持暂停的断线取消。Chrome/OCR/Jev/输入在Host执行，本地不启动helper或读取模型配置；部署、恢复及实测边界见 [远端Host](docs/REMOTE-HOST.md)。
+MCC 中支持 `--eb` 的输入命令、以及使用 `"eb": true` 的 JSON 步骤，仍沿用窗口和帧校验，`x`、`y` 使用**窗口截图像素**。独立命令和 Host 模式都会在移动或点击前，让接收键鼠事件的 Mac 把当前主屏尺寸发给 pilot‑2，收到确认后再执行。远程执行以 Host Mac 为准。
 
-**ESP32 蓝牙控制：** `mcc --eb status`、`mcc --eb move 52,54`、`mcc --eb click 52,54`、`mcc --eb type 'Hello'` 复用[项目内 MBC 客户端](mbc/README.md)。Host 普通输入命令追加 `--eb`（请求字段 `eb:true`）可仅该次使用 ESP32，仍使用截图像素坐标和 MCC JSON。完整构建包含 `mbc` 与 `macos-ble-control`，`--eb` 优先调用同目录客户端，缺失时兼容 PATH 查找。独立前缀形式使用整数屏幕百分比，并直接透传 BLE 输出和退出码，不启动桌面 daemon。专项帮助运行 `mcc --eb --help`，详见 [ESP BLE 接口](docs/ESPBLE.md)。未更新本机已安装的 MCC。
+动态同步要求**新版 MBC 和支持 `screen` 命令的 pilot‑2 固件**。MCC 功能包只包含 Mac 客户端，固件源码和镜像不在本仓库。旧固件拒绝同步时，新客户端会停止本次指针操作。详见 [ESP BLE 命令与限制](docs/ESPBLE.md)。
+
+## macOS 控制台
+
+[Tauri 控制台](docs/CONTROL-PANEL.md)可设置本机 Host 的监听地址、端口、TLS 与 token 文件；测试并选择 ESP32；导入、编辑、校验和导出 JSON 脚本。面板管理脚本，执行仍使用 `mcc script`。`.app` 单独构建，打开后在 Host 页选择与之配套的完整 MCC 功能包。
+
+在 **客户端设置 → Jev** 中可编辑 Decisions 端点、模型和 API key，并设置默认项及启停。与 MCC 共用 `models.toml`，已保存密钥只显示 `sk-********` 这类掩码。远端操作仍读取远端 Host 自己的 Jev 配置。
+
+## 模型配置与 Chrome 启动
+
+CLI 使用 `mcc --config` 管理[命名 Jev 配置](docs/MODEL-CONFIG.md)，通过 `--api-key-stdin` 输入密钥，使用 `--config default <名称>` 设置默认项。禁用默认模型会拦截 `click-target`，普通 OCR 和坐标输入不受影响。[语义点击](docs/JEV-CLICK-TARGET.md)把目标描述及 OCR 的 ID/文字交给已配置的 Decisions 端点。
+
+[`mcc chrome start --url …`](docs/CHROME-START.md)会新建 Chrome 窗口并建立连接，可用 `--profile <显示名称>` 选择[已有 Chrome profile](docs/CHROME-PROFILES.md)。历史 CLI 变更见 [0.3.5.1 版本说明](docs/RELEASE-0.3.5.1.md)及[以前的验证记录](docs/README.md)。
 
 ## 功能
 
@@ -84,12 +110,12 @@ sh ./install.sh --package /绝对路径/copis-chrome-4.0.0-darwin-arm64
 | 构建 | Rust 1.89+、Xcode Command Line Tools |
 | 架构 | Apple Silicon 或 Intel 本机编译，不能混用其他平台产物 |
 
-二进制使用者无需安装 Rust 或 Xcode。Apple Silicon 已在本机验证；Intel 分发仍需要在 Intel Mac 上原生构建和验证。其他应用需逐项验证，不承诺所有 macOS 软件均兼容；不支持 Windows/Linux 桌面自动化。
+二进制使用者无需安装 Rust 或 Xcode。Apple Silicon 已在本机验证；Intel 分发仍需要在 Intel Mac 上原生构建和验证。其他应用需逐项验证，不承诺所有 macOS 软件均兼容；上表针对 macOS 构建；Linux 上的容器内控制见前文 Docker/X11 模式。不支持 Windows。
 
 ## 从源码构建
 
 ```bash
-git clone git@github.com:zalsay/macos-control-cli.git
+git clone --branch main git@github.com:zalsay/macos-control-cli.git
 cd macos-control-cli
 bash ./build.sh
 ```
@@ -209,7 +235,9 @@ FRAME_ID='your-frame-id'
 | `connect --window <id>` | 连接指定窗口 |
 | `observe --connection <id> [--out <new.jpg>]` | 读取截图与 OCR，可导出图片 |
 | `click-target --connection <id> --target <描述> [--jev-key <key>]` | Jev OCR 单次语义点击（显式启用云端文字发送） |
-| `click` / `scroll` / `type` / `press` | 使用连接和帧执行输入 |
+| `click` / `scroll` / `type` / `press` | 使用连接和帧执行输入；支持的操作可加 `--eb` 使用 ESP |
+| `script --connection <id> --file <绝对JSON路径>` | 在本机或通过 Host 执行 JSON 步骤 |
+| `mcc --eb status` / `mbc --help` | 查询 ESP32 状态或查看独立 BLE 命令 |
 | `select-file --connection <id> --path <absolute-file>` | 完成已打开的原生文件选择框 |
 | `disconnect --connection <id>` | 释放连接与临时帧 |
 | `daemon start\|stop\|status` | 管理本地守护进程 |
@@ -280,7 +308,7 @@ bash tests/application-smoke.sh "$DESKTOP_CONTROL_CLI"
 - 最小化、其他 Space、锁屏及实际遮挡可能使采集/输入不可用。
 - 精确窗口/指针归属使用部分非公开 macOS 系统符号；系统更新可能影响映射，无法确认时拒绝操作，不绕过校验。
 - 保留原独立 Copis 组件的 `copis-chrome` 命令名、Copis Logo、默认 `~/.copis/chrome-desktop-cli` runtime 和 AGPL 许可证，以兼容已有集成；独立使用推荐私有 runtime。
-- 本仓库仅构建 CLI 组件，不包含、也不需要 Copis Electron/COS 部署脚本；相关材料标为历史集成记录。
+- 本仓库构建 MCC、MBC 和独立的 Tauri 控制台，不包含、也不需要 Copis Electron/COS 部署脚本；相关材料标为历史集成记录。
 
 ## 许可证
 

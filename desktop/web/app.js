@@ -202,6 +202,88 @@ bind('script-command', async () => {
   try {await navigator.clipboard.writeText($('command-text').value); notice('已复制 CLI 命令。');}
   catch {notice('命令已选中，可按 ⌘C 复制。');}
 });
+let jevView = null, jevSelected = null, jevDirty = false, jevBusy = false;
+function discardJev() { return !jevDirty || window.confirm('要放弃这份未保存的 Jev 配置吗？'); }
+function syncJev() {
+  const old = jevSelected === null ? null : jevView.models[jevSelected];
+  const changedEndpoint = old && old.url !== $('jev-url').value.trim();
+  $('jev-key').required = !old || !!changedEndpoint;
+  $('jev-key').placeholder = changedEndpoint ? '' : old?.key_preview ?? '';
+  $('jev-key-note').textContent = changedEndpoint ? '更换端点必须重新输入 API key，原密钥不会用于新端点。' : old ? '已保存密钥。留空沿用原密钥。' : '新配置需要 API key。';
+  $('jev-make-default').hidden = !old || jevView.default_model === jevSelected;
+  $('jev-toggle').hidden = !old;
+  $('jev-toggle').textContent = old?.enabled ? '停用' : '启用';
+  $('jev-make-default').disabled = jevDirty;
+  $('jev-toggle').disabled = jevDirty;
+  $('jev-fields').disabled = jevBusy || !jevView;
+  $('jev-new').disabled = jevBusy || !jevView;
+  $('jev-refresh').disabled = jevBusy;
+}
+function openJev(name) {
+  const old = name !== null && Object.hasOwn(jevView.models, name) ? jevView.models[name] : null;
+  jevSelected = old ? name : null;
+  jevDirty = false;
+  $('jev-editor-title').textContent = old ? `编辑 ${name}` : '新建配置';
+  $('jev-name').value = old ? name : '';
+  $('jev-name').readOnly = !!old;
+  $('jev-url').value = old?.url ?? '';
+  $('jev-model').value = old?.model ?? '';
+  $('jev-key').value = '';
+  $('jev-default').textContent = jevView.default_model ? `默认：${jevView.default_model}${jevView.models[jevView.default_model]?.enabled ? '' : '（已停用）'}` : '尚未设置默认模型';
+  const list = $('jev-profiles');
+  list.replaceChildren();
+  for (const [id, item] of Object.entries(jevView.models)) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = id;
+    button.classList.toggle('selected', id === jevSelected);
+    const detail = document.createElement('small');
+    detail.textContent = [item.model, item.enabled ? '已启用' : '已停用', ...(id === jevView.default_model ? ['默认'] : [])].join(' · ');
+    button.append(detail);
+    button.addEventListener('click', () => { if (!jevBusy && id !== jevSelected && discardJev()) openJev(id); });
+    list.append(button);
+  }
+  if (!list.children.length) {
+    const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = '还没有 Jev 配置。'; list.append(empty);
+  }
+  syncJev();
+}
+async function refreshJev() {
+  jevView = await invoke('jev_summary');
+  openJev(jevSelected ?? jevView.default_model ?? Object.keys(jevView.models)[0] ?? null);
+}
+async function withJev(fn) {
+  if (jevBusy) return;
+  jevBusy = true; syncJev();
+  try { await fn(); } catch (error) { notice(error, true); }
+  finally { jevBusy = false; syncJev(); }
+}
+$('jev-refresh').addEventListener('click', () => { if (discardJev()) void withJev(refreshJev); });
+$('jev-new').addEventListener('click', () => { if (discardJev()) {openJev(null); $('jev-name').focus();} });
+$('jev-form').addEventListener('input', () => { jevDirty = true; syncJev(); });
+$('jev-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const data = {name:$('jev-name').value.trim(), url:$('jev-url').value.trim(), model:$('jev-model').value.trim(), key:$('jev-key').value || null};
+  $('jev-key').value = '';
+  void withJev(async () => {
+    if (jevSelected === null && Object.hasOwn(jevView.models, data.name)) throw new Error('配置名称已存在，请在列表中打开并编辑。');
+    jevView = await invoke('jev_save', data);
+    openJev(data.name);
+    notice('Jev 配置已保存。');
+  });
+});
+for (const id of ['jev-make-default','jev-toggle']) $(id).addEventListener('click', () => {
+  if (!jevSelected || jevDirty) return;
+  const name = jevSelected;
+  const operation = id === 'jev-make-default' ? 'default' : jevView.models[name].enabled ? 'disable' : 'enable';
+  void withJev(async () => {
+    jevView = await invoke('jev_change', {name, operation});
+    openJev(name);
+    notice('Jev 配置已更新。');
+  });
+});
+document.querySelector('[data-page="settings"]').addEventListener('click', () => { if (!jevView) void withJev(refreshJev); });
+
 openScript(null);
 Promise.allSettled([
   invoke('settings').then(value => {for (const name of hostFields) $(name).value = value.host[name]; $('bin_dir').value = value.bin_dir; initialized = true;}),
