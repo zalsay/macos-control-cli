@@ -9,6 +9,11 @@ public final class OwnedRunnerProcess: @unchecked Sendable {
     public var isRunning: Bool { true }
     public func waitForExit(timeoutSeconds: Double) async throws -> ProcessExit? { nil }
 }
+final class RunnerControlPeer: @unchecked Sendable {
+    let child: OwnedRunnerProcess?
+    init(child: OwnedRunnerProcess) { self.child = child }
+    var isRunning: Bool { child?.isRunning == true }
+}
 final class AutomationChannel: @unchecked Sendable {
     enum ChannelError: Error { case closed, sendBackpressure }
     private let lock = NSLock()

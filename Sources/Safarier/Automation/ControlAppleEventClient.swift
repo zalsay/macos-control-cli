@@ -99,6 +99,8 @@ final class ControlAppleEventClient {
         }
     }
 
+    var managerHasExited: Bool { manager.isTerminated }
+
     private func destinationCheck() -> DestinationCheck {
         let matches = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .filter { $0.isFinishedLaunching && !$0.isTerminated }

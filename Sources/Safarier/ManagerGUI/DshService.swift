@@ -225,6 +225,7 @@ final class DshService: ObservableObject {
     @Published private(set) var binaryPath: String? = nil
     @Published var logs: [String] = []
     @Published private(set) var cachedWebView: WKWebView?
+    private var webNavigation: DshWebNavigation?
 
     private var process: Process?
     private var stdoutPipe: Pipe?
@@ -435,6 +436,7 @@ final class DshService: ObservableObject {
         cachedWebView?.stopLoading()
         cachedWebView?.removeFromSuperview()
         cachedWebView = nil
+        webNavigation = nil
         #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
         wantsStart = false
         generation += 1
@@ -704,23 +706,34 @@ final class DshService: ObservableObject {
     func getOrCreateWebView(for url: URL) -> WKWebView {
         if let existing = cachedWebView {
             existing.removeFromSuperview()
-            if existing.url == nil || (existing.url?.host != url.host || existing.url?.port != url.port) {
-                existing.load(URLRequest(url: url))
-            }
+            updateWebView(existing, for: url)
             return existing
         }
 
         let config = WKWebViewConfiguration()
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
         // 使用默认持久化 dataStore 保存登录态与工作区会话
         config.websiteDataStore = .default()
 
         let wv = WKWebView(frame: .zero, configuration: config)
         wv.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Safarier/1.0"
+        let navigation = DshWebNavigation(serviceURL: url)
+        webNavigation = navigation
+        wv.uiDelegate = navigation
+        wv.navigationDelegate = navigation
         wv.load(URLRequest(url: url))
 
         cachedWebView = wv
         return wv
+    }
+
+    func updateWebView(_ webView: WKWebView, for url: URL) {
+        guard webView === cachedWebView else { return }
+        webNavigation?.serviceURL = url
+        if webView.url.map({ DshWebNavigation.sameOrigin($0, url) }) != true {
+            webView.load(URLRequest(url: url))
+        }
     }
 
     private func handleTermination(_ proc: Process) {
@@ -729,6 +742,7 @@ final class DshService: ObservableObject {
         cachedWebView?.stopLoading()
         cachedWebView?.removeFromSuperview()
         cachedWebView = nil
+        webNavigation = nil
         if case .starting = status {
             status = .failed("dsh 进程异常退出（代码 \(proc.terminationStatus)）。\n请查看运行日志排查原因。")
         } else if case .running = status {

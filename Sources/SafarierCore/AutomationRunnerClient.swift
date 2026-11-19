@@ -21,7 +21,7 @@ public actor AutomationRunnerClient {
     public nonisolated let absoluteLifetimeDeadline: Double?
     private let profileID: UUID
     private let channel: AutomationChannel
-    private let owner: OwnedRunnerProcess
+    private let owner: RunnerControlPeer
     nonisolated let fixtureContext: ControllerGenerationContext
     private var closed = false
     private var boundTarget: AutomationTargetIdentity?
@@ -66,7 +66,7 @@ public actor AutomationRunnerClient {
         var transmitted = false
         var timer: Task<Void, Never>?
     }
-    private init(owner: OwnedRunnerProcess, profileID: UUID, runnerInstanceID: UUID, channel: AutomationChannel, context: ControllerGenerationContext) {
+    private init(owner: RunnerControlPeer, profileID: UUID, runnerInstanceID: UUID, channel: AutomationChannel, context: ControllerGenerationContext) {
         self.owner = owner; self.pid = owner.pid; self.ownershipID = owner.ownershipID
         let (end, overflow) = context.lifetimeStart.addingReportingOverflow(UInt64(AutomationLimits.generationSeconds * 1_000_000_000))
         self.absoluteLifetimeDeadline = context.registrationNonce != nil || overflow ? nil : Double(end) / 1_000_000_000
@@ -724,6 +724,15 @@ public actor AutomationRunnerClient {
     /// Transfers only the exact child held by this client after its authenticated commit reply.
     // Keep distinct from the App async protocol default: same-name overloads recurse into that default.
     public func takeValidatedReleasedOwner(matching receipt: ControlReleaseReceipt) throws -> OwnedRunnerProcess {
+        guard let child = owner.child else { throw AutomationError(code: .backendUnavailable) }
+        try consumeValidatedRelease(receipt)
+        return child
+    }
+    public func confirmRegisteredRelease(matching receipt: ControlReleaseReceipt) throws {
+        guard fixtureContext.registrationNonce != nil else { throw AutomationError(code: .backendUnavailable) }
+        try consumeValidatedRelease(receipt)
+    }
+    private func consumeValidatedRelease(_ receipt: ControlReleaseReceipt) throws {
         guard !closed, !releasedOwnerTaken,
               pending.values.allSatisfy({ $0.continuation == nil && canRetireRead($0) }), validatedRelease == receipt,
               receipt.target == boundTarget, owner.isRunning else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
@@ -733,11 +742,10 @@ public actor AutomationRunnerClient {
         let context = fixtureContext
         context.stopFromClient(.cancelled)
         Task { await context.safeClose() }
-        return owner
     }
     public func closeAndWait(timeoutSeconds: Double = AutomationLimits.cleanupSeconds) async throws -> ProcessExit? {
         guard Self.validTimeout(timeoutSeconds) else { throw AutomationError(code: .invalidRequest) }
         close()
-        return try await owner.waitForExit(timeoutSeconds: timeoutSeconds)
+        return try await owner.child?.waitForExit(timeoutSeconds: timeoutSeconds)
     }
 }

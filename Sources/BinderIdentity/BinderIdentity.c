@@ -218,18 +218,26 @@ static BIError dynamic_code(const audit_token_t *token, bool self, uint64_t dead
 done:
  if(info)CFRelease(info); if(code)CFRelease(code); if(attrs)CFRelease(attrs); if(data)CFRelease(data); return e;
 }
-static BIError peer_sample(int fd,uint64_t deadline,pid_t *pid,audit_token_t *token,BIDiagnostic *diag) {
+static int peer_address_matches(const struct sockaddr_un *addr, socklen_t length, const char *expected) {
+ size_t offset=offsetof(struct sockaddr_un,sun_path);
+ if(length<offset || length>sizeof *addr) return 0;
+ size_t bytes=length-offset, size=expected ? strlen(expected) : 0;
+ if(size>bytes || (size && memcmp(addr->sun_path,expected,size))) return 0;
+ for(size_t i=size;i<bytes;i++) if(addr->sun_path[i]!=0)return 0;
+ return 1;
+}
+static BIError peer_sample(int fd,uint64_t deadline,pid_t *pid,audit_token_t *token,BIDiagnostic *diag,const char *local,const char *remote) {
  if(fd<0){diag_set(diag,BI_STAGE_PEER_FD,BI_F_UNAVAILABLE,BI_DEPTH_NA);return BI_INVALID;} if(!valid_deadline(deadline))return BI_EXPIRED;
  int type=0; socklen_t n=sizeof type;
  if(getsockopt(fd,SOL_SOCKET,SO_TYPE,&type,&n) || n!=sizeof type || type!=SOCK_STREAM){diag_set(diag,BI_STAGE_PEER_SOCKET_TYPE,BI_F_UNAVAILABLE,BI_DEPTH_NA);return BI_INVALID;}
  if(!valid_deadline(deadline))return BI_EXPIRED;
  struct sockaddr_un a={0}; n=sizeof a;
  if(getsockname(fd,(struct sockaddr *)&a,&n) || a.sun_family!=AF_UNIX || n>sizeof a) {diag_set(diag,BI_STAGE_PEER_LOCAL_ADDRESS,BI_F_UNAVAILABLE,BI_DEPTH_NA);return BI_INVALID;}
- for(size_t i=offsetof(struct sockaddr_un,sun_path);i<n;i++) if(((unsigned char *)&a)[i]!=0){diag_set(diag,BI_STAGE_PEER_LOCAL_NAME,BI_F_PATH,BI_DEPTH_NA);return BI_INVALID;}
+ if(!peer_address_matches(&a,n,local)){diag_set(diag,BI_STAGE_PEER_LOCAL_NAME,BI_F_PATH,BI_DEPTH_NA);return BI_INVALID;}
  if(!valid_deadline(deadline))return BI_EXPIRED;
  memset(&a,0,sizeof a); n=sizeof a;
  if(getpeername(fd,(struct sockaddr *)&a,&n) || a.sun_family!=AF_UNIX || n>sizeof a) {diag_set(diag,BI_STAGE_PEER_REMOTE_ADDRESS,BI_F_UNAVAILABLE,BI_DEPTH_NA);return BI_INVALID;}
- for(size_t i=offsetof(struct sockaddr_un,sun_path);i<n;i++) if(((unsigned char *)&a)[i]!=0){diag_set(diag,BI_STAGE_PEER_REMOTE_NAME,BI_F_PATH,BI_DEPTH_NA);return BI_INVALID;}
+ if(!peer_address_matches(&a,n,remote)){diag_set(diag,BI_STAGE_PEER_REMOTE_NAME,BI_F_PATH,BI_DEPTH_NA);return BI_INVALID;}
  if(!valid_deadline(deadline))return BI_EXPIRED;
  struct pollfd pollfd={fd,0,0}; if(poll(&pollfd,1,0)<0 || (pollfd.revents&(POLLHUP|POLLERR|POLLNVAL))){diag_set(diag,BI_STAGE_PEER_POLL,BI_F_UNAVAILABLE,BI_DEPTH_NA);return BI_INVALID;}
  if(!valid_deadline(deadline))return BI_EXPIRED;
@@ -238,10 +246,10 @@ static BIError peer_sample(int fd,uint64_t deadline,pid_t *pid,audit_token_t *to
  n=sizeof *token; if(getsockopt(fd,SOL_LOCAL,LOCAL_PEERTOKEN,token,&n) || n!=sizeof *token){diag_set(diag,BI_STAGE_PEER_TOKEN,BI_F_TOKEN,BI_DEPTH_NA);return BI_INVALID;}
  return valid_deadline(deadline)?BI_OK:BI_EXPIRED;
 }
-static BIError capture_peer_impl(int fd,const BIProcess *expected,const BIImagePin *pin,uint64_t deadline,BIEvidence *out,BIDiagnostic *diag) {
+static BIError capture_peer_impl(int fd,const BIProcess *expected,const BIImagePin *pin,uint64_t deadline,BIEvidence *out,BIDiagnostic *diag,const char *local,const char *remote) {
  if(!expected||!pin||!out||expected->pid<=0||expected->euid!=(uint32_t)geteuid()||!memchr(expected->path,0,sizeof expected->path)||!memchr(pin->path,0,sizeof pin->path)){diag_set(diag,BI_STAGE_PEER_INPUT,BI_F_UNAVAILABLE,BI_DEPTH_NA);return BI_INVALID;}
  audit_token_t a={0},b={0}; pid_t ap=0,bp=0; BIProcess p={0},q={0}; BIImagePin actual={0}; BIEvidence first={0},second={0}; BIError e;
- if((e=peer_sample(fd,deadline,&ap,&a,diag))!=BI_OK)goto done;
+ if((e=peer_sample(fd,deadline,&ap,&a,diag,local,remote))!=BI_OK)goto done;
  if(ap!=expected->pid || audit_token_to_pid(a)!=ap || (uint32_t)audit_token_to_euid(a)!=expected->euid || (uint32_t)audit_token_to_ruid(a)!=expected->ruid) {diag_set(diag,BI_STAGE_PEER_CREDENTIALS,BI_F_TOKEN,BI_DEPTH_NA);e=BI_INVALID;goto done;}
  if((e=process_impl(ap,deadline,&p,diag))!=BI_OK){if(e==BI_INVALID)diag_set(diag,BI_STAGE_PEER_PROCESS_CAPTURE,BI_F_UNAVAILABLE,BI_DEPTH_NA);goto done;}
  if(!proc_equal(expected,&p)||strcmp(pin->path,p.path)){diag_set(diag,BI_STAGE_PEER_PROCESS_IDENTITY,BI_F_UNAVAILABLE,BI_DEPTH_NA);e=BI_INVALID;goto done;}
@@ -250,7 +258,7 @@ static BIError capture_peer_impl(int fd,const BIProcess *expected,const BIImageP
  if(!pin_equal(pin,&actual)){if(diag)diag_set(diag,BI_STAGE_PIN,pin_fields(pin,&actual),BI_DEPTH_NA);e=BI_CHANGED;goto done;}
  if((e=dynamic_code(&a,false,deadline,&second))!=BI_OK)goto done;
  if((e=process_impl(ap,deadline,&q,diag))!=BI_OK){if(e==BI_INVALID)diag_set(diag,BI_STAGE_PEER_PROCESS_CAPTURE,BI_F_UNAVAILABLE,BI_DEPTH_NA);goto done;}
- if((e=peer_sample(fd,deadline,&bp,&b,diag))!=BI_OK)goto done;
+ if((e=peer_sample(fd,deadline,&bp,&b,diag,local,remote))!=BI_OK)goto done;
  if(ap!=bp || memcmp(&a,&b,sizeof a) || !proc_equal(&p,&q) || first.code_hash_len!=second.code_hash_len || memcmp(first.code_hash,second.code_hash,first.code_hash_len)){ if(diag) { uint64_t m;
  if(ap!=bp)m=BI_F_PID; else if(memcmp(&a,&b,sizeof a))m=BI_F_TOKEN; else if(!proc_equal(&p,&q))m=proc_fields(&p,&q); else if(first.code_hash_len!=second.code_hash_len || !first.code_hash_len || first.code_hash_len>64)m=BI_F_HASH_LENGTH; else m=BI_F_HASH;
  diag_set(diag,BI_STAGE_PEER,m,BI_DEPTH_NA); } e=BI_CHANGED;goto done;}
@@ -271,8 +279,13 @@ static BIError capture_self_impl(const BIImagePin *pin,uint64_t deadline,BIEvide
  if(!proc_equal(&p,&q)||a.code_hash_len!=b.code_hash_len||memcmp(a.code_hash,b.code_hash,a.code_hash_len)) { if(diag) { uint64_t m=!proc_equal(&p,&q)?proc_fields(&p,&q):(a.code_hash_len!=b.code_hash_len || !a.code_hash_len || a.code_hash_len>64?BI_F_HASH_LENGTH:BI_F_HASH); diag_set(diag,BI_STAGE_SELF,m,BI_DEPTH_NA); } return BI_CHANGED; }
  a.process=q; a.file=actual.file; if(!bi_match(pin,&q,&a))return BI_INVALID; if(!valid_deadline(deadline))return BI_EXPIRED; *out=a; return BI_OK;
 }
-BIError bi_capture_peer(int fd,const BIProcess *p,const BIImagePin *i,uint64_t t,BIEvidence *o) { return capture_peer_impl(fd,p,i,t,o,NULL); }
-BIError bi_capture_peer_diagnostic(int fd,const BIProcess *p,const BIImagePin *i,uint64_t t,BIEvidence *o,BIDiagnostic *d) { diag_reset(d); return capture_peer_impl(fd,p,i,t,o,d); }
+BIError bi_capture_peer(int fd,const BIProcess *p,const BIImagePin *i,uint64_t t,BIEvidence *o) { return capture_peer_impl(fd,p,i,t,o,NULL,NULL,NULL); }
+BIError bi_capture_peer_diagnostic(int fd,const BIProcess *p,const BIImagePin *i,uint64_t t,BIEvidence *o,BIDiagnostic *d) { diag_reset(d); return capture_peer_impl(fd,p,i,t,o,d,NULL,NULL); }
+BIError bi_capture_registration_peer(int fd,const BIProcess *p,const BIImagePin *i,uint64_t t,BIEvidence *o,BIDiagnostic *d,const char *path,int accepted) {
+ diag_reset(d);
+ if(!path || path[0]!='/' || strnlen(path,sizeof(((struct sockaddr_un *)0)->sun_path))>=sizeof(((struct sockaddr_un *)0)->sun_path))return BI_INVALID;
+ return capture_peer_impl(fd,p,i,t,o,d,accepted?path:NULL,accepted?NULL:path);
+}
 BIError bi_capture_self(const BIImagePin *p,uint64_t t,BIEvidence *o) { return capture_self_impl(p,t,o,NULL); }
 BIError bi_capture_self_diagnostic(const BIImagePin *p,uint64_t t,BIEvidence *o,BIDiagnostic *d) { diag_reset(d); return capture_self_impl(p,t,o,d); }
 /* Compare repeated captured observations, including kernel audit pidversion. */

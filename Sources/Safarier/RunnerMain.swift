@@ -153,11 +153,11 @@ enum RunnerMain {
                     let root = try AutomationChannel(adopting: FileHandle(fileDescriptor: STDIN_FILENO, closeOnDealloc: false))
                     let instance = UUID()
                     Task { @MainActor in
-                        let ok = await RegisteredRunnerServer.serve(channel: root, profileID: profile.id,
-                            runnerInstanceID: instance, originalLock: originalLock, workspace: workspace) { epoch, channel in
+                        let ok = await RegisteredRunnerServer.serve(channel: root, spec: spec,
+                            runnerInstanceID: instance, originalLock: originalLock, workspace: workspace) { epoch, channel, replacedController in
                             await serveRegisteredGeneration(epoch: epoch, channel: channel, profile: profile,
                                 spec: spec, workspace: workspace, arguments: arguments, originalLock: originalLock,
-                                runnerInstanceID: instance, session: session, launchPlan: prepared.launchPlan)
+                                runnerInstanceID: instance, session: session, launchPlan: prepared.launchPlan, replacedController: replacedController)
                         }
                         if !ok { fputs("REGISTERED_DIAG phase=root_closed result=unconfirmed\n", stderr) }
                     }
@@ -192,7 +192,7 @@ enum RunnerMain {
     #if SAFARIER_BOUND_LOCAL_CANDIDATE
     private static func serveRegisteredGeneration(epoch: UUID, channel: AutomationChannel, profile: Profile,
         spec: RunnerLaunchSpec, workspace: SafarierWorkspace, arguments: [String], originalLock: ProfileLock,
-        runnerInstanceID: UUID, session: BrowserSession, launchPlan: RunnerPreparationPlan) async -> Bool {
+        runnerInstanceID: UUID, session: BrowserSession, launchPlan: RunnerPreparationPlan, replacedController: RegisteredControllerIdentity?) async -> RegisteredRunnerServer.GenerationExit {
         enum Stage: String { case installContext, slotInstall, serveAppBound, closeSlot, drain, finish }
         var stage = Stage.installContext
         let slot = BoundRunnerServiceSlot(registeredSession: session, registeredLaunchPlan: launchPlan)
@@ -203,7 +203,7 @@ enum RunnerMain {
             stage = .installContext
             let context = try await server.installAppContext(workspace: workspace, spec: spec,
                 originalLock: originalLock, arguments: arguments,
-                environment: ProcessInfo.processInfo.environment, registrationEpoch: epoch)
+                environment: ProcessInfo.processInfo.environment, registrationEpoch: epoch, replacedController: replacedController)
             stage = .slotInstall
             try slot.install(context)
             stage = .serveAppBound
@@ -213,15 +213,16 @@ enum RunnerMain {
             stage = .closeSlot
             slot.beginClosing()
             stage = .drain
-            guard await slot.drain() else { context.beginClosing(); return false }
+            guard await slot.drain() else { context.beginClosing(); return .unconfirmed }
             stage = .finish
             await context.finishAfterResourcesDrained()
-            return status == 0
+            // Keep a failed protocol root closed as before. A confirmed drain
+            // lets the Runner register separately when the Manager is replaced.
+            return status == 0 ? .drained : .drainedCloseRoot
         } catch {
             RootIdentityDiagnostic.emit("REGISTERED_GENERATION_DIAG side=runner stage=\(stage.rawValue) error=\(RootIdentityDiagnostic.classification(error))")
             slot.beginClosing()
-            _ = await slot.drain()
-            return false
+            return await slot.drain() ? .drainedCloseRoot : .unconfirmed
         }
     }
 

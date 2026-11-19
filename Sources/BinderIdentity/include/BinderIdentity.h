@@ -60,13 +60,15 @@ BIError bi_static_pin_diagnostic(const char *, uint64_t, BIImagePin *, BIDiagnos
 BIError bi_process_metadata_diagnostic(int32_t, uint64_t, BIProcess *, BIDiagnostic *);
 BIError bi_capture_self_diagnostic(const BIImagePin *, uint64_t, BIEvidence *, BIDiagnostic *);
 BIError bi_capture_peer_diagnostic(int, const BIProcess *, const BIImagePin *, uint64_t, BIEvidence *, BIDiagnostic *);
+/* Exact named address on the listener side only; the other side stays unnamed. */
+BIError bi_capture_registration_peer(int, const BIProcess *, const BIImagePin *, uint64_t, BIEvidence *, BIDiagnostic *, const char *, int);
 /* 0 indicates invalid duration or failure. */
 uint64_t bi_deadline_after_ms(uint32_t milliseconds);
 /* Trusted absolute path; secure root/euid-owned ancestors, same-euid leaf. */
 BIError bi_snapshot(const char *absolute_path, uint64_t deadline_ns, BIFileSnapshot *out);
 BIError bi_static_pin(const char *absolute_path, uint64_t deadline_ns, BIImagePin *out);
-/* Caller may observe only self, its original retained owned child, or its
- * actual getppid() parent. For actual parent, caller must sample getppid() both
+/* Caller may observe self, original retained child, actual getppid() parent,
+ * or a reconnect candidate subsequently verified on an authenticated socket. For actual parent, caller must sample getppid() both
  * before and after capture, ensure it remains unchanged, and verify same EUID,
  * same reviewed pinned image, and a stable parent birth identity. Never use a
  * PID from IPC or scanning. This call only captures metadata; it does not
@@ -76,9 +78,9 @@ BIError bi_process_metadata(int32_t observed_pid, uint64_t deadline_ns, BIProces
 BIError bi_capture_self(const BIImagePin *pin, uint64_t deadline_ns, BIEvidence *out);
 /* Connected anonymous AF_UNIX stream; call after peer sends, before its ACK.
  * expected must derive from the actual parent validated as above, or the
- * original retained owned child, never from IPC or scanning. Caller enforces
- * the getppid() relationship for the parent before and after capture. Existing
- * audit, UID, process birth, path and pinned code checks remain mandatory. */
+ * original retained owned child, or from an authenticated registration root for
+ * a fresh generation. Caller enforces the applicable relationship. Audit, UID,
+ * process birth, path and pinned code checks remain mandatory. */
 BIError bi_capture_peer(int fd, const BIProcess *expected, const BIImagePin *pin, uint64_t deadline_ns, BIEvidence *out);
 /* Compare each later peer observation with the initial observation, including
  * pidversion; neither function is an ownership or liveness guarantee. */

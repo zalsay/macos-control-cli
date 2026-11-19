@@ -53,6 +53,12 @@ Manager 唯一性检查只计入已完成 GUI 启动且未退出的应用；同 
 
 AppleEvents 权限查询和业务请求均使用已核验 Manager 的系统进程序列号（PSN），绑定这一次进程启动。不会再按 bundle ID 查找接收者，避免同一可执行文件的 `sfa daemon` 被系统选成目标。PID 只用于从已持有的 Manager 获取并核验进程身份，不直接作为 AppleEvent 地址；Manager 更换时仍需重新建立客户端。
 
+### Manager 重启后重新接管
+
+新版 Runner 在 Manager 退出后保留已打开的窗口和标签。旧控制会话必须先清理并还回输入，再允许新 Manager 重新认证。重新打开 Manager 后，对同一环境发出新的 `connect`，以返回的新 connection 开始 `observe`，不复用旧 frame 或重发之前的输入。如果 daemon 仍在运行，显式 `connect` 会在确认原 Manager 已退出后验证和切换接收端；旧连接不能发送给新的 Manager。
+
+此行为要求运行中的 Runner 已支持重连。旧版已打开的环境仍可能返回 `PROFILE_ALREADY_RUNNING`，需先保存页面内容，再由新版 Manager 启动一次。环境授权关闭、进程或环境身份不一致、旧输入无法确认已释放时，不会接管。随 Manager 退出的 DSH 任务不会自动恢复。
+
 ### 单独查询或申请 AppleEvents 授权
 
 在同一个实际执行宿主（例如 Copis/DSH）的子进程链中使用：

@@ -102,7 +102,9 @@ final class ControlBroker {
         init(token: String, target: AutomationTargetIdentity, viewport: AutomationViewport) { self.token = token; self.target = target; self.viewport = viewport }
     }
     private struct CacheEntry { let request: Data; var response: Data? }
-    private let sender: @MainActor (AutomationRequest) async throws -> AutomationReply
+    typealias Sender = @MainActor (AutomationRequest) async throws -> AutomationReply
+    private var sender: Sender
+    private let refreshOnConnect: @MainActor () throws -> Sender?
     private let loadDecisionConfig: () throws -> ControlDecisionConfig
     private let recognize: (String, AutomationViewport) async -> SemanticOCRResult
     private let decide: (ControlDecisionConfig, Data, ControlCancellation) async throws -> Data
@@ -130,16 +132,29 @@ final class ControlBroker {
     }
 
     init(applicationPath: String, runtimePath: String) throws {
-        let manager = try ControlAppleEventClient(applicationPath: applicationPath)
-        sender = { request in try await manager.send(request) }
-        authorize = { request in await manager.authorization(request: request) }
+        var current = try ControlAppleEventClient(applicationPath: applicationPath)
+        func boundSender(_ manager: ControlAppleEventClient) -> Sender {
+            { request in try await manager.send(request) }
+        }
+        sender = boundSender(current)
+        refreshOnConnect = {
+            guard current.managerHasExited else { return nil }
+            let replacement = try ControlAppleEventClient(applicationPath: applicationPath)
+            current = replacement
+            return boundSender(replacement)
+        }
+        authorize = { request in
+            let manager = current
+            return await manager.authorization(request: request)
+        }
         hostProfileID = RemoteHostRuntime.profileID(runtimePath: runtimePath)
         loadDecisionConfig = { try ControlDecisionConfig.load() }
         recognize = { path, viewport in await ControlOCR.shared.recognize(path:path,viewport:viewport) }
         decide = { config, request, cancellation in try await ControlDecision.decide(config:config,request:request,cancellation:cancellation) }
     }
     #if SAFARIER_CONTROL_TESTING
-    init(testSender: @escaping @MainActor (AutomationRequest) async throws -> AutomationReply,
+    init(testSender: @escaping Sender,
+         testRefreshOnConnect: @escaping @MainActor () throws -> Sender? = { nil },
          testAuthorization: @escaping @MainActor (Bool) async -> ControlAuthorization.Reply = { _ in
              ControlAuthorization.Reply(status: "unavailable", osStatus: nil)
          },
@@ -148,7 +163,7 @@ final class ControlBroker {
          testOCR: @escaping (String, AutomationViewport) async -> SemanticOCRResult = { path, viewport in await ControlOCR.shared.recognize(path:path,viewport:viewport) },
          testDecision: @escaping (ControlDecisionConfig, Data, ControlCancellation) async throws -> Data = { config, request, cancellation in try await ControlDecision.decide(config:config,request:request,cancellation:cancellation) },
          testChildDiagnostic: ((UUID, UUID) -> Void)? = nil) {
-        sender=testSender; authorize=testAuthorization; hostProfileID=testHostProfileID
+        sender=testSender; refreshOnConnect=testRefreshOnConnect; authorize=testAuthorization; hostProfileID=testHostProfileID
         loadDecisionConfig=testConfig; recognize=testOCR; decide=testDecision; self.testChildDiagnostic = testChildDiagnostic
     }
     #endif
@@ -270,6 +285,15 @@ final class ControlBroker {
             opening = true
             defer { opening = false }
             do {
+                if let replacement = try refreshOnConnect() {
+                    // Only an explicitly requested fresh connection can change
+                    // recipients. An old frame or in-flight semantic operation
+                    // must never use a new Manager's connection.
+                    for session in sessions.values { session.semanticCancellation?.cancel() }
+                    sessions.removeAll()
+                    pendingAcknowledgements.removeAll()
+                    sender = replacement
+                }
                 guard case let .sessionOpened(token, target, viewport) = try await exchange(request.requestID, .openSession(profileID: profileID), nil), target.profileID == profileID else { return response(request, "INVALID_REPLY") }
                 let id = UUID(); let session = Session(token: token, target: target, viewport: viewport)
                 session.awaitingAck = true; sessions[id] = session; pendingAcknowledgements[request.requestID] = (session, true)

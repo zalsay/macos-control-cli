@@ -3,7 +3,7 @@ import Foundation
 import OSLog
 import SafarierCore
 
-/// Manager-owned original children only. Never discovers or adopts a PID.
+/// Retains original children and authenticated reconnect roots separately.
 @MainActor final class RegisteredRunnerRegistry {
     private final class Entry {
         let owner: OwnedRunnerProcess
@@ -42,6 +42,7 @@ import SafarierCore
     }
     private let workspace: SafarierWorkspace
     private var entries: [UUID: Entry] = [:]
+    private var recoveredRoots: [UUID: RegisteredRunnerChannel] = [:]
     init(workspace: SafarierWorkspace) { self.workspace = workspace }
 
     func contains(_ id: UUID) -> Bool { entries[id]?.owner.isRunning == true }
@@ -53,6 +54,7 @@ import SafarierCore
     func launch(_ profile: Profile, launcher: RunnerLauncher? = nil, initialBlank: Bool = false, url: URL? = nil, spiOverride: SPIFeatures? = nil, nonActivatingPresentation: Bool = false) throws {
         forgetExited(profile.id)
         guard entries[profile.id] == nil, !workspace.isRunning(profile.id) else { throw WorkspaceError.alreadyRunning(profile.id) }
+        recoveredRoots.removeValue(forKey: profile.id)
         let pair = try AutomationChannel.makePair()
         do {
             let owner = try workspace.launchOwnedInteractive(profile, launcher: launcher, registrationInput: pair.child, initialBlank: initialBlank, url: url, spiOverride: spiOverride, nonActivatingPresentation: nonActivatingPresentation)
@@ -68,7 +70,29 @@ import SafarierCore
     }
 
     func open(_ profile: Profile) async throws -> any AutomationManagerEndpoint {
-        guard let entry = entries[profile.id], entry.owner.isRunning else { throw AutomationError(code: .profileAlreadyRunning) }
+        if !contains(profile.id) {
+            guard workspace.isRunning(profile.id) else { throw AutomationError(code: .runnerExited) }
+            let root: RegisteredRunnerChannel
+            if let recovered = recoveredRoots[profile.id] { root = recovered }
+            else {
+                do { root = try await RegisteredRunnerChannel.reconnect(workspace: workspace, profileID: profile.id) }
+                catch {
+                    RootIdentityDiagnostic.emit("ROOT_DIAG side=manager stage=reconnect error=\(RootIdentityDiagnostic.classification(error))")
+                    throw AutomationError(code: .profileAlreadyRunning)
+                }
+                recoveredRoots[profile.id] = root
+            }
+            do {
+                let opened = try await root.openRecoveredClient(workspace: workspace)
+                return RegisteredManagerEndpoint(client: opened.client, registered: root, epoch: opened.epoch)
+            } catch {
+                if (error as? AutomationError)?.code != .sessionBusy, recoveredRoots[profile.id] === root {
+                    recoveredRoots.removeValue(forKey: profile.id)
+                }
+                throw error
+            }
+        }
+        guard let entry = entries[profile.id], entry.owner.isRunning else { throw AutomationError(code: .runnerExited) }
         let registered = try await entry.ready.value
         guard entries[profile.id] === entry, entry.owner.isRunning else { throw AutomationError(code: .runnerExited) }
         let opened = try await registered.openClient(workspace: workspace, spec: entry.spec, environment: entry.environment)
@@ -103,12 +127,11 @@ actor RegisteredManagerEndpoint: AutomationManagerEndpoint {
         try await registered.confirmDrained(epoch: epoch, timeoutSeconds: min(timeoutSeconds, AutomationLimits.cleanupSeconds))
         return nil // No Runner termination is claimed.
     }
-    func takeReleasedOwner(matching receipt: ControlReleaseReceipt) async throws -> OwnedRunnerProcess {
+    func finishRegisteredRelease(matching receipt: ControlReleaseReceipt) async throws {
         guard !finished else { throw AutomationError(code: .sessionExpired) }
         finished = true
-        let owner = try await client.takeValidatedReleasedOwner(matching: receipt)
+        try await client.confirmRegisteredRelease(matching: receipt)
         try await registered.confirmDrained(epoch: epoch)
-        return owner
     }
 }
 #endif

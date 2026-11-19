@@ -147,8 +147,7 @@ import AppKit
         let registry = RegisteredRunnerRegistry(workspace: workspace)
         manager.registeredRegistry = registry
         manager.registeredConnector = { profile in
-            if !registry.contains(profile.id) {
-                guard !workspace.isRunning(profile.id) else { throw AutomationError(code: .profileAlreadyRunning) }
+            if !registry.contains(profile.id), !workspace.isRunning(profile.id) {
                 try registry.launch(profile, launcher: RunnerLauncher(logDirectory: workspace.logsDirectory), initialBlank: true)
             }
             return try await registry.open(profile)
@@ -433,13 +432,19 @@ import AppKit
                 #if SAFARIER_BOUND_LOCAL_CANDIDATE
                 traceRelease("takeOwner.before", relatedRequestID: commit.requestID)
                 #endif
-                let owner = try await endpoint.takeReleasedOwner(matching: receipt)
+                let releasedOwner: OwnedRunnerProcess?
+                if endpoint.registeredInteractive {
+                    try await endpoint.finishRegisteredRelease(matching: receipt)
+                    releasedOwner = nil
+                } else {
+                    releasedOwner = try await endpoint.takeReleasedOwner(matching: receipt)
+                }
                 #if SAFARIER_BOUND_LOCAL_CANDIDATE
                 traceRelease("takeOwner.after", relatedRequestID: commit.requestID)
                 #endif
-                let withinDeadline = valid() && owner.pid == endpoint.pid && owner.ownershipID == endpoint.ownershipID
-                // The exact owner has already been taken even if timeout/cancellation won meanwhile.
-                if !endpoint.registeredInteractive { retainedRunners[owner.ownershipID] = owner }
+                let withinDeadline = valid() && (releasedOwner.map { $0.pid == endpoint.pid && $0.ownershipID == endpoint.ownershipID } ?? endpoint.registeredInteractive)
+                // The exact child, if any, was taken even if cancellation won meanwhile.
+                if let owner = releasedOwner { retainedRunners[owner.ownershipID] = owner }
                 entry.endpoint = nil; entry.releasePreparation = nil; entry.phase = .released; changed()
                 guard withinDeadline else { throw AutomationError(code: .indeterminateResult, sideEffects: .possible) }
                 let reply = AutomationReply(requestID: request.requestID, outcome: .success(.controlReleased(receipt)))
@@ -836,8 +841,8 @@ import AppKit
             let requiresConcreteProof = true
             #endif
             if requiresConcreteProof {
-            // Observe only the existing Manager and the exact concrete owned
-            // client's registration; PID comparison is not routing authority.
+            // Observe only the existing Manager and the exact authenticated
+            // client registration; PID comparison is not routing authority.
             #if SAFARIER_INTERNAL_TEST_APP
             let diagnosticBundleID = "sh.safarier.testing"
             #else
@@ -858,7 +863,7 @@ import AppKit
             let runnerCount = registrations.filter { $0.processIdentifier == runnerPID }.count
             let otherCount = registrations.filter { $0.processIdentifier != managerPID && $0.processIdentifier != runnerPID }.count
             let managerRegistered = managerCount == 1
-            let originalOwnedRunnerRegistered = runnerPID != managerPID && runnerCount == 1
+            let runnerRegistered = runnerPID != managerPID && runnerCount == 1
             let sameBefore = entry.endpoint.flatMap(Self.concreteOwnedClient) === concrete && identityMatches(entry, concrete)
             var realCoreRoundtripValidated = false
             let remaining = min(deadline, openForwardedAt + AutomationLimits.idleSeconds) - now()
@@ -872,7 +877,7 @@ import AppKit
                 } catch { /* Failure is recorded below without the error payload. */ }
             }
             let sameEndpointOwnership = sameBefore && entry.endpoint.flatMap(Self.concreteOwnedClient) === concrete && identityMatches(entry, concrete)
-            fputs("OWNED_REG_DIAG matchingCount=\(registrations.count) managerRegistered=\(managerRegistered) originalOwnedRunnerRegistered=\(originalOwnedRunnerRegistered) sameEndpointOwnership=\(sameEndpointOwnership) realCoreRoundtripValidated=\(realCoreRoundtripValidated) otherRegistrationsCount=\(otherCount)\n", stderr)
+            fputs("OWNED_REG_DIAG matchingCount=\(registrations.count) managerRegistered=\(managerRegistered) runnerRegistered=\(runnerRegistered) sameEndpointOwnership=\(sameEndpointOwnership) realCoreRoundtripValidated=\(realCoreRoundtripValidated) otherRegistrationsCount=\(otherCount)\n", stderr)
             guard managerRegistered, otherCount == 0,
                   sameEndpointOwnership, realCoreRoundtripValidated,
                   valid(), now() < openForwardedAt + AutomationLimits.idleSeconds, sessions[token] == nil else {

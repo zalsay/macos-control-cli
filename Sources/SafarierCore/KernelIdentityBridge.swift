@@ -202,11 +202,38 @@ final class KernelIdentityBridge {
               actual.birth_sec == expected.birth_sec, actual.birth_usec == expected.birth_usec,
               try Self.path(actual) == Self.path(expected) else { throw IdentityBridgeError.rejected }
     }
+    #if SAFARIER_BOUND_LOCAL_CANDIDATE
+    func registrationPeerMetadata(_ pid: Int32, deadline: FrameDeadline) throws -> BIProcess {
+        guard pid > 1 else { throw IdentityBridgeError.rejected }
+        var result = BIProcess()
+        try Self.checked(deadline, .metadata) { bi_process_metadata_diagnostic(pid, $0, &result, $1) }
+        let path = role == .main ? runnerExecutablePath : mainExecutablePath
+        guard result.pid == pid, result.ruid == getuid(), result.euid == geteuid(), result.birth_sec != 0,
+              role != .main || result.ppid == 1, try Self.path(result) == path else { throw IdentityBridgeError.rejected }
+        return result
+    }
+    func registrationPeerPID(fd: Int32) throws -> Int32 {
+        var pid: Int32 = 0, size = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0,
+              size == MemoryLayout<Int32>.size, pid > 1 else { throw IdentityBridgeError.rejected }
+        return pid
+    }
+    func ownRegistrationBirth() -> BIProcess { selfExpected }
+    #endif
     // Caller supplies expected metadata from retained-child or actual-parent
     // authority; peer observation alone never establishes ownership.
-    func checkPeer(fd: Int32, expected: BIProcess, deadline: FrameDeadline) throws {
+    func checkPeer(fd: Int32, expected: BIProcess, deadline: FrameDeadline, rendezvous: String? = nil) throws {
         var e = BIEvidence(), expected = expected
-        do { try Self.checked(deadline, .peer) { bi_capture_peer_diagnostic(fd,&expected,&peerPin,$0,&e,$1) } }
+        do {
+            try Self.checked(deadline, .peer) { cutoff, diagnostic in
+                if let rendezvous {
+                    return rendezvous.withCString {
+                        bi_capture_registration_peer(fd, &expected, &peerPin, cutoff, &e, diagnostic, $0, role == .runner ? 1 : 0)
+                    }
+                }
+                return bi_capture_peer_diagnostic(fd, &expected, &peerPin, cutoff, &e, diagnostic)
+            }
+        }
         catch {
             var peer: Int32 = 0, size = socklen_t(MemoryLayout<Int32>.size)
             let ok = getsockopt(fd,SOL_LOCAL,LOCAL_PEERPID,&peer,&size) == 0 && size == MemoryLayout<Int32>.size

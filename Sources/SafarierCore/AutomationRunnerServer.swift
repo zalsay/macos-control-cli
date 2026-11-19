@@ -841,15 +841,16 @@ private actor FixtureContext {
     #endif
     private let bridge: KernelIdentityBridge
     private let parent: BIProcess
+    private let reconnected: Bool
     private let provider: RepositoryBindingProvider
     private let inspector: FileHandle
     private var peerPinned = false
     private var released = false
     private var releaseTask: Task<Void, Never>?
-    fileprivate init(channel: AutomationChannel, lifetimeStart: UInt64, bridge: KernelIdentityBridge, parent: BIProcess, provider: RepositoryBindingProvider, inspector: FileHandle, registeredInteractive: Bool = false, registrationNonce: String? = nil) {
+    fileprivate init(channel: AutomationChannel, lifetimeStart: UInt64, bridge: KernelIdentityBridge, parent: BIProcess, provider: RepositoryBindingProvider, inspector: FileHandle, registeredInteractive: Bool = false, registrationNonce: String? = nil, reconnected: Bool = false) {
         self.channel = channel; self.lifetimeStart = lifetimeStart; self.bridge = bridge
         self.registrationNonce = registrationNonce
-        self.parent = parent; self.provider = provider; self.inspector = inspector
+        self.parent = parent; self.reconnected = reconnected; self.provider = provider; self.inspector = inspector
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         self.registeredInteractive = registeredInteractive
         #endif
@@ -871,14 +872,14 @@ private actor FixtureContext {
         trace?.success(); trace?.begin(.resources)
         try bridge.checkResources(deadline: deadline)
         trace?.success(); trace?.begin(.parentFirst)
-        try bridge.checkActualParent(parent, deadline: deadline)
+        try checkController(deadline)
         trace?.success()
         if establishPeer && peerPinned { throw FixtureContextFailure.peerAlreadyPinned }
         if establishPeer || peerPinned {
             trace?.begin(.peer)
             try bridge.checkPeer(fd: inspector.fileDescriptor, expected: parent, deadline: deadline)
             trace?.success(); trace?.begin(.parentSecond)
-            try bridge.checkActualParent(parent, deadline: deadline)
+            try checkController(deadline)
             trace?.success()
         } else if requirePeer { throw FixtureContextFailure.noPeer }
         let ms = min(2999, Int((try deadline.remaining() * 1000).rounded(.down)))
@@ -900,6 +901,16 @@ private actor FixtureContext {
         if establishPeer { peerPinned = true }
         trace?.success()
     }
+    private func checkController(_ deadline: FrameDeadline) throws {
+        #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        if reconnected {
+            let current = try bridge.registrationPeerMetadata(parent.pid, deadline: deadline)
+            guard KernelIdentityBridge.sameProcessIdentity(parent, current) else { throw IdentityBridgeError.rejected }
+            return
+        }
+        #endif
+        try bridge.checkActualParent(parent, deadline: deadline)
+    }
     func release() async {
         if let releaseTask { await releaseTask.value; return }
         released = true
@@ -911,12 +922,12 @@ private actor FixtureContext {
 }
 extension AutomationRunnerServer {
     // Staged fixture only; no product authorization.
-    private func installFixtureContext(workspace: SafarierWorkspace, originalLock: ProfileLock, expectedSpec: RunnerLaunchSpec, actualArgs: [String], environment: [String:String], deadline: FrameDeadline, registrationNonce: String? = nil) async throws {
+    private func installFixtureContext(workspace: SafarierWorkspace, originalLock: ProfileLock, expectedSpec: RunnerLaunchSpec, actualArgs: [String], environment: [String:String], deadline: FrameDeadline, registrationNonce: String? = nil, replacedController: RegisteredControllerIdentity? = nil) async throws {
         try await withTaskCancellationHandler(operation: {
-            try await installFixtureContextImpl(workspace: workspace, originalLock: originalLock, expectedSpec: expectedSpec, actualArgs: actualArgs, environment: environment, deadline: deadline, registrationNonce: registrationNonce)
+            try await installFixtureContextImpl(workspace: workspace, originalLock: originalLock, expectedSpec: expectedSpec, actualArgs: actualArgs, environment: environment, deadline: deadline, registrationNonce: registrationNonce, replacedController: replacedController)
         }, onCancel: { channel.close(origin: .cancellation) })
     }
-    private func installFixtureContextImpl(workspace: SafarierWorkspace, originalLock: ProfileLock, expectedSpec: RunnerLaunchSpec, actualArgs: [String], environment: [String:String], deadline: FrameDeadline, registrationNonce: String?) async throws {
+    private func installFixtureContextImpl(workspace: SafarierWorkspace, originalLock: ProfileLock, expectedSpec: RunnerLaunchSpec, actualArgs: [String], environment: [String:String], deadline: FrameDeadline, registrationNonce: String?, replacedController: RegisteredControllerIdentity?) async throws {
         guard !started, !stopped, seamPhase == 0, !fixtureInstallAttempted else { stop(); throw FixtureContextFailure.wrongPhase }
         fixtureInstallAttempted = true
         var inspector: FileHandle?
@@ -926,7 +937,13 @@ extension AutomationRunnerServer {
             inspector = acquiredInspector
             let bridge = try KernelIdentityBridge(deadline: deadline)
             guard bridge.role == .runner else { throw IdentityBridgeError.rejected }
-            let parent = try bridge.actualParentMetadata(deadline: deadline)
+            let parent: BIProcess
+            if let replacedController {
+                guard registrationNonce != nil else { throw FixtureContextFailure.wrongPhase }
+                parent = replacedController.process
+            } else {
+                parent = try bridge.actualParentMetadata(deadline: deadline)
+            }
             let provider = try RepositoryBindingProvider.create(workspace: workspace, role: .runner, expectedSpec: expectedSpec, actualArgs: actualArgs, environment: environment, originalLock: originalLock)
             #if SAFARIER_BOUND_LOCAL_CANDIDATE
             let registered = expectedSpec.registeredInteractive
@@ -934,7 +951,7 @@ extension AutomationRunnerServer {
             let registered = false
             #endif
             guard registered == (registrationNonce != nil), registrationNonce.map(AutomationSessionToken.isCanonical) ?? true else { throw FixtureContextFailure.wrongPhase }
-            let context = FixtureContext(channel: channel, lifetimeStart: deadline.lifetimeStart, bridge: bridge, parent: parent, provider: provider, inspector: acquiredInspector, registeredInteractive: registered, registrationNonce: registrationNonce)
+            let context = FixtureContext(channel: channel, lifetimeStart: deadline.lifetimeStart, bridge: bridge, parent: parent, provider: provider, inspector: acquiredInspector, registeredInteractive: registered, registrationNonce: registrationNonce, reconnected: replacedController != nil)
             fixtureContext = context
             try await withTaskCancellationHandler(operation: {
                 try await context.check(deadline: deadline, establishPeer: false, requirePeer: false)
@@ -979,7 +996,7 @@ actor ControllerGenerationContext {
     private let expectedSpec: RunnerLaunchSpec
     private let actualArgs: [String]
     private let environment: [String: String]
-    private var owner: OwnedRunnerProcess?
+    private var owner: RunnerControlPeer?
     private var birth: BIProcess?
     private var attachAttempted = false
     private var closed = false
@@ -1100,11 +1117,15 @@ actor ControllerGenerationContext {
         } catch { revocation.fail(error, diagnostic: "controller-capture-birth"); throw error }
     }
     func attachOwnedChildOnce(_ originalOwner: OwnedRunnerProcess, birth originalBirth: BIProcess) async throws {
+        try await attachControlPeerOnce(RunnerControlPeer(child: originalOwner), birth: originalBirth)
+    }
+    func attachControlPeerOnce(_ originalOwner: RunnerControlPeer, birth originalBirth: BIProcess) async throws {
         do {
+            guard originalOwner.child != nil || registrationNonce != nil else { throw FixtureContextFailure.wrongPhase }
             guard !attachAttempted, owner == nil else { throw FixtureContextFailure.wrongPhase }
             attachAttempted = true
             let d = try startupDeadline(); try checkOpen(d)
-            let fresh = try bridge.ownedChildMetadata(originalOwner, deadline: d)
+            let fresh = try originalOwner.metadata(using: bridge, deadline: d)
             guard KernelIdentityBridge.sameProcessIdentity(originalBirth, fresh) else { throw IdentityBridgeError.rejected }
             owner = originalOwner; birth = originalBirth
             try await checkAfterSpawnImpl(deadline: d)
@@ -1122,7 +1143,7 @@ actor ControllerGenerationContext {
             guard originalOwner.isRunning else { throw AutomationError(code: .runnerExited) }
             return
         }
-        let fresh = try bridge.ownedChildMetadata(originalOwner, deadline: d)
+        let fresh = try originalOwner.metadata(using: bridge, deadline: d)
         guard KernelIdentityBridge.sameProcessIdentity(originalBirth, fresh) else { throw IdentityBridgeError.rejected }
         let requirePeer = peerPinned
         if requirePeer { try bridge.checkPeer(fd: inspector.fileDescriptor, expected: originalBirth, deadline: d) }
@@ -1131,7 +1152,7 @@ actor ControllerGenerationContext {
         guard let currentOwner = owner, currentOwner === originalOwner, let currentBirth = birth,
               KernelIdentityBridge.sameProcessIdentity(originalBirth, currentBirth),
               !requirePeer || peerPinned else { throw FixtureContextFailure.wrongPhase }
-        let after = try bridge.ownedChildMetadata(originalOwner, deadline: d)
+        let after = try originalOwner.metadata(using: bridge, deadline: d)
         guard KernelIdentityBridge.sameProcessIdentity(originalBirth, after) else { throw IdentityBridgeError.rejected }
         // A pin established while the provider read was suspended also requires a peer check.
         if peerPinned { try bridge.checkPeer(fd: inspector.fileDescriptor, expected: originalBirth, deadline: d) }
@@ -1309,12 +1330,12 @@ actor ControllerGenerationContext {
             throw error
         }
     }
-    private func requireReady(_ response: AutomationHandshakeResponse, originalOwner: OwnedRunnerProcess) throws {
+    private func requireReady(_ response: AutomationHandshakeResponse, originalOwner: RunnerControlPeer) throws {
         guard bootstrapPhase == .ready, peerPinned, readyResponse == response,
               let currentOwner = owner, currentOwner === originalOwner,
               originalOwner.pid == response.runnerPID else { throw FixtureContextFailure.wrongPhase }
     }
-    func clientParameters(for response: AutomationHandshakeResponse) async throws -> (OwnedRunnerProcess, UUID, AutomationChannel) {
+    func clientParameters(for response: AutomationHandshakeResponse) async throws -> (RunnerControlPeer, UUID, AutomationChannel) {
         do {
             let d = try startupDeadline(); try checkOpen(d)
             guard let originalOwner = owner else { throw FixtureContextFailure.wrongPhase }
@@ -1325,7 +1346,7 @@ actor ControllerGenerationContext {
         } catch { revocation.fail(error, diagnostic: "controller-client-parameters"); throw error }
     }
     private func requireCandidate(_ candidate: AutomationRunnerClient, response: AutomationHandshakeResponse,
-                                  originalOwner: OwnedRunnerProcess) throws {
+                                  originalOwner: RunnerControlPeer) throws {
         guard candidate.fixtureContext === self, candidate.ownershipID == originalOwner.ownershipID,
               candidate.pid == originalOwner.pid, candidate.runnerInstanceID == response.runnerInstanceID else { throw FixtureContextFailure.wrongPhase }
     }
@@ -1460,7 +1481,7 @@ public final class RunnerBinderContext: @unchecked Sendable {
 }
 
 extension AutomationRunnerServer {
-    public func installAppContext(workspace: SafarierWorkspace, spec: RunnerLaunchSpec, originalLock: ProfileLock, arguments: [String], environment: [String:String], registrationEpoch: UUID? = nil) async throws -> RunnerBinderContext {
+    public func installAppContext(workspace: SafarierWorkspace, spec: RunnerLaunchSpec, originalLock: ProfileLock, arguments: [String], environment: [String:String], registrationEpoch: UUID? = nil, replacedController: RegisteredControllerIdentity? = nil) async throws -> RunnerBinderContext {
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         let diagnosticStart = DispatchTime.now().uptimeNanoseconds
         boundServerTrace("install_context.before", diagnosticStart)
@@ -1473,7 +1494,7 @@ extension AutomationRunnerServer {
         guard registrationEpoch == nil else { throw FixtureContextFailure.wrongPhase }
         let nonce: String? = nil
         #endif
-        try await installFixtureContext(workspace: workspace, originalLock: originalLock, expectedSpec: spec, actualArgs: arguments, environment: environment, deadline: deadline, registrationNonce: nonce)
+        try await installFixtureContext(workspace: workspace, originalLock: originalLock, expectedSpec: spec, actualArgs: arguments, environment: environment, deadline: deadline, registrationNonce: nonce, replacedController: replacedController)
         guard let appContext else { throw FixtureContextFailure.revoked }
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         boundServerTrace("install_context.after", diagnosticStart)

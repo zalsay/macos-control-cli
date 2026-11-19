@@ -1,6 +1,13 @@
+import Darwin
 import Foundation
 import BinderIdentity
 import CryptoKit
+
+/// Minted only by the authenticated registration server for a replacement Manager.
+public struct RegisteredControllerIdentity: @unchecked Sendable {
+    let process: BIProcess
+    fileprivate init(process: BIProcess) { self.process = process }
+}
 
 #if SAFARIER_BOUND_LOCAL_CANDIDATE
 /// Long-lived registration is not a control grant. Every received socket must
@@ -39,10 +46,11 @@ struct RegistrationEpochHistory {
     }
 }
 
-/// Owned by the Manager that created the actual Foundation child. Losing this
-/// object closes registration but does not terminate a human browser.
+/// An authenticated Manager-to-Runner root. Closing it does not terminate a browser.
 public actor RegisteredRunnerChannel {
-    private let owner: OwnedRunnerProcess
+    private let owner: RunnerControlPeer
+    private let rendezvous: String?
+    private let recoveredSpec: RunnerLaunchSpec?
     private let channel: AutomationChannel
     private let reader: AutomationChannel.ReaderLease
     private let inspector: FileHandle
@@ -53,14 +61,33 @@ public actor RegisteredRunnerChannel {
     private var pendingEpoch: UUID?
     private var closed = false
 
-    private init(owner: OwnedRunnerProcess, channel: AutomationChannel, reader: AutomationChannel.ReaderLease,
-                 inspector: FileHandle, bridge: KernelIdentityBridge, birth: BIProcess, profileID: UUID, runnerInstanceID: UUID) {
+    private init(owner: RunnerControlPeer, channel: AutomationChannel, reader: AutomationChannel.ReaderLease,
+                 inspector: FileHandle, bridge: KernelIdentityBridge, birth: BIProcess, profileID: UUID, runnerInstanceID: UUID, rendezvous: String?, recoveredSpec: RunnerLaunchSpec?) {
+        self.rendezvous = rendezvous; self.recoveredSpec = recoveredSpec
         self.owner = owner; self.channel = channel; self.reader = reader; self.inspector = inspector
         self.bridge = bridge; self.birth = birth; self.profileID = profileID; self.runnerInstanceID = runnerInstanceID
     }
     deinit { channel.close(); try? inspector.close() }
 
     public static func establish(owner: OwnedRunnerProcess, channel: AutomationChannel, profileID: UUID) async throws -> RegisteredRunnerChannel {
+        try await establish(owner: RunnerControlPeer(child: owner), channel: channel, profileID: profileID, rendezvous: nil)
+    }
+
+    public static func reconnect(workspace: SafarierWorkspace, profileID: UUID) async throws -> RegisteredRunnerChannel {
+        guard let pid = workspace.runnerPID(profileID) else { throw AutomationError(code: .profileAlreadyRunning) }
+        let d = try RegistrationFrame.deadline()
+        let bridge = try KernelIdentityBridge(deadline: d)
+        guard bridge.role == .main else { throw IdentityBridgeError.rejected }
+        let birth = try bridge.registrationPeerMetadata(pid, deadline: d)
+        let endpoint = try RegisteredRunnerRendezvous(workspace: workspace, profileID: profileID, pid: pid,
+                                                       birth: birth.birth_sec, micros: birth.birth_usec)
+        let channel = try endpoint.connect()
+        return try await establish(owner: RunnerControlPeer(reconnectCandidatePID: pid), channel: channel,
+                                   profileID: profileID, rendezvous: endpoint.path, discoveredBirth: birth)
+    }
+
+    private static func establish(owner: RunnerControlPeer, channel: AutomationChannel, profileID: UUID,
+                                  rendezvous: String?, discoveredBirth: BIProcess? = nil) async throws -> RegisteredRunnerChannel {
         channel.labelRegistration(.rootManager)
         enum Stage: String { case reader, prepared, bridge, role, childBirth, peer, challenge, response, responseValidation, selfCheck, resources, childRecheck, birthMatch, peerRecheck }
         var stage = Stage.reader
@@ -77,9 +104,10 @@ public actor RegisteredRunnerChannel {
             stage = .role
             guard bridge.role == .main else { throw IdentityBridgeError.rejected }
             stage = .childBirth
-            let birth = try bridge.ownedChildMetadata(owner, deadline: d)
+            let birth = try owner.metadata(using: bridge, deadline: d)
+            if let discoveredBirth, !KernelIdentityBridge.sameProcessIdentity(discoveredBirth, birth) { throw IdentityBridgeError.rejected }
             stage = .peer
-            try bridge.checkPeer(fd: fd.fileDescriptor, expected: birth, deadline: d)
+            try bridge.checkPeer(fd: fd.fileDescriptor, expected: birth, deadline: d, rendezvous: rendezvous)
             stage = .challenge
             let nonce = try AutomationSessionToken.generate()
             let challenge = try AutomationHandshakeCodec.makeChallenge(profileID: profileID, nonce: nonce)
@@ -93,12 +121,20 @@ public actor RegisteredRunnerChannel {
             stage = .resources
             try bridge.checkResources(deadline: d)
             stage = .childRecheck
-            let after = try bridge.ownedChildMetadata(owner, deadline: d)
+            let after = try owner.metadata(using: bridge, deadline: d)
             stage = .birthMatch
             guard KernelIdentityBridge.sameProcessIdentity(birth, after) else { throw IdentityBridgeError.rejected }
             stage = .peerRecheck
-            try bridge.checkPeer(fd: fd.fileDescriptor, expected: birth, deadline: d)
-            return RegisteredRunnerChannel(owner: owner, channel: channel, reader: reader, inspector: fd, bridge: bridge, birth: birth, profileID: profileID, runnerInstanceID: ready.runnerInstanceID)
+            try bridge.checkPeer(fd: fd.fileDescriptor, expected: birth, deadline: d, rendezvous: rendezvous)
+            let recoveredSpec: RunnerLaunchSpec?
+            if rendezvous != nil {
+                guard let info = try await d.run(channel: channel, operation: { try await reader.receive() }) else { throw HarnessError.eof }
+                recoveredSpec = try RegistrationLaunchInfo.parse(info, profileID: profileID)
+                try bridge.checkPeer(fd: fd.fileDescriptor, expected: birth, deadline: d, rendezvous: rendezvous)
+            } else { recoveredSpec = nil }
+            return RegisteredRunnerChannel(owner: owner, channel: channel, reader: reader, inspector: fd, bridge: bridge,
+                                           birth: birth, profileID: profileID, runnerInstanceID: ready.runnerInstanceID,
+                                           rendezvous: rendezvous, recoveredSpec: recoveredSpec)
         } catch {
             RootIdentityDiagnostic.emit("ROOT_DIAG side=manager stage=\(stage.rawValue) error=\(RootIdentityDiagnostic.classification(error))")
             channel.close(); try? inspector?.close(); throw error
@@ -114,11 +150,11 @@ public actor RegisteredRunnerChannel {
             stage = .resources
             try bridge.checkResources(deadline: d)
             stage = .birth
-            let now = try bridge.ownedChildMetadata(owner, deadline: d)
+            let now = try owner.metadata(using: bridge, deadline: d)
             stage = .birthMatch
             guard KernelIdentityBridge.sameProcessIdentity(birth, now) else { throw IdentityBridgeError.rejected }
             stage = .peer
-            try bridge.checkPeer(fd: inspector.fileDescriptor, expected: birth, deadline: d)
+            try bridge.checkPeer(fd: inspector.fileDescriptor, expected: birth, deadline: d, rendezvous: rendezvous)
         } catch {
             RootIdentityDiagnostic.emit("GENERATION_CHECK_DIAG side=manager stage=\(stage.rawValue) error=\(RootIdentityDiagnostic.classification(error))")
             throw error
@@ -164,6 +200,10 @@ public actor RegisteredRunnerChannel {
     }
     /// Creates a fresh original Binder context only after root registration and
     /// descriptor acknowledgement. No old context or authorization is reused.
+    public func openRecoveredClient(workspace: SafarierWorkspace) async throws -> (epoch: UUID, client: AutomationRunnerClient) {
+        guard let recoveredSpec else { throw AutomationError(code: .invalidRequest) }
+        return try await openClient(workspace: workspace, spec: recoveredSpec, environment: recoveredSpec.environment(inheriting: [:]))
+    }
     public func openClient(workspace: SafarierWorkspace, spec: RunnerLaunchSpec, environment: [String: String]) async throws -> (epoch: UUID, client: AutomationRunnerClient) {
         guard spec.registeredInteractive, spec.profileID == profileID else { throw AutomationError(code: .invalidRequest) }
         // The Runner starts its own lifetime after receiving the generation;
@@ -186,11 +226,11 @@ public actor RegisteredRunnerChannel {
                 lifetimeStart: start, startupCutoff: cutoff, registrationNonce: RegistrationFrame.nonce(opened.epoch))
             do {
                 stage = .captureBirth
-                let current = try await context.captureOwnedBirth(owner)
+                let current = try owner.metadata(using: bridge, deadline: RegistrationFrame.deadline())
                 stage = .match
                 guard KernelIdentityBridge.sameProcessIdentity(current, birth) else { throw IdentityBridgeError.rejected }
                 stage = .attach
-                try await context.attachOwnedChildOnce(owner, birth: birth)
+                try await context.attachControlPeerOnce(owner, birth: birth)
                 stage = .startClient
                 let client = try await AutomationRunnerClient.startFixture(context: context, startupCutoff: cutoff)
                 stage = .instanceMatch
@@ -215,12 +255,67 @@ public actor RegisteredRunnerChannel {
     }
 }
 
-/// Runner side. The callback must return true only when the old generation's
-/// input and replies are confirmed drained; false permanently closes the root.
+/// Only non-secret launch inputs from the authenticated live Runner.
+private struct RegistrationLaunchInfo: Codable {
+    let arguments: [String]
+    let timeZone: String?
+    static func encode(_ spec: RunnerLaunchSpec) throws -> Data {
+        try JSONEncoder().encode(Self(arguments: spec.arguments(), timeZone: spec.timeZoneIdentifier))
+    }
+    static func parse(_ data: Data, profileID: UUID) throws -> RunnerLaunchSpec {
+        let info = try JSONDecoder().decode(Self.self, from: data)
+        let spec = try RunnerLaunchSpec.parse(info.arguments, environment: info.timeZone.map { ["TZ": $0] } ?? [:])
+        guard spec.profileID == profileID, spec.registeredInteractive, spec.arguments() == info.arguments else {
+            throw AutomationError(code: .invalidRequest)
+        }
+        return spec
+    }
+}
+
+/// Runner side. A new root is possible only after the previous generation drained.
 public enum RegisteredRunnerServer {
-    public static func serve(channel: AutomationChannel, profileID: UUID, runnerInstanceID: UUID, originalLock: ProfileLock,
-                             workspace: SafarierWorkspace, generation: @escaping @Sendable (UUID, AutomationChannel) async -> Bool) async -> Bool {
+    public enum GenerationExit: Sendable {
+        case drained, drainedCloseRoot, unconfirmed
+    }
+    public typealias Generation = @Sendable (UUID, AutomationChannel, RegisteredControllerIdentity?) async -> GenerationExit
+
+    public static func serve(channel: AutomationChannel, spec: RunnerLaunchSpec, runnerInstanceID: UUID, originalLock: ProfileLock,
+                             workspace: SafarierWorkspace, generation: @escaping Generation) async -> Bool {
+        var epochs = RegistrationEpochHistory()
+        guard await serveRoot(channel: channel, spec: spec, runnerInstanceID: runnerInstanceID, originalLock: originalLock,
+                              workspace: workspace, rendezvous: nil, epochs: &epochs, generation: generation) else { return false }
+        // The inherited root is the only path while the original Manager lives.
+        // A replacement Manager can discover us only after reparenting.
+        do {
+            // A normal quit may close descriptors before launchd reaps the old
+            // Manager. Wait off the UI thread; never accept while it is the parent.
+            while getppid() != 1 { try await Task.sleep(for: .milliseconds(100)) }
+            try Task.checkCancellation()
+            let d = try RegistrationFrame.deadline()
+            let bridge = try KernelIdentityBridge(deadline: d), birth = bridge.ownRegistrationBirth()
+            guard bridge.role == .runner, birth.ppid == 1 else { throw IdentityBridgeError.rejected }
+            let endpoint = try RegisteredRunnerRendezvous(workspace: workspace, profileID: spec.profileID, pid: birth.pid,
+                                                           birth: birth.birth_sec, micros: birth.birth_usec)
+            let listener = try endpoint.listen()
+            while !Task.isCancelled {
+                let next = try await listener.accept()
+                guard await serveRoot(channel: next, spec: spec, runnerInstanceID: runnerInstanceID, originalLock: originalLock,
+                                      workspace: workspace, rendezvous: endpoint.path, epochs: &epochs, generation: generation) else { return false }
+            }
+            return true
+        } catch {
+            RootIdentityDiagnostic.emit("ROOT_DIAG side=runner stage=rendezvous error=\(RootIdentityDiagnostic.classification(error))")
+            return false
+        }
+    }
+
+    private static func serveRoot(channel: AutomationChannel, spec: RunnerLaunchSpec, runnerInstanceID: UUID, originalLock: ProfileLock,
+                                  workspace: SafarierWorkspace, rendezvous: String?, epochs: inout RegistrationEpochHistory,
+                                  generation: @escaping Generation) async -> Bool {
+        let profileID = spec.profileID
         channel.labelRegistration(.rootRunner)
+        var rootAuthenticated = false
+        var generationDrained = true
         enum Stage: String { case bridge, role, parent, reader, lock, prepared, challenge, selfCheck, resources, parentRecheck, peer, lockCheck, response, generation }
         var stage = Stage.bridge
         var inspector: FileHandle?
@@ -230,9 +325,18 @@ public enum RegisteredRunnerServer {
             stage = .role
             guard bridge.role == .runner else { throw IdentityBridgeError.rejected }
             stage = .parent
-            let parent = try bridge.actualParentMetadata(deadline: first)
-            stage = .reader
             let fd = try channel.duplicateInspector(); inspector = fd
+            let parent: BIProcess
+            if let rendezvous {
+                guard getppid() == 1 else { throw IdentityBridgeError.rejected }
+                parent = try bridge.registrationPeerMetadata(bridge.registrationPeerPID(fd: fd.fileDescriptor), deadline: first)
+                try bridge.checkPeer(fd: fd.fileDescriptor, expected: parent, deadline: first, rendezvous: rendezvous)
+            } else { parent = try bridge.actualParentMetadata(deadline: first) }
+            func checkController(_ d: FrameDeadline) throws {
+                if rendezvous == nil { try bridge.checkActualParent(parent, deadline: d) }
+                try bridge.checkPeer(fd: fd.fileDescriptor, expected: parent, deadline: d, rendezvous: rendezvous)
+            }
+            stage = .reader
             let reader = try channel.claimExclusiveReader()
             stage = .lock
             let loan = try originalLock.borrow(profileID: profileID, directory: workspace.locksDirectory)
@@ -248,23 +352,26 @@ public enum RegisteredRunnerServer {
             stage = .resources
             try bridge.checkResources(deadline: first)
             stage = .parentRecheck
-            try bridge.checkActualParent(parent, deadline: first)
             stage = .peer
-            try bridge.checkPeer(fd: fd.fileDescriptor, expected: parent, deadline: first)
+            try checkController(first)
             stage = .lockCheck
             guard loan.check() else { throw IdentityBridgeError.rejected }
             loan.finish()
             stage = .response
             let ready = try AutomationHandshakeCodec.makeResponse(challenge, runnerInstanceID: runnerInstanceID, runnerPID: getpid())
             try await first.run(channel: channel) { try await channel.send(ready) }
+            rootAuthenticated = true
+            if rendezvous != nil {
+                let info = try RegistrationLaunchInfo.encode(spec)
+                try await first.run(channel: channel) { try await channel.send(info) }
+            }
+            let replacement = rendezvous.map { _ in RegisteredControllerIdentity(process: parent) }
             stage = .generation
-            var epochs = RegistrationEpochHistory()
             while let request = try await reader.receive() {
                 let d = try RegistrationFrame.deadline()
                 let epoch = try RegistrationFrame.read(request, kind: "generation")
                 try bridge.checkSelf(deadline: d); try bridge.checkResources(deadline: d)
-                try bridge.checkActualParent(parent, deadline: d)
-                try bridge.checkPeer(fd: fd.fileDescriptor, expected: parent, deadline: d)
+                try checkController(d)
                 guard epochs.accept(epoch) else { throw AutomationError(code: .invalidRequest) }
                 let raw = try await reader.receiveRegisteredDescriptor(timeout: try RegistrationFrame.descriptorTimeout(d))
                 let generationChannel: AutomationChannel
@@ -272,18 +379,25 @@ public enum RegisteredRunnerServer {
                 catch { try? raw.close(); throw error }
                 let ack = try RegistrationFrame.make("accepted", epoch)
                 try await d.run(channel: channel) { try await channel.send(ack) }
-                guard await generation(epoch, generationChannel) else { generationChannel.close(); throw AutomationError(code: .backendUnavailable) }
+                generationDrained = false
+                let finished = await generation(epoch, generationChannel, replacement)
                 generationChannel.close()
+                switch finished {
+                case .unconfirmed: throw AutomationError(code: .backendUnavailable)
+                case .drainedCloseRoot:
+                    channel.close(); try? fd.close(); return true
+                case .drained: generationDrained = true
+                }
                 let finish = try RegistrationFrame.deadline()
-                try bridge.checkActualParent(parent, deadline: finish)
-                try bridge.checkPeer(fd: fd.fileDescriptor, expected: parent, deadline: finish)
+                try checkController(finish)
                 let drained = try RegistrationFrame.make("drained", epoch)
                 try await finish.run(channel: channel) { try await channel.send(drained) }
             }
             channel.close(); try? fd.close(); return true
         } catch {
             RootIdentityDiagnostic.emit("ROOT_DIAG side=runner stage=\(stage.rawValue) error=\(RootIdentityDiagnostic.classification(error))")
-            channel.close(); try? inspector?.close(); return false
+            channel.close(); try? inspector?.close()
+            return generationDrained && (rootAuthenticated || rendezvous != nil)
         }
     }
 }

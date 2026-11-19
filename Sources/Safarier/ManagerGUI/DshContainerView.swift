@@ -192,8 +192,6 @@ struct DshWebViewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        if nsView.url == nil || (nsView.url?.host != url.host || nsView.url?.port != url.port) {
-            nsView.load(URLRequest(url: url))
-        }
+        DshService.shared.updateWebView(nsView, for: url)
     }
 }

@@ -21,7 +21,7 @@ methods = client[client.index('    private func isReserved'):]
 composition = '''
     private init(registered: Bool, validationDelay: Duration, sendDelay: Duration) {
         let transport = AutomationChannel(sendDelay: sendDelay), process = OwnedRunnerProcess()
-        channel = transport; owner = process; pid = process.pid; ownershipID = process.ownershipID
+        channel = transport; owner = RunnerControlPeer(child: process); pid = process.pid; ownershipID = process.ownershipID
         profileID = UUID(); runnerInstanceID = UUID(); absoluteLifetimeDeadline = nil
         fixtureContext = ControllerGenerationContext(channel: transport, registered: registered, validationDelay: validationDelay)
     }
