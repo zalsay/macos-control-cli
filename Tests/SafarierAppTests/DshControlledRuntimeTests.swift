@@ -122,17 +122,21 @@ final class DshControlledRuntimeTests: XCTestCase {
     final class FakeBackend: DshControlledRuntime.Backend, @unchecked Sendable {
         let tree: URL
         var detached = 0
+        var attachedImages: [URL] = []
+        var onAttach: ((URL) -> Void)?
         init(tree: URL) { self.tree = tree }
         func attach(image: URL, mount: URL) throws -> DshControlledRuntime.Mount {
-            DshControlledRuntime.Mount(root: tree, device: "test", session: mount.deletingLastPathComponent())
+            attachedImages.append(image)
+            onAttach?(image)
+            return DshControlledRuntime.Mount(root: tree, device: "test", session: mount.deletingLastPathComponent())
         }
         func validateNode(_ node: URL, teamID: String) throws {}
         func detach(_ mount: DshControlledRuntime.Mount) throws { detached += 1; try FileManager.default.removeItem(at: mount.session) }
     }
     func testReviewedAnchorAndMissingSidecarFailClosed() async throws {
         let anchor = try XCTUnwrap(DshControlledRuntime.reviewedAnchor)
-        XCTAssertEqual(anchor.imageSHA256, "53fad47a4ffc8cd0a8e9989ae619d1cfbe34618f7c9d921f52086ae4c5e01a9a")
-        XCTAssertEqual(anchor.manifestSHA256, "b4f513bfec24a40c0f4d5cdb8181017f790ce7857a871e9a3ed5cd8165586c5a")
+        XCTAssertEqual(anchor.imageSHA256, "0f29271d5109a558f5b72eca5b54e5eac101b3253bcb0a5d94fd8b7642ef9f47")
+        XCTAssertEqual(anchor.manifestSHA256, "6302ccf5f9e3dc649f11a231f691ea61166bf6cdabbedf29a31526ad152e7082")
         XCTAssertEqual(anchor.nodeSHA256, "27db838bb204ef7c21df2931f5656e4c8fb32e6e947f363a402b49714d32b5b1")
         XCTAssertEqual(anchor.nodeTeamID, "HX7739G8FX")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -208,8 +212,9 @@ final class DshControlledRuntimeTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: versions.path)
         defer { try? FileManager.default.removeItem(at: base) }
         func hash(_ d: Data) -> String { SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined() }
-        let node = Data("node".utf8), entry = Data("entry".utf8), image = Data("image".utf8)
+        let node = Data("node".utf8), entry = Data("entry".utf8), image = Data("image".utf8), unrelated = Data("hello".utf8)
         try node.write(to: tree.appendingPathComponent("node/node")); try entry.write(to: tree.appendingPathComponent("dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"))
+        try unrelated.write(to: tree.appendingPathComponent("dsh/node_modules/@deepseek-ai/dsh/lib/unrelated.js"))
         var entries: [[String: Any]] = []
         func add(_ path: String, _ type: String, _ data: Data? = nil) throws {
             let url = path == "." ? tree : tree.appendingPathComponent(path)
@@ -220,27 +225,54 @@ final class DshControlledRuntimeTests: XCTestCase {
         }
         for path in [".", "node", "dsh", "dsh/node_modules", "dsh/node_modules/@deepseek-ai", "dsh/node_modules/@deepseek-ai/dsh", "dsh/node_modules/@deepseek-ai/dsh/lib"] { try add(path, "directory") }
         try add("node/node", "file", node); try add("dsh/node_modules/@deepseek-ai/dsh/lib/bin.js", "file", entry)
+        try add("dsh/node_modules/@deepseek-ai/dsh/lib/unrelated.js", "file", unrelated)
         let manifest = try JSONSerialization.data(withJSONObject: ["format": 1, "entries": entries])
+        try Data("world".utf8).write(to: tree.appendingPathComponent("dsh/node_modules/@deepseek-ai/dsh/lib/unrelated.js"))
+        XCTAssertThrowsError(try DshControlledRuntime.verifyTree(tree, manifest: DshControlledRuntime.parseManifest(manifest)), "the fixture differs outside the two startup-pinned files")
         let version = versions.appendingPathComponent(hash(image)); try FileManager.default.createDirectory(at: version, withIntermediateDirectories: false)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: version.path)
-        try image.write(to: version.appendingPathComponent("runtime.dmg")); try manifest.write(to: version.appendingPathComponent("manifest.json"))
+        let imageURL = version.appendingPathComponent("runtime.dmg")
+        try image.write(to: imageURL); try manifest.write(to: version.appendingPathComponent("manifest.json"))
         let backend = FakeBackend(tree: tree)
+        var sourceSwapError: Error?
+        backend.onAttach = { _ in
+            do { try Data("swapped".utf8).write(to: imageURL) }
+            catch { sourceSwapError = error }
+        }
         let anchor = DshControlledRuntime.Anchor(imageSHA256: hash(image), manifestSHA256: hash(manifest), nodeSHA256: hash(node), nodeTeamID: "test")
         let runtime = DshControlledRuntime(anchor: anchor, versionsRoot: versions, backend: backend)
         let lease = try await runtime.acquire()
         XCTAssertEqual(lease.nodeURL, tree.appendingPathComponent("node/node"))
+        XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(backend.attachedImages.first)), image, "mount input is the verified private snapshot even if the source pathname changes")
+        XCTAssertTrue(try XCTUnwrap(backend.attachedImages.first).deletingLastPathComponent().lastPathComponent.hasPrefix("safarier-dsh-\(hash(image))-"))
+        XCTAssertNil(sourceSwapError)
+        XCTAssertEqual(try Data(contentsOf: imageURL), Data("swapped".utf8), "the source path changed after the verified copy was made")
         XCTAssertEqual(backend.detached, 0)
         try await lease.close(); XCTAssertEqual(backend.detached, 1)
+        backend.onAttach = nil
+        try image.write(to: imageURL)
+        try Data("other".utf8).write(to: tree.appendingPathComponent("dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"))
+        do { _ = try await runtime.acquire(); XCTFail("tampered DSH entry") } catch {}
+        XCTAssertEqual(backend.detached, 2)
+        try entry.write(to: tree.appendingPathComponent("dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"))
+        let lib = tree.appendingPathComponent("dsh/node_modules/@deepseek-ai/dsh/lib")
+        let libCopy = tree.appendingPathComponent("dsh/node_modules/@deepseek-ai/dsh/lib-copy")
+        try FileManager.default.moveItem(at: lib, to: libCopy)
+        try FileManager.default.createSymbolicLink(at: lib.path, withDestinationPath: "lib-copy")
+        do { _ = try await runtime.acquire(); XCTFail("symlinked DSH entry ancestor") } catch {}
+        XCTAssertEqual(backend.detached, 3)
+        try FileManager.default.removeItem(at: lib)
+        try FileManager.default.moveItem(at: libCopy, to: lib)
         let alias = base.appendingPathComponent("alias")
         try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: versions.path)
         let aliased = DshControlledRuntime(anchor: anchor, versionsRoot: alias, backend: backend)
         do { _ = try await aliased.acquire(); XCTFail("symlinked versions root") } catch {}
-        XCTAssertEqual(backend.detached, 1)
+        XCTAssertEqual(backend.detached, 3)
         try Data("corrupt".utf8).write(to: tree.appendingPathComponent("node/node"))
         do { _ = try await runtime.acquire(); XCTFail("tree mismatch") } catch {}
-        XCTAssertEqual(backend.detached, 2)
-        try Data("changed".utf8).write(to: version.appendingPathComponent("runtime.dmg"))
+        XCTAssertEqual(backend.detached, 4)
+        try Data("changed".utf8).write(to: imageURL)
         do { _ = try await runtime.acquire(); XCTFail("image mismatch") } catch {}
-        XCTAssertEqual(backend.detached, 2)
+        XCTAssertEqual(backend.detached, 4)
     }
 }

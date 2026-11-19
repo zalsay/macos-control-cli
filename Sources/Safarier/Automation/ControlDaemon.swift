@@ -12,6 +12,7 @@ struct ControlBrokerReply: Codable {
     var connection: UUID?
     var frame: UUID?
     var screenshotPath: String?
+    var remoteScreenshotUnavailable: Bool?
     var viewport: AutomationViewport?
     var ocr: SemanticOCRResult?
     var selection: SemanticDecision?
@@ -29,7 +30,29 @@ struct ControlBrokerReply: Codable {
     var terminatedOwnedRunner: Bool?
     var retainedBrowser: RetainedBrowserCleanup?
     var controlReleased: ControlReleaseReceipt?
+    var authorization: HostAuthorizationReceipt?
     init(_ id: UUID, status: String, error: String? = nil) { self.version = 1; self.requestID = id; self.status = status; self.error = error }
+}
+
+struct HostAuthorizationReceipt: Codable, Equatable, Sendable {
+    let requestID: UUID
+    let status: String
+    let osStatus: Int32?
+    let statusDescription: String
+    let businessEventSent: Bool
+
+    init(requestID: UUID, status: String, osStatus: Int32? = nil, statusDescription: String, businessEventSent: Bool = false) {
+        self.requestID = requestID
+        self.status = status
+        self.osStatus = osStatus
+        self.statusDescription = statusDescription
+        self.businessEventSent = businessEventSent
+    }
+
+    init(requestID: UUID, reply: ControlAuthorization.Reply) {
+        self.init(requestID: requestID, status: reply.status, osStatus: reply.osStatus,
+                  statusDescription: "本次授权请求的系统回执：\(reply.statusDescription)这是历史回执，不是当前权限探测；没有发送业务事件。")
+    }
 }
 
 /// All 18 transport slots include unauthenticated handshakes. After decoding,
@@ -87,7 +110,15 @@ final class ControlBroker {
     private var cache: [UUID: CacheEntry] = [:]
     private var opening = false
     private var stopping = false
+    private var stopCommitScheduled = false
     private var pendingAcknowledgements: [UUID: (Session, Bool)] = [:]
+    private struct AuthorizationAttempt {
+        let requestID: UUID
+        var receipt: HostAuthorizationReceipt
+    }
+    private var authorizationAttempt: AuthorizationAttempt?
+    private let hostProfileID: UUID?
+    private let authorize: @MainActor (Bool) async -> ControlAuthorization.Reply
     #if SAFARIER_CONTROL_TESTING
     private var testChildDiagnostic: ((UUID, UUID) -> Void)?
     #endif
@@ -98,20 +129,27 @@ final class ControlBroker {
         NavigationDiagnostic.screenshotChild(parent: parent, child: child)
     }
 
-    init(applicationPath: String) throws {
+    init(applicationPath: String, runtimePath: String) throws {
         let manager = try ControlAppleEventClient(applicationPath: applicationPath)
         sender = { request in try await manager.send(request) }
+        authorize = { request in await manager.authorization(request: request) }
+        hostProfileID = RemoteHostRuntime.profileID(runtimePath: runtimePath)
         loadDecisionConfig = { try ControlDecisionConfig.load() }
         recognize = { path, viewport in await ControlOCR.shared.recognize(path:path,viewport:viewport) }
         decide = { config, request, cancellation in try await ControlDecision.decide(config:config,request:request,cancellation:cancellation) }
     }
     #if SAFARIER_CONTROL_TESTING
     init(testSender: @escaping @MainActor (AutomationRequest) async throws -> AutomationReply,
+         testAuthorization: @escaping @MainActor (Bool) async -> ControlAuthorization.Reply = { _ in
+             ControlAuthorization.Reply(status: "unavailable", osStatus: nil)
+         },
+         testHostProfileID: UUID? = nil,
          testConfig: @escaping () throws -> ControlDecisionConfig = { try ControlDecisionConfig.load() },
          testOCR: @escaping (String, AutomationViewport) async -> SemanticOCRResult = { path, viewport in await ControlOCR.shared.recognize(path:path,viewport:viewport) },
          testDecision: @escaping (ControlDecisionConfig, Data, ControlCancellation) async throws -> Data = { config, request, cancellation in try await ControlDecision.decide(config:config,request:request,cancellation:cancellation) },
          testChildDiagnostic: ((UUID, UUID) -> Void)? = nil) {
-        sender=testSender; loadDecisionConfig=testConfig; recognize=testOCR; decide=testDecision; self.testChildDiagnostic = testChildDiagnostic
+        sender=testSender; authorize=testAuthorization; hostProfileID=testHostProfileID
+        loadDecisionConfig=testConfig; recognize=testOCR; decide=testDecision; self.testChildDiagnostic = testChildDiagnostic
     }
     #endif
 
@@ -162,7 +200,7 @@ final class ControlBroker {
         }
         guard !stopping else { return (encode(response(request, "SESSION_BUSY")), nil) }
         let reserved: Bool
-        switch request.operation { case .cancel, .disconnect, .release, .daemonStop: reserved = true; default: reserved = false }
+        switch request.operation { case .cancel, .disconnect, .release, .daemonStop, .authorizationStatus: reserved = true; default: reserved = false }
         cache[request.requestID] = CacheEntry(request: canonical, response: nil)
         let reply = await perform(request, reserved: reserved)
         let data = encode(reply)
@@ -179,6 +217,12 @@ final class ControlBroker {
             session.uncertain = true
         }
     }
+    /// A cached stop reply must not schedule cleanup a second time.
+    func claimStopCommit() -> Bool {
+        guard stopping, !stopCommitScheduled else { return false }
+        stopCommitScheduled = true
+        return true
+    }
     private func encode(_ reply: ControlBrokerReply) -> Data {
         (try? JSONEncoder().encode(reply)) ?? Data("{\"version\":1,\"status\":\"error\"}".utf8)
     }
@@ -187,6 +231,7 @@ final class ControlBroker {
         if case .status = request.operation { return result }
         if case .daemonStop = request.operation {
             guard sessions.isEmpty, pendingAcknowledgements.isEmpty, !opening,
+                  authorizationAttempt?.receipt.status != "pending",
                   !cache.contains(where: { $0.key != request.requestID && $0.value.response == nil }) else { return response(request, "SESSION_BUSY") }
             stopping = true
             return result
@@ -194,6 +239,31 @@ final class ControlBroker {
         if case .capabilities = request.operation {
             do { guard case let .capabilities(caps) = try await exchange(request.requestID, .capabilities, nil) else { return response(request, "INVALID_REPLY") }; result.capabilities = caps; return result }
             catch { return response(request, "UNAVAILABLE") }
+        }
+        if case .authorizationRequest = request.operation {
+            guard hostProfileID != nil else { return response(request, "HOST_PROFILE_REQUIRED") }
+            if let authorizationAttempt, authorizationAttempt.receipt.status == "pending" {
+                result.authorization = HostAuthorizationReceipt(requestID: authorizationAttempt.requestID, status: "pending",
+                    statusDescription: "系统授权请求正在等待用户处理；没有发送业务事件。")
+                return result
+            }
+            let authorizationID = request.requestID
+            authorizationAttempt = AuthorizationAttempt(requestID: authorizationID, receipt: HostAuthorizationReceipt(
+                requestID: authorizationID, status: "pending", statusDescription: "系统授权请求已派发，等待用户处理；没有发送业务事件。"))
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let reply = await self.authorize(true)
+                guard self.authorizationAttempt?.requestID == authorizationID else { return }
+                self.authorizationAttempt?.receipt = HostAuthorizationReceipt(requestID: authorizationID, reply: reply)
+            }
+            result.authorization = authorizationAttempt?.receipt
+            return result
+        }
+        if case let .authorizationStatus(authorizationID) = request.operation {
+            guard hostProfileID != nil, let attempt = authorizationAttempt,
+                  attempt.requestID == authorizationID else { return response(request, "AUTHORIZATION_NOT_FOUND") }
+            result.authorization = attempt.receipt
+            return result
         }
         if case let .connect(profileID) = request.operation {
             guard !opening else { return response(request, "SESSION_BUSY") }
@@ -360,11 +430,15 @@ enum ControlDaemon {
     static func serve(applicationPath: String, runtimePath: String) throws {
         guard cs_control_verify_self() == 1 else { throw ControlRuntime.Failure.unsafe }
         let runtime = try ControlRuntime(path: runtimePath, create: true)
-        let broker = try ControlBroker(applicationPath: applicationPath)
+        let broker = try ControlBroker(applicationPath: applicationPath, runtimePath: runtimePath)
         let instance = ControlRuntime.applicationInstance(applicationPath)
         let admission = ControlAdmission()
         let (listener, socketPin) = try runtime.listenSocket()
         let source = DispatchSource.makeReadSource(fileDescriptor: listener, queue: DispatchQueue.global(qos: .userInitiated))
+        source.setCancelHandler {
+            Darwin.close(listener)
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
         source.setEventHandler {
             let descriptor = Darwin.accept(listener, nil, nil)
             guard descriptor >= 0 else { return }
@@ -377,7 +451,7 @@ enum ControlDaemon {
                     let (request, peer, hello) = try ControlRuntime.serverReceive(descriptor, instance: instance)
                     try runtime.validateSocket(socketPin)
                     let ordinary: Bool
-                    switch request.operation { case .cancel, .disconnect, .release, .daemonStop: ordinary = false; default: ordinary = true }
+                    switch request.operation { case .cancel, .disconnect, .release, .daemonStop, .authorizationStatus: ordinary = false; default: ordinary = true }
                     guard admission.claim(ordinary: ordinary) else { Darwin.close(descriptor); admission.finish(ordinary: false); return }
                     Task { @MainActor in
                         do {
@@ -387,7 +461,9 @@ enum ControlDaemon {
                         let (reply, acknowledgement) = await broker.handle(request)
                         let shouldStop: Bool
                         if case .daemonStop = request.operation,
-                           let parsed = try? JSONDecoder().decode(ControlBrokerReply.self, from: reply), parsed.status == "ok" { shouldStop = true }
+                           let parsed = try? JSONDecoder().decode(ControlBrokerReply.self, from: reply), parsed.status == "ok" {
+                            shouldStop = broker.claimStopCommit()
+                        }
                         else { shouldStop = false }
                         DispatchQueue.global(qos: .userInitiated).async {
                             defer { Darwin.close(descriptor); admission.finish(ordinary: ordinary) }
@@ -396,12 +472,6 @@ enum ControlDaemon {
                                 try runtime.validateSocket(socketPin)
                                 try ControlRuntime.serverReply(descriptor, reply: reply, peer: peer, hello: hello)
                                 received = true
-                                if shouldStop {
-                                    try runtime.removeOwnedSocket(socketPin)
-                                    source.cancel()
-                                    Darwin.close(listener)
-                                    CFRunLoopStop(CFRunLoopGetMain())
-                                }
                             } catch {
                                 #if SAFARIER_BOUND_LOCAL_CANDIDATE
                                 let code: String
@@ -417,6 +487,16 @@ enum ControlDaemon {
                                 NavigationDiagnostic.emitID(request.requestID, "server.reply.catch", code)
                                 #endif
                                 /* A lost acknowledgement is never a retry. */
+                            }
+                            if shouldStop {
+                                // The authenticated, idle stop was committed by the
+                                // broker before replying. A disconnected client must
+                                // not leave the broker permanently stuck in stopping.
+                                do { try runtime.removeOwnedSocket(socketPin) }
+                                catch {
+                                    NavigationDiagnostic.emitID(request.requestID, "server.stop.cleanup", "CLEANUP_UNCONFIRMED")
+                                }
+                                source.cancel()
                             }
                             if let acknowledgement { Task { @MainActor in broker.acknowledgement(acknowledgement, received: received) } }
                         }

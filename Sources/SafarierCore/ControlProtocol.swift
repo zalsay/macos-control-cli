@@ -52,6 +52,8 @@ public enum ControlProtocol {
         case .status: name = "status"
         case .daemonStop: name = "daemonStop"
         case .capabilities: name = "capabilities"
+        case .authorizationRequest: name = "authorizationRequest"
+        case .authorizationStatus(let id): name = "authorizationStatus"; params["requestID"] = id.uuidString
         case .connect(let id): name = "connect"; params["profile"] = id.uuidString
         case .state(let c): name = "state"; params["connection"] = c.uuidString
         case .observe(let c): name = "observe"; params["connection"] = c.uuidString
@@ -80,7 +82,8 @@ public enum ControlProtocol {
         guard Set(root.keys) == ["version","requestID","operation","parameters"], let id = (root["requestID"] as? String).flatMap(UUID.init(uuidString:)), let name = root["operation"] as? String, let params = root["parameters"] as? [String:Any] else { throw ControlError.invalidRequest }
         let expected: Set<String>
         switch name {
-        case "status", "capabilities", "daemonStop": expected = []
+        case "status", "capabilities", "daemonStop", "authorizationRequest": expected = []
+        case "authorizationStatus": expected = ["requestID"]
         case "connect": expected = ["profile"]
         case "state", "observe", "cancel", "disconnect", "release": expected = ["connection"]
         case "select-file": expected = ["connection", "paths"]
@@ -95,10 +98,21 @@ public enum ControlProtocol {
         default: throw ControlError.invalidRequest
         }
         guard Set(params.keys) == expected else { throw ControlError.invalidRequest }
-        var args = name == "daemonStop" ? ["daemon", "stop"] : [name == "pressEnterAndWait" ? "press" : name == "clickAndWait" ? "click" : name]
+        var args: [String]
+        switch name {
+        case "daemonStop": args = ["daemon", "stop"]
+        case "authorizationRequest": args = ["authorization-request"]
+        case "authorizationStatus": args = ["authorization-status"]
+        default: args = [name == "pressEnterAndWait" ? "press" : name == "clickAndWait" ? "click" : name]
+        }
+        if name == "authorizationStatus" {
+            guard let raw = params["requestID"] as? String, UUID(uuidString: raw) != nil else { throw ControlError.invalidRequest }
+            args += ["--request", raw]
+        }
         if name == "pressEnterAndWait" { args += ["--key", "Enter", "--wait-navigation"] }
         if name == "clickAndWait" { args.append("--wait-navigation") }
         for key in expected.sorted() {
+            if name == "authorizationStatus", key == "requestID" { continue }
             guard let value = params[key] else { throw ControlError.invalidRequest }
             if key == "paths" {
                 guard let paths = value as? [String], AutomationFileSelection.valid(paths) else { throw ControlError.invalidRequest }

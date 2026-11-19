@@ -47,7 +47,7 @@ struct DshContainerView: View {
             VStack(spacing: 6) {
                 Text("正在启动 DeepSeek Harness (dsh) 服务…")
                     .font(.system(size: 14, weight: .semibold))
-                Text("正在分配空闲端口并加载智能体 Web 界面，通常需要 1 ~ 3 秒。")
+                Text("正在验证运行时镜像并加载智能体 Web 界面。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

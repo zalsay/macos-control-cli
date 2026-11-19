@@ -8,7 +8,7 @@ public enum ManagerLaunchPolicy {
     }
 }
 public enum ManagerLaunchEvent: Sendable {
-    case automation, interactive, interactiveWithoutActivation, openApplication, finishedLaunching, windowClosed(pendingCommands: Int), quit
+    case automation, interactive, interactiveWithoutActivation, openApplication, finishedLaunching, windowClosed(pendingCommands: Int), terminationCancelled, quit
     case quitRequested(pendingCommands: Int), pendingCommandsChanged(Int)
 }
 public enum ManagerLaunchEffect: Equatable, Sendable { case showManager, showManagerWithoutActivation, terminate, cancelPending, deferTermination, replyToTermination }
@@ -53,6 +53,11 @@ public struct ManagerLaunchState: Sendable {
             humanWindow = false
             if pending > 0 { awaitingWindowDrain = true; return [] }
             return [.terminate]
+        case .terminationCancelled:
+            terminating = false
+            awaitingTerminationReply = false
+            awaitingWindowDrain = false
+            return []
         case .quit:
             return handle(.quitRequested(pendingCommands: 0))
         case .quitRequested(let pending):

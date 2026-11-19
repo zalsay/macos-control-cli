@@ -7,6 +7,7 @@ public struct ControlOptions: Equatable, Sendable {
 }
 public enum ControlOperation: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     case help, daemonStart, daemonServe, daemonStop, status, capabilities
+    case authorizationRequest, authorizationStatus(requestID: UUID)
     case connect(profileID: UUID), state(connection: UUID), observe(connection: UUID), navigate(connection: UUID, url: URL)
     case clickTarget(connection: UUID, target: String)
     case selectFile(connection: UUID, paths: [String])
@@ -32,7 +33,7 @@ public enum ControlCLIParser {
         var args = arguments
         if args.first == "control" { args.removeFirst() }
         var globals: [String: String] = [:], rest: [String] = []
-        let valuedOptions: Set<String> = ["--profile", "--connection", "--frame", "--url", "--x", "--y", "--count", "--text", "--key", "--target", "--path"]
+        let valuedOptions: Set<String> = ["--profile", "--connection", "--frame", "--url", "--x", "--y", "--count", "--text", "--key", "--target", "--path", "--request"]
         var i = 0
         while i < args.count {
             let item = args[i]
@@ -77,6 +78,8 @@ public enum ControlCLIParser {
         switch command {
         case "status": try require([]); op = .status
         case "capabilities": try require([]); op = .capabilities
+        case "authorization-request": try require([]); op = .authorizationRequest
+        case "authorization-status": try require(["--request"]); op = .authorizationStatus(requestID: try uuid("--request"))
         case "connect": try require(["--profile"]); op = .connect(profileID: try uuid("--profile"))
         case "state", "observe", "cancel", "disconnect", "release":
             try require(["--connection"]); let c = try uuid("--connection")

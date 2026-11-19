@@ -8,6 +8,8 @@ enum ControlCLI {
     Usage: Safarier control [--app ABSOLUTE_APP] [--runtime ABSOLUTE_PRIVATE_DIRECTORY] COMMAND
       daemon start|serve|stop
       status | capabilities
+      authorization-request
+      authorization-status --request AUTHORIZATION_REQUEST_UUID
       connect --profile PROFILE_UUID
       state|observe|cancel|disconnect|release --connection CONNECTION_UUID
       navigate --connection CONNECTION_UUID --url ABSOLUTE_URL
@@ -37,6 +39,8 @@ enum ControlCLI {
     PageUp/PageDown do not accept --shift or --wait-navigation.
     Wheel is unavailable. Registered control remains connected until release or a real connection failure;
     request IDs remain recorded to prevent duplicate execution.
+    Host authorization requests are local-only and require an existing profile Host runtime. The request
+    returns pending immediately; authorization-status only reads that request's receipt and never retries.
     """
     static func run(_ arguments: [String]) -> Int32 {
         do {
@@ -64,6 +68,8 @@ enum ControlCLI {
                 } else { operation = parsed.operation }
                 return try exchange(operation, applicationPath: app, runtimePath: root)
             }
+        } catch ControlRuntime.Failure.cleanupUnconfirmed {
+            FileHandle.standardError.write(Data("control: daemon stop unconfirmed; no automatic retry\n".utf8)); return 1
         } catch ControlRuntime.Failure.indeterminate {
             FileHandle.standardError.write(Data("control: indeterminate result; no automatic retry\n".utf8)); return 1
         } catch {
@@ -71,30 +77,53 @@ enum ControlCLI {
         }
     }
     private static func exchange(_ operation: ControlOperation, applicationPath: String, runtimePath: String) throws -> Int32 {
+        let request = ControlRequest(requestID: UUID(), operation: operation)
+        let data = try exchange(request, applicationPath: applicationPath, runtimePath: runtimePath)
+        let reply = try decodeReply(data, requestID: request.requestID)
+        FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data("\n".utf8))
+        return reply.status == "ok" ? 0 : 1
+    }
+
+    /// Exchange a pre-validated request with the existing local daemon. Remote
+    /// control uses this entry point so the daemon sees the original request ID
+    /// and retains its normal identity checks and replay protection.
+    nonisolated static func exchange(_ request: ControlRequest, applicationPath: String, runtimePath: String,
+                                     expectedPeerPID: Int32? = nil) throws -> Data {
         let runtime = try ControlRuntime(path: runtimePath, create: false)
         let (fd, socketPin) = try runtime.connectSocket()
         defer { Darwin.close(fd) }
-        let id = UUID()
-        let diagnosticRequest = ControlRequest(requestID: id, operation: operation)
+        let diagnosticRequest = request
         NavigationDiagnostic.emit(diagnosticRequest, "cli.request")
         var replyReceived = false
         defer { if !replyReceived { NavigationDiagnostic.emit(diagnosticRequest, "cli.failure", "error") } }
         var validated: ControlBrokerReply?
-        let data = try ControlRuntime.clientExchange(fd, request: ControlRequest(requestID: id, operation: operation), instance: ControlRuntime.applicationInstance(applicationPath), validatePath: {
+        let data = try ControlRuntime.clientExchange(fd, request: request, instance: ControlRuntime.applicationInstance(applicationPath),
+                                                     expectedPeerPID: expectedPeerPID, validatePath: {
             try runtime.validateSocket(socketPin)
         }, validateReply: { bytes in
             guard let reply = try? JSONDecoder().decode(ControlBrokerReply.self, from: bytes),
-                  reply.version == 1, reply.requestID == id,
+                  reply.version == 1, reply.requestID == request.requestID,
                   (reply.status == "ok" && reply.error == nil) || (reply.status == "error" && reply.error != nil) else {
                 throw ControlRuntime.Failure.indeterminate
             }
             validated = reply
         })
-        guard let reply = validated else { throw ControlRuntime.Failure.indeterminate }
+        guard let validated else { throw ControlRuntime.Failure.indeterminate }
+        if case .daemonStop = request.operation, validated.status == "ok" {
+            try runtime.waitForSocketRemoval(socketPin)
+        }
         replyReceived = true
-        NavigationDiagnostic.emit(diagnosticRequest, "cli.reply", reply.status == "ok" ? "ok" : (reply.error ?? "error"))
-        FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data("\n".utf8))
-        return reply.status == "ok" ? 0 : 1
+        NavigationDiagnostic.emit(diagnosticRequest, "cli.reply", validated.status == "ok" ? "ok" : (validated.error ?? "error"))
+        return data
+    }
+
+    nonisolated static func decodeReply(_ data: Data, requestID: UUID) throws -> ControlBrokerReply {
+        guard let reply = try? JSONDecoder().decode(ControlBrokerReply.self, from: data),
+              reply.version == 1, reply.requestID == requestID,
+              (reply.status == "ok" && reply.error == nil) || (reply.status == "error" && reply.error != nil) else {
+            throw ControlRuntime.Failure.indeterminate
+        }
+        return reply
     }
     private static func start(applicationPath: String, runtimePath: String) throws -> Int32 {
         _ = try ControlRuntime(path: runtimePath, create: true)

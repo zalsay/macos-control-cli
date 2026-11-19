@@ -2,6 +2,210 @@ import AppKit
 import Foundation
 import Combine
 import WebKit
+import Darwin
+
+struct DshLANConfiguration: Equatable {
+    static let fileName = "lan-listener.json"
+    static let trustedHost = "i.meetlife.com.cn:3000"
+    static let publicURL = "https://i.meetlife.com.cn:3000/dsh-mac/"
+    static let port = 61919
+
+    let bindAddress: String
+
+    static func load(from url: URL, localIPv4Addresses: Set<String>) -> Self? {
+        guard let data = readUserOwned0600File(at: url),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let fields = object as? [String: Any],
+              Set(fields.keys) == Set(["version", "enabled", "bindAddress"]),
+              let version = fields["version"] as? NSNumber,
+              CFGetTypeID(version) != CFBooleanGetTypeID(),
+              version.intValue == 1, version.doubleValue == 1,
+              let enabled = fields["enabled"] as? NSNumber,
+              CFGetTypeID(enabled) == CFBooleanGetTypeID(), enabled.boolValue,
+              let address = fields["bindAddress"] as? String,
+              isPrivateIPv4(address), localIPv4Addresses.contains(address) else { return nil }
+        return Self(bindAddress: address)
+    }
+
+    static func arguments(for configuration: Self?) -> [String] {
+        var arguments = ["web", "--no-open", "--port", String(port)]
+        guard let configuration else { return arguments }
+        arguments += ["--host", configuration.bindAddress,
+                      "--public-url", publicURL,
+                      "--trusted-host", trustedHost]
+        return arguments
+    }
+
+    static func localIPv4Addresses() -> Set<String> {
+        var addresses = Set<String>()
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0, let head = first else { return addresses }
+        defer { freeifaddrs(first) }
+
+        var cursor: UnsafeMutablePointer<ifaddrs>? = head
+        while let current = cursor {
+            if let address = current.pointee.ifa_addr,
+               address.pointee.sa_family == UInt8(AF_INET) {
+                var ipv4 = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+                var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                if inet_ntop(AF_INET, &ipv4, &buffer, socklen_t(buffer.count)) != nil {
+                    addresses.insert(String(cString: buffer))
+                }
+            }
+            cursor = current.pointee.ifa_next
+        }
+        return addresses
+    }
+
+    private static func isPrivateIPv4(_ address: String) -> Bool {
+        let octets = address.split(separator: ".").compactMap { UInt8($0) }
+        guard octets.count == 4, octets.map(String.init).joined(separator: ".") == address else { return false }
+        return octets[0] == 10
+            || (octets[0] == 172 && (16...31).contains(octets[1]))
+            || (octets[0] == 192 && octets[1] == 168)
+    }
+
+    private static func readUserOwned0600File(at url: URL) -> Data? {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+
+        var attributes = stat()
+        guard fstat(descriptor, &attributes) == 0,
+              (attributes.st_mode & S_IFMT) == S_IFREG,
+              attributes.st_uid == geteuid(),
+              (attributes.st_mode & 0o777) == 0o600 else { return nil }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = read(descriptor, &buffer, buffer.count)
+            if count == 0 { return data }
+            if count < 0 {
+                if errno == EINTR { continue }
+                return nil
+            }
+            data.append(contentsOf: buffer.prefix(count))
+            if data.count > 16_384 { return nil }
+        }
+    }
+}
+
+struct DshNativeLaunchReceipt: Encodable {
+    let version = 1
+    let service = "dsh"
+    let bindAddress: String
+    let port = DshLANConfiguration.port
+    let publicURL = DshLANConfiguration.publicURL
+    let token: String
+
+    static let fileName = "native-launch.json"
+
+    static func write(_ receipt: Self, to url: URL) throws {
+        let data = try JSONEncoder().encode(receipt)
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let temporary = directory.appendingPathComponent(".\(fileName).\(UUID().uuidString).tmp")
+        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(S_IRUSR | S_IWUSR))
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        var shouldRemoveTemporary = true
+        defer {
+            close(descriptor)
+            if shouldRemoveTemporary { unlink(temporary.path) }
+        }
+        guard fchmod(descriptor, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var offset = 0
+            while offset < rawBuffer.count {
+                let count = Darwin.write(descriptor, baseAddress.advanced(by: offset), rawBuffer.count - offset)
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                offset += count
+            }
+        }
+        guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard rename(temporary.path, url.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        shouldRemoveTemporary = false
+
+        let directoryDescriptor = open(directory.path, O_RDONLY | O_DIRECTORY)
+        if directoryDescriptor >= 0 {
+            _ = fsync(directoryDescriptor)
+            close(directoryDescriptor)
+        }
+    }
+
+    static func remove(at url: URL) {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW)
+        guard descriptor >= 0 else { return }
+        var attributes = stat()
+        let safeToRemove = fstat(descriptor, &attributes) == 0
+            && (attributes.st_mode & S_IFMT) == S_IFREG
+            && attributes.st_uid == geteuid()
+        close(descriptor)
+        if safeToRemove { _ = unlink(url.path) }
+    }
+}
+
+enum DshStartupURL {
+    static func advertisedURL(in text: String) -> URL? {
+        guard let range = text.range(of: "https?://[^\\s\\)\\]]+", options: .regularExpression) else { return nil }
+        return URL(string: String(text[range]))
+    }
+
+    static func token(in url: URL) -> String? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = components.queryItems,
+              items.count == 1, items[0].name == "token",
+              let token = items[0].value, !token.isEmpty,
+              token.utf8.count <= 4096,
+              !token.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return nil }
+        return token
+    }
+
+    static func localBootstrapURL(bindAddress: String, token: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "http"
+        // Keep the native WebView on the bound Mac address, never the portal URL.
+        components.host = bindAddress
+        components.port = DshLANConfiguration.port
+        components.path = "/"
+        components.queryItems = [URLQueryItem(name: "token", value: token)]
+        return components.url
+    }
+
+    static func isExpectedPublicURL(_ url: URL) -> Bool {
+        guard let actual = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let expected = URLComponents(string: DshLANConfiguration.publicURL),
+              actual.scheme == expected.scheme, actual.host == expected.host, actual.port == expected.port,
+              actual.path == expected.path, actual.user == nil, actual.password == nil, actual.fragment == nil,
+              token(in: url) != nil else { return false }
+        return true
+    }
+
+    static func sanitizedLog(_ text: String) -> String {
+        if text.hasPrefix("dsh web: ") { return "dsh web: [startup URL redacted]" }
+        return text.replacingOccurrences(
+            of: "([?&]token=)[^&\\s\\)\\]]+",
+            with: "$1[redacted]",
+            options: .regularExpression
+        )
+    }
+}
+
+private enum DshOutputStream: Equatable {
+    case stdout
+    case stderr
+}
 
 /// DeepSeek Harness (dsh) 本地服务生命周期管控层。
 /// 负责检测 dsh CLI、启动后台 Web UI 服务（固定端口 61919）、解析认证 URL 并管理进程生命周期。
@@ -26,6 +230,11 @@ final class DshService: ObservableObject {
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private var terminationObserver: NSObjectProtocol?
+    private let availableIPv4Addresses: () -> Set<String>
+    private var activeLANConfiguration: DshLANConfiguration?
+    private var launchReceiptURL: URL?
+    private var pendingStdoutLine = ""
+    private var pendingStderrLine = ""
 
     #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
     typealias ControlledProvider = () async throws -> any DshControlledRuntime.Lease
@@ -44,14 +253,19 @@ final class DshService: ObservableObject {
 
     init(controlledProvider: @escaping ControlledProvider = { try await DshControlledRuntime().acquire() },
          homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
-         environment: @escaping () -> [String: String] = { ProcessInfo.processInfo.environment }) {
+         environment: @escaping () -> [String: String] = { ProcessInfo.processInfo.environment },
+         availableIPv4Addresses: @escaping () -> Set<String> = { DshLANConfiguration.localIPv4Addresses() }) {
         self.controlledProvider = controlledProvider
         self.controlledHome = homeURL
         self.controlledEnvironment = environment
+        self.availableIPv4Addresses = availableIPv4Addresses
         installTerminationObserver()
     }
     #else
-    private init() { installTerminationObserver() }
+    private init() {
+        self.availableIPv4Addresses = { DshLANConfiguration.localIPv4Addresses() }
+        installTerminationObserver()
+    }
     #endif
 
     private func installTerminationObserver() {
@@ -135,6 +349,8 @@ final class DshService: ObservableObject {
         #else
         guard status == .stopped || isFailed else { return }
 
+        prepareListenerConfiguration(home: FileManager.default.homeDirectoryForCurrentUser)
+
         guard let executable = locateBinary() else {
             status = .failed("未检测到 Safarier 专用 DeepSeek Harness 运行时。\n请在项目根目录运行 scripts/build-dsh.sh 进行构建。")
             return
@@ -145,10 +361,12 @@ final class DshService: ObservableObject {
         status = .starting
         currentURL = nil
         logs.removeAll()
+        pendingStdoutLine = ""
+        pendingStderrLine = ""
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executable)
-        proc.arguments = ["web", "--no-open", "--port", "61919"]
+        proc.arguments = DshLANConfiguration.arguments(for: activeLANConfiguration)
 
         var env = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -186,7 +404,7 @@ final class DshService: ObservableObject {
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             DispatchQueue.main.async {
-                self?.handleOutput(text)
+            self?.handleOutput(text, from: .stdout)
             }
         }
 
@@ -194,7 +412,7 @@ final class DshService: ObservableObject {
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             DispatchQueue.main.async {
-                self?.handleOutput(text)
+            self?.handleOutput(text, from: .stderr)
             }
         }
 
@@ -234,6 +452,9 @@ final class DshService: ObservableObject {
         #else
         stopProcessOnly()
         #endif
+        if let launchReceiptURL { DshNativeLaunchReceipt.remove(at: launchReceiptURL) }
+        launchReceiptURL = nil
+        activeLANConfiguration = nil
         #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
         if failedLeases.isEmpty && !mountUncertain { status = .stopped }
         #else
@@ -268,6 +489,9 @@ final class DshService: ObservableObject {
         status = .starting
         currentURL = nil
         logs.removeAll()
+        pendingStdoutLine = ""
+        pendingStderrLine = ""
+        prepareListenerConfiguration(home: controlledHome)
         guard controlledProcess == nil && acquisition == nil else { return }
         generation += 1
         let token = generation
@@ -319,7 +543,7 @@ final class DshService: ObservableObject {
     private func launchControlled(_ lease: any DshControlledRuntime.Lease, token: Int) {
         let proc = Process()
         proc.executableURL = lease.nodeURL
-        proc.arguments = [lease.entryURL.path, "web", "--no-open", "--port", "61919"]
+        proc.arguments = [lease.entryURL.path] + DshLANConfiguration.arguments(for: activeLANConfiguration)
         binaryPath = lease.nodeURL.path
         var env = controlledEnvironment()
         for key in Array(env.keys) where key == "NODE_OPTIONS" || key == "NODE_PATH" || key == "NODE_BINARY" || key.hasPrefix("DYLD_") || ["all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"].contains(key) { env.removeValue(forKey: key) }
@@ -345,7 +569,7 @@ final class DshService: ObservableObject {
                 guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.generation == token, self.controlledProcess === proc else { return }
-                    self.handleOutput(text)
+                    self.handleOutput(text, from: pipe === out ? .stdout : .stderr)
                 }
             }
         }
@@ -415,26 +639,65 @@ final class DshService: ObservableObject {
         stderrPipe = nil
     }
 
-    private func handleOutput(_ text: String) {
-        logs.append(text)
-        if logs.count > 120 { logs.removeFirst(logs.count - 120) }
-
-        if case .starting = status {
-            let lines = text.components(separatedBy: .newlines)
-            for line in lines {
-                // 查找形如 dsh web: http://127.0.0.1:55047/?token=... 的输出
-                if line.contains("http://127.0.0.1:") || line.contains("http://localhost:") {
-                    if let range = line.range(of: "https?://[^\\s\\)\\]]+", options: .regularExpression) {
-                        let candidate = String(line[range])
-                        if let url = URL(string: candidate) {
-                            self.currentURL = url
-                            self.status = .running(url: url)
-                            return
-                        }
-                    }
-                }
-            }
+    private func handleOutput(_ text: String, from stream: DshOutputStream) {
+        var pending = stream == .stdout ? pendingStdoutLine : pendingStderrLine
+        pending += text
+        guard pending.utf8.count <= 16_384 else {
+            pending = ""
+            if stream == .stdout { pendingStdoutLine = pending } else { pendingStderrLine = pending }
+            logs.append("[DSH output line omitted: oversized]")
+            return
         }
+        while let newline = pending.firstIndex(of: "\n") {
+            let line = String(pending[..<newline]).trimmingCharacters(in: .newlines)
+            pending = String(pending[pending.index(after: newline)...])
+            logs.append(DshStartupURL.sanitizedLog(line))
+            if stream == .stdout { processStartupLine(line) }
+            if logs.count > 120 { logs.removeFirst(logs.count - 120) }
+        }
+        if stream == .stdout { pendingStdoutLine = pending } else { pendingStderrLine = pending }
+    }
+
+    private func processStartupLine(_ line: String) {
+        guard case .starting = status,
+              line.hasPrefix("dsh web: "),
+              let advertisedURL = URL(string: String(line.dropFirst("dsh web: ".count))),
+              let token = DshStartupURL.token(in: advertisedURL) else { return }
+
+        if let configuration = activeLANConfiguration {
+            guard DshStartupURL.isExpectedPublicURL(advertisedURL),
+                  let localURL = DshStartupURL.localBootstrapURL(bindAddress: configuration.bindAddress, token: token),
+                  let receiptURL = launchReceiptURL else { return }
+            let receipt = DshNativeLaunchReceipt(bindAddress: configuration.bindAddress, token: token)
+            do {
+                try DshNativeLaunchReceipt.write(receipt, to: receiptURL)
+            } catch {
+                currentURL = nil
+                status = .failed("无法安全写入 DSH 本机启动凭据；LAN 服务未开放。")
+                process?.terminate()
+                #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
+                controlledProcess?.terminate()
+                #endif
+                return
+            }
+            currentURL = localURL
+            status = .running(url: localURL)
+        } else if ["127.0.0.1", "localhost", "::1"].contains(advertisedURL.host?.lowercased() ?? ""),
+                  advertisedURL.port == DshLANConfiguration.port {
+            currentURL = advertisedURL
+            status = .running(url: advertisedURL)
+        }
+    }
+
+    private func prepareListenerConfiguration(home: URL) {
+        let dshHome = home.appendingPathComponent("Library/Application Support/Safarier/dsh", isDirectory: true)
+        let receiptURL = dshHome.appendingPathComponent(DshNativeLaunchReceipt.fileName)
+        DshNativeLaunchReceipt.remove(at: receiptURL)
+        launchReceiptURL = receiptURL
+        activeLANConfiguration = DshLANConfiguration.load(
+            from: dshHome.appendingPathComponent(DshLANConfiguration.fileName),
+            localIPv4Addresses: availableIPv4Addresses()
+        )
     }
 
     /// 获取或复用持久化的 dsh Web 视图，支持在切换 Tab 时保活会话与 DOM 状态，避免重复加载
@@ -461,6 +724,8 @@ final class DshService: ObservableObject {
     }
 
     private func handleTermination(_ proc: Process) {
+        if let launchReceiptURL { DshNativeLaunchReceipt.remove(at: launchReceiptURL) }
+        launchReceiptURL = nil
         cachedWebView?.stopLoading()
         cachedWebView?.removeFromSuperview()
         cachedWebView = nil

@@ -1,5 +1,6 @@
 #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
 import XCTest
+import Darwin
 @testable import Safarier
 
 @MainActor
@@ -169,6 +170,57 @@ final class DshControlledServiceTests: XCTestCase {
             XCTAssertEqual(try String(contentsOf: report, encoding: .utf8).split(separator: "\n").map(String.init),
                            Array(repeating: "web --no-open --port 61919", count: launch))
         }
+    }
+
+    func testLANStartupWritesPrivateReceiptAndEmbedsOnlyTheLocalBootstrapURL() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("dsh-lan-service-test-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dshHome = root.appendingPathComponent("Library/Application Support/Safarier/dsh", isDirectory: true)
+        try FileManager.default.createDirectory(at: dshHome, withIntermediateDirectories: true)
+        let config = dshHome.appendingPathComponent(DshLANConfiguration.fileName)
+        try Data(#"{"version":1,"enabled":true,"bindAddress":"10.0.0.108"}"#.utf8).write(to: config)
+        XCTAssertEqual(chmod(config.path, 0o600), 0)
+
+        let script = root.appendingPathComponent("entry.sh")
+        let arguments = root.appendingPathComponent("arguments")
+        let token = "only-in-native-receipt-test"
+        let advertised = "https://i.meetlife.com.cn:3000/dsh-mac/?token=\(token)"
+        try "printf '%s\\n' \"$*\" > '\(arguments.path)'\necho 'dsh web: \(advertised)'\nexec /bin/sleep 60\n".write(to: script, atomically: true, encoding: .utf8)
+
+        let service = DshService(
+            controlledProvider: { Lease(script) },
+            homeURL: root,
+            availableIPv4Addresses: { ["10.0.0.108"] }
+        )
+        defer { service.stop() }
+        service.start()
+        for _ in 0..<300 {
+            if case .running = service.status { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard case .running(let localURL) = service.status else { return XCTFail("LAN child did not start: \(service.status)") }
+        XCTAssertEqual(localURL.host, "10.0.0.108")
+        XCTAssertEqual(localURL.port, 61919)
+        XCTAssertEqual(localURL.path, "/")
+        XCTAssertEqual(URLComponents(url: localURL, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, token)
+        XCTAssertFalse(service.logs.joined().contains(token), "the startup credential must not enter logs")
+
+        let receiptURL = dshHome.appendingPathComponent(DshNativeLaunchReceipt.fileName)
+        let receiptData = try Data(contentsOf: receiptURL)
+        let receipt = try XCTUnwrap(JSONSerialization.jsonObject(with: receiptData) as? [String: Any])
+        XCTAssertEqual(receipt["version"] as? Int, 1)
+        XCTAssertEqual(receipt["service"] as? String, "dsh")
+        XCTAssertEqual(receipt["bindAddress"] as? String, "10.0.0.108")
+        XCTAssertEqual(receipt["port"] as? Int, 61919)
+        XCTAssertEqual(receipt["publicURL"] as? String, DshLANConfiguration.publicURL)
+        XCTAssertEqual(receipt["token"] as? String, token)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: receiptURL.path)[.posixPermissions] as? NSNumber, 0o600)
+        XCTAssertEqual(try String(contentsOf: arguments, encoding: .utf8).trimmingCharacters(in: .newlines),
+                       "web --no-open --port 61919 --host 10.0.0.108 --public-url \(DshLANConfiguration.publicURL) --trusted-host \(DshLANConfiguration.trustedHost)")
+
+        service.stop()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: receiptURL.path), "stop must remove the native token handoff")
     }
 
     actor Gate {

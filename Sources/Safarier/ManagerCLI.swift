@@ -9,6 +9,9 @@ enum ManagerCLI {
     static let usage = """
     用法：
       safarier authorize [--request]
+      safarier control --help
+      safarier host serve --profile PROFILE_UUID
+      safarier --remote SSH_ALIAS control COMMAND [OPTIONS]
       safarier profile list
       safarier profile create --name NAME [--mode persistent|ephemeral] [--lang proxy|system|en-US,en] [--tz proxy|system|America/Los_Angeles] [--url https://example.com] [--proxy PROXY_ID | --sub SUBSCRIPTION_ID --node NODE_NAME] [--device MODEL] [--notes TEXT] [--spi default|none|all|afp,tz,webrtc,safari,webgpu,fontlist]
       safarier profile update PROFILE_ID [--name NAME] [--lang proxy|system|en-US,en] [--tz proxy|system|ZONE] [--url URL|none] [--proxy PROXY_ID|none | --sub SUBSCRIPTION_ID --node NODE_NAME | --node none] [--device MODEL|none] [--notes TEXT] [--spi default|none|all|afp,tz,webrtc,safari,webgpu,fontlist]
@@ -43,6 +46,8 @@ enum ManagerCLI {
     """
 
     static func run(_ arguments: [String]) -> Int32 {
+        if arguments.first == "--remote" { return RemoteControlCLI.run(Array(arguments.dropFirst())) }
+        if arguments.first == "host" { return RemoteHostCLI.run(Array(arguments.dropFirst())) }
         if arguments.first == "authorize" { return authorize(Array(arguments.dropFirst())) }
         if arguments.first == "control" { return ControlCLI.run(arguments) }
         #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE

@@ -52,6 +52,17 @@ struct DshControlledRuntime {
         let root: URL
         let device: String
         let session: URL
+        let sessionLock: SessionLock?
+
+        init(root: URL, device: String, session: URL, sessionLock: SessionLock? = nil) {
+            self.root = root; self.device = device; self.session = session; self.sessionLock = sessionLock
+        }
+    }
+
+    final class SessionLock: @unchecked Sendable {
+        private let descriptor: Int32
+        init(_ descriptor: Int32) { self.descriptor = descriptor }
+        deinit { _ = flock(descriptor, LOCK_UN); close(descriptor) }
     }
 
     protocol Backend: Sendable {
@@ -91,8 +102,8 @@ struct DshControlledRuntime {
     }
 
     static let reviewedAnchor: Anchor? = Anchor(
-        imageSHA256: "53fad47a4ffc8cd0a8e9989ae619d1cfbe34618f7c9d921f52086ae4c5e01a9a",
-        manifestSHA256: "b4f513bfec24a40c0f4d5cdb8181017f790ce7857a871e9a3ed5cd8165586c5a",
+        imageSHA256: "0f29271d5109a558f5b72eca5b54e5eac101b3253bcb0a5d94fd8b7642ef9f47",
+        manifestSHA256: "6302ccf5f9e3dc649f11a231f691ea61166bf6cdabbedf29a31526ad152e7082",
         nodeSHA256: "27db838bb204ef7c21df2931f5656e4c8fb32e6e947f363a402b49714d32b5b1",
         nodeTeamID: "HX7739G8FX"
     )
@@ -152,21 +163,28 @@ struct DshControlledRuntime {
         let manifestData = try checkedData(manifestURL, maximum: 64 * 1024 * 1024)
         guard digest(manifestData) == anchor.manifestSHA256 else { throw Failure.invalidArtifact }
         let manifest = try parseManifest(manifestData)
-        guard try hashFile(image) == anchor.imageSHA256 else { throw Failure.invalidArtifact }
+        let manifestEntries = Dictionary(uniqueKeysWithValues: manifest.entries.map { ($0.path, $0) })
         try Task.checkCancellation()
-        let session = FileManager.default.temporaryDirectory.appendingPathComponent("safarier-dsh-" + UUID().uuidString, isDirectory: true)
+        let session = FileManager.default.temporaryDirectory.appendingPathComponent("safarier-dsh-\(anchor.imageSHA256)-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: session, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let verifiedImage = session.appendingPathComponent("runtime-\(anchor.imageSHA256).dmg")
         let mountPoint = session.appendingPathComponent("mount", isDirectory: true)
-        try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        do {
+            try copyVerifiedImage(image, to: verifiedImage, expectedSHA256: anchor.imageSHA256)
+            try Task.checkCancellation()
+            try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        } catch {
+            try? FileManager.default.removeItem(at: session)
+            throw error
+        }
         var mounted: Mount?
         do {
-            let mount = try backend.attach(image: image, mount: mountPoint); mounted = mount
+            let mount = try backend.attach(image: verifiedImage, mount: mountPoint); mounted = mount
             try Task.checkCancellation()
-            try verifyTree(mount.root, manifest: manifest)
+            guard manifestEntries["node/node"]?.type == "file", manifestEntries["node/node"]?.sha256 == anchor.nodeSHA256 else { throw Failure.invalidNode }
+            try verifyManifestFile(mount.root, entries: manifestEntries, path: "node/node", failure: .invalidNode, expectedSHA256: anchor.nodeSHA256)
+            try verifyManifestFile(mount.root, entries: manifestEntries, path: "dsh/node_modules/@deepseek-ai/dsh/lib/bin.js", failure: .invalidTree)
             let node = mount.root.appendingPathComponent("node/node")
-            guard manifest.entries.contains(where: { $0.path == "node/node" && $0.type == "file" && $0.sha256 == anchor.nodeSHA256 }),
-                  manifest.entries.contains(where: { $0.path == "dsh/node_modules/@deepseek-ai/dsh/lib/bin.js" && $0.type == "file" }),
-                  try hashFile(node, owned: false) == anchor.nodeSHA256 else { throw Failure.invalidNode }
             try backend.validateNode(node, teamID: anchor.nodeTeamID)
             try Task.checkCancellation()
             return MountedLease(mount: mount, backend: backend)
@@ -181,6 +199,42 @@ struct DshControlledRuntime {
     }
 
     struct SystemBackend: Backend {
+        private func lockSession(_ session: URL, create: Bool) throws -> SessionLock? {
+            var directory = stat()
+            guard lstat(session.path, &directory) == 0, (directory.st_mode & S_IFMT) == S_IFDIR,
+                  directory.st_uid == geteuid(), directory.st_mode & 0o7777 == 0o700 else {
+                if create { throw Failure.invalidMount }
+                return nil
+            }
+            let lockURL = session.appendingPathComponent("owner.lock")
+            let flags = O_RDWR | O_NOFOLLOW | O_CLOEXEC | (create ? O_CREAT : 0)
+            let fd = open(lockURL.path, flags, 0o600)
+            guard fd >= 0 else {
+                if create { throw Failure.invalidMount }
+                return nil
+            }
+            var opened = stat(), path = stat()
+            guard fstat(fd, &opened) == 0, lstat(lockURL.path, &path) == 0,
+                  (opened.st_mode & S_IFMT) == S_IFREG, opened.st_uid == geteuid(),
+                  opened.st_nlink == 1, opened.st_mode & 0o7777 == 0o600,
+                  opened.st_dev == path.st_dev, opened.st_ino == path.st_ino,
+                  flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+                close(fd)
+                if create { throw Failure.invalidMount }
+                return nil
+            }
+            return SessionLock(fd)
+        }
+
+        private func privateSnapshotSession(for path: String, digest: String, temporaryRoot: URL) -> URL? {
+            let candidate = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+            guard candidate.lastPathComponent == "runtime-\(digest).dmg" else { return nil }
+            let session = candidate.deletingLastPathComponent()
+            guard session.deletingLastPathComponent().standardizedFileURL == temporaryRoot,
+                  session.lastPathComponent.hasPrefix("safarier-dsh-\(digest)-") else { return nil }
+            return session
+        }
+
         private func run(_ arguments: [String]) throws -> Data {
             let process = Process()
             let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("safarier-hdiutil-" + UUID().uuidString)
@@ -235,10 +289,43 @@ struct DshControlledRuntime {
                   let info = try? PropertyListSerialization.propertyList(from: infoData, format: nil) as? [String: Any],
                   let images = info["images"] as? [[String: Any]] else { return }
             let resolvedImage = image.resolvingSymlinksInPath()
+            let resolvedTemporaryRoot = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL
+            let snapshotDigest: String? = {
+                guard image.lastPathComponent.hasPrefix("runtime-"), image.lastPathComponent.hasSuffix(".dmg") else { return nil }
+                let value = String(image.lastPathComponent.dropFirst("runtime-".count).dropLast(".dmg".count))
+                guard value.count == 64, value.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
+                return value
+            }()
             for item in images {
                 guard let path = item["image-path"] as? String,
-                      URL(fileURLWithPath: path).resolvingSymlinksInPath() == resolvedImage,
                       let entities = item["system-entities"] as? [[String: Any]] else { continue }
+                if let snapshotDigest,
+                   let candidateSession = privateSnapshotSession(for: path, digest: snapshotDigest, temporaryRoot: resolvedTemporaryRoot) {
+                    guard let lock = try? lockSession(candidateSession, create: false) else { continue }
+                    defer { withExtendedLifetime(lock) {} }
+                    let roots = entities.compactMap { $0["dev-entry"] as? String }.filter { $0.range(of: #"^/dev/disk[0-9]+$"#, options: .regularExpression) != nil }
+                    let points = entities.compactMap { $0["mount-point"] as? String }
+                    let expectedMount = candidateSession.appendingPathComponent("mount").resolvingSymlinksInPath().standardizedFileURL
+                    guard roots.count == 1, points.count == 1,
+                          URL(fileURLWithPath: points[0]).resolvingSymlinksInPath().standardizedFileURL == expectedMount else { continue }
+                    do { _ = try run(["detach", roots[0]]) }
+                    catch {
+                        do { _ = try run(["detach", points[0]]) }
+                        catch { continue }
+                    }
+                    guard let remainingData = try? run(["info", "-plist"]),
+                          let remaining = try? PropertyListSerialization.propertyList(from: remainingData, format: nil) as? [String: Any],
+                          let remainingImages = remaining["images"] as? [[String: Any]],
+                          !remainingImages.contains(where: { candidate in
+                              guard let remainingPath = candidate["image-path"] as? String,
+                                    URL(fileURLWithPath: remainingPath).resolvingSymlinksInPath().standardizedFileURL == URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL,
+                                    let remainingEntities = candidate["system-entities"] as? [[String: Any]] else { return false }
+                              return remainingEntities.contains { ($0["dev-entry"] as? String) == roots[0] }
+                          }) else { continue }
+                    try? FileManager.default.removeItem(at: candidateSession)
+                    continue
+                }
+                guard URL(fileURLWithPath: path).resolvingSymlinksInPath() == resolvedImage else { continue }
                 let roots = entities.compactMap { $0["dev-entry"] as? String }.filter { $0.range(of: #"^/dev/disk[0-9]+$"#, options: .regularExpression) != nil }
                 let allDevs = entities.compactMap { $0["dev-entry"] as? String }
                 let mountPoints = entities.compactMap { $0["mount-point"] as? String }
@@ -262,6 +349,8 @@ struct DshControlledRuntime {
         }
 
         func attach(image: URL, mount: URL) throws -> Mount {
+            let sessionLock = try lockSession(mount.deletingLastPathComponent(), create: true)
+            guard let sessionLock else { throw Failure.invalidMount }
             detachStaleMounts(for: image)
             let output: Data
             do { output = try run(["attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", mount.path, "-plist", image.path]) }
@@ -272,7 +361,7 @@ struct DshControlledRuntime {
             let points = entities.compactMap { $0["mount-point"] as? String }
             guard roots.count == 1, points.count == 1,
                   URL(fileURLWithPath: points[0]).resolvingSymlinksInPath() == mount.resolvingSymlinksInPath() else { throw Failure.mountStateUncertain(mount.deletingLastPathComponent().path) }
-            let result = Mount(root: mount, device: roots[0], session: mount.deletingLastPathComponent())
+            let result = Mount(root: mount, device: roots[0], session: mount.deletingLastPathComponent(), sessionLock: sessionLock)
             do {
                 var fs = statfs()
                 guard statfs(mount.path, &fs) == 0, fs.f_flags & UInt32(MNT_RDONLY) != 0 else { throw Failure.invalidMount }
@@ -332,6 +421,114 @@ struct DshControlledRuntime {
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         guard data.count <= maximum, try hashFile(url) == digest(data) else { throw Failure.invalidArtifact }
         return data
+    }
+
+    /// Hashes the bytes as they are copied into the private session path that
+    /// hdiutil will open, binding the reviewed digest to its pathname input.
+    private static func copyVerifiedImage(_ source: URL, to destination: URL, expectedSHA256: String) throws {
+        var before = stat()
+        guard lstat(source.path, &before) == 0, (before.st_mode & S_IFMT) == S_IFREG,
+              before.st_nlink == 1, before.st_uid == geteuid(), before.st_mode & 0o7022 == 0 else { throw Failure.invalidArtifact }
+        let sourceFD = open(source.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard sourceFD >= 0 else { throw Failure.invalidArtifact }
+        defer { close(sourceFD) }
+        func same(_ a: stat, _ b: stat) -> Bool {
+            a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode &&
+            a.st_nlink == b.st_nlink && a.st_size == b.st_size &&
+            a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
+            a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec
+        }
+        var opened = stat()
+        guard fstat(sourceFD, &opened) == 0, same(before, opened) else { throw Failure.invalidArtifact }
+        var keepDestination = false
+        defer { if !keepDestination { try? FileManager.default.removeItem(at: destination) } }
+        if clonefile(source.path, destination.path, 0) == 0 {
+            guard chmod(destination.path, 0o400) == 0 else { throw Failure.invalidArtifact }
+            let copiedHash = try hashFile(destination)
+            var afterFD = stat(), afterPath = stat()
+            guard fstat(sourceFD, &afterFD) == 0, lstat(source.path, &afterPath) == 0,
+                  same(before, afterFD), same(before, afterPath), copiedHash == expectedSHA256 else { throw Failure.invalidArtifact }
+            keepDestination = true
+            return
+        }
+        let destinationFD = open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard destinationFD >= 0 else { throw Failure.invalidArtifact }
+        defer {
+            close(destinationFD)
+        }
+        var hash = SHA256(), buffer = [UInt8](repeating: 0, count: 1024 * 1024)
+        while true {
+            try Task.checkCancellation()
+            let count = read(sourceFD, &buffer, buffer.count)
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw Failure.invalidArtifact
+            }
+            if count == 0 { break }
+            let bytes = Data(buffer.prefix(count))
+            hash.update(data: bytes)
+            try bytes.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                var offset = 0
+                while offset < raw.count {
+                    let written = write(destinationFD, base.advanced(by: offset), raw.count - offset)
+                    if written < 0 && errno == EINTR { continue }
+                    guard written > 0 else { throw Failure.invalidArtifact }
+                    offset += written
+                }
+            }
+        }
+        guard fsync(destinationFD) == 0 else { throw Failure.invalidArtifact }
+        var afterFD = stat(), afterPath = stat(), copied = stat()
+        guard fstat(sourceFD, &afterFD) == 0, lstat(source.path, &afterPath) == 0,
+              same(before, afterFD), same(before, afterPath), fstat(destinationFD, &copied) == 0,
+              copied.st_uid == geteuid(), copied.st_nlink == 1, copied.st_mode & 0o7777 == 0o600,
+              copied.st_size == before.st_size,
+              hash.finalize().map({ String(format: "%02x", $0) }).joined() == expectedSHA256 else { throw Failure.invalidArtifact }
+        keepDestination = true
+    }
+
+    private static func verifyManifestFile(_ root: URL, entries: [String: Manifest.Entry], path: String, failure: Failure,
+                                           expectedSHA256: String? = nil) throws {
+        func checked(_ url: URL, _ relative: String, type: String) throws -> stat {
+            guard let expected = entries[relative], expected.type == type else { throw failure }
+            var actual = stat()
+            guard lstat(url.path, &actual) == 0,
+                  (actual.st_mode & S_IFMT) == (type == "directory" ? S_IFDIR : S_IFREG),
+                  Int(actual.st_mode & 0o7777) == expected.mode else { throw failure }
+            if type == "file" {
+                guard actual.st_nlink == 1, actual.st_size >= 0, UInt64(actual.st_size) == expected.size else { throw failure }
+            }
+            return actual
+        }
+        func same(_ a: stat, _ b: stat) -> Bool {
+            a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode &&
+            a.st_nlink == b.st_nlink && a.st_size == b.st_size &&
+            a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
+            a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec
+        }
+        var ancestors: [(URL, stat)] = []
+        ancestors.append((root, try checked(root, ".", type: "directory")))
+        var relative = ""
+        let components = path.split(separator: "/").map(String.init)
+        guard !components.isEmpty else { throw failure }
+        for component in components.dropLast() {
+            relative = relative.isEmpty ? component : relative + "/" + component
+            let url = root.appendingPathComponent(relative)
+            ancestors.append((url, try checked(url, relative, type: "directory")))
+        }
+        guard let expected = entries[path], expected.type == "file",
+              expectedSHA256 == nil || expected.sha256 == expectedSHA256 else { throw failure }
+        let file = root.appendingPathComponent(path)
+        let actual = try checked(file, path, type: "file")
+        guard let expectedHash = expected.sha256, try hashFile(file, owned: false) == expectedHash,
+              expectedSHA256 == nil || expectedHash == expectedSHA256 else { throw failure }
+        var after = stat()
+        guard lstat(file.path, &after) == 0, same(actual, after) else { throw failure }
+        for (url, before) in ancestors {
+            var after = stat()
+            guard lstat(url.path, &after) == 0, same(before, after) else { throw failure }
+        }
     }
 
     private static func hashFile(_ url: URL, owned: Bool = true) throws -> String {

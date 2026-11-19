@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import Safarier
 
@@ -29,5 +30,50 @@ final class DshServiceTests: XCTestCase {
         // 停止服务时应当清理 cachedWebView
         service.stop()
         XCTAssertNil(service.cachedWebView, "服务停止时应当清空 cachedWebView")
+    }
+
+    func testDshLANListenerIsOptInAndBoundToAnAssignedPrivateIPv4() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("dsh-lan-config-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configURL = root.appendingPathComponent(DshLANConfiguration.fileName)
+        let enabled = Data(#"{"version":1,"enabled":true,"bindAddress":"10.0.0.108"}"#.utf8)
+        try enabled.write(to: configURL)
+
+        // A loose/default-permission file cannot opt into a LAN listener.
+        XCTAssertEqual(chmod(configURL.path, 0o644), 0)
+        XCTAssertNil(DshLANConfiguration.load(from: configURL, localIPv4Addresses: ["10.0.0.108"]))
+        XCTAssertEqual(chmod(configURL.path, 0o600), 0)
+        XCTAssertNotNil(DshLANConfiguration.load(from: configURL, localIPv4Addresses: ["10.0.0.108"]))
+        XCTAssertNil(DshLANConfiguration.load(from: configURL, localIPv4Addresses: ["10.0.0.109"]))
+        XCTAssertNil(DshLANConfiguration.load(from: configURL, localIPv4Addresses: ["8.8.8.8"]))
+
+        try Data(#"{"version":1,"enabled":false,"bindAddress":"10.0.0.108"}"#.utf8).write(to: configURL)
+        XCTAssertEqual(chmod(configURL.path, 0o600), 0)
+        XCTAssertNil(DshLANConfiguration.load(from: configURL, localIPv4Addresses: ["10.0.0.108"]))
+    }
+
+    func testDshArgumentsKeepLoopbackDefaultAndUseExactLANAuthority() {
+        XCTAssertEqual(DshLANConfiguration.arguments(for: nil), ["web", "--no-open", "--port", "61919"])
+        XCTAssertEqual(DshLANConfiguration.arguments(for: DshLANConfiguration(bindAddress: "10.0.0.108")), [
+            "web", "--no-open", "--port", "61919",
+            "--host", "10.0.0.108",
+            "--public-url", "https://i.meetlife.com.cn:3000/dsh-mac/",
+            "--trusted-host", "i.meetlife.com.cn:3000",
+        ])
+    }
+
+    func testPublicStartupTokenIsRedactedAndLocalBootstrapStaysOnMacAddress() throws {
+        let secret = "native-only-test-token"
+        let advertised = try XCTUnwrap(URL(string: "https://i.meetlife.com.cn:3000/dsh-mac/?token=\(secret)"))
+        XCTAssertTrue(DshStartupURL.isExpectedPublicURL(advertised))
+        XCTAssertEqual(DshStartupURL.token(in: advertised), secret)
+        let local = try XCTUnwrap(DshStartupURL.localBootstrapURL(bindAddress: "10.0.0.108", token: secret))
+        XCTAssertEqual(local.scheme, "http")
+        XCTAssertEqual(local.host, "10.0.0.108")
+        XCTAssertEqual(local.port, 61919)
+        XCTAssertEqual(URLComponents(url: local, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, secret)
+        XCTAssertFalse(DshStartupURL.sanitizedLog("dsh web: \(advertised.absoluteString)").contains(secret))
+        XCTAssertFalse(DshStartupURL.isExpectedPublicURL(try XCTUnwrap(URL(string: "https://i.meetlife.com.cn:3000/dsh-mac/?token=one&token=two"))))
     }
 }

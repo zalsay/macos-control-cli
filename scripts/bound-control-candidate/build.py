@@ -39,7 +39,7 @@ ATTEMPT = None
 EXPECTED = {
     'fixture': '45f599bd8d943192d3f93045559a825b8922f5b2df8106393fc896394355edc1',
     'sdef': '0cb1c89e68376982342c0a4821b8f9a719d99e4ceb5b476e5ec748e773b5890c',
-    'mihomo': '3ebf3ac4c7f63764cd9e6174cd024b100236eb4c9252e2541f4416cb109ceda5',
+    'mihomo': 'ee492e45fe3843634fbb0e53f45f008eef3cee77b0178e58036bd0324a393d1b',
 }
 
 RUNNER_REL = 'Contents/Helpers/SafarierRunner.app'

@@ -155,6 +155,23 @@ final class ControlRuntime: @unchecked Sendable {
         try validateSocket(pinned)
         guard unlinkat(directory, Self.socketName, 0) == 0 else { throw Failure.unsafe }
     }
+    /// A successful stop requires disappearance from the original runtime.
+    /// A replaced directory or socket is not evidence that this stop completed.
+    func waitForSocketRemoval(_ pinned: stat) throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        repeat {
+            try validateRoot()
+            var current = stat()
+            if fstatat(directory, Self.socketName, &current, AT_SYMLINK_NOFOLLOW) != 0 {
+                guard errno == ENOENT else { throw Failure.cleanupUnconfirmed }
+                try validateRoot()
+                return
+            }
+            guard Self.same(pinned, current) else { throw Failure.cleanupUnconfirmed }
+            Thread.sleep(forTimeInterval: 0.025)
+        } while ContinuousClock.now < deadline
+        throw Failure.cleanupUnconfirmed
+    }
     /// Used only for rollback of a just-created socket, including before its
     /// final chmod. Never unlink if root, type, owner or inode cannot be proved.
     func removeCreatedSocketIfOwned(_ created: stat) -> Bool {
@@ -237,6 +254,7 @@ final class ControlRuntime: @unchecked Sendable {
         return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
     }
     static func clientExchange(_ fd: Int32, request: ControlRequest, instance: UUID,
+                               expectedPeerPID: Int32? = nil,
                                validatePath: () throws -> Void, validateReply: (Data) throws -> Void) throws -> Data {
         try setTimeout(fd, seconds: Int(AutomationLimits.actionSeconds))
         let hello = try ControlProtocol.encodeHello(ControlHello(nonce: UUID(), instance: instance))
@@ -244,6 +262,7 @@ final class ControlRuntime: @unchecked Sendable {
         let acknowledgement = try receiveFrame(fd)
         guard try ControlProtocol.decodeHello(acknowledgement) == ControlProtocol.decodeHello(hello) else { throw Failure.protocolError }
         let originalPeer = try peer(fd)
+        if let expectedPeerPID, originalPeer.pid != expectedPeerPID { throw Failure.unsafe }
         try validatePath()
         let command = try ControlProtocol.encodeRequest(request)
         do {

@@ -29,6 +29,14 @@ python3 scripts/dsh-runtime/install.py verify --version-dir /absolute/existing-p
 
 `install.install_reviewed(artifact, versions_root)` and `install.verify_installed(version_dir)` provide the same offline Python interfaces, not production integration. `versions_root` must already be an absolute, owner-only (0700) directory owned by the current user; the component does not create an application data directory. Installation verifies the source, copies into a new private staging directory, verifies the copy and publishes it with macOS `RENAME_EXCL` under the image SHA-256. Existing or concurrently published versions are never overwritten and are reused only after full verification. Both interfaces use the source-level `install.REVIEWED_ANCHOR` for the independently reviewed candidate; runtime upgrades require a new review and source edit of the `RuntimeAnchor` containing manifest SHA-256, image SHA-256 and Node version. They never derive an anchor from `review.json`, argv or the environment. Tests patch an anchor only inside isolated fixtures.
 
+Full file-by-file inspection remains part of offline review and installation. At startup, Safarier verifies the pinned image and manifest, mounts the image read-only and checks the Node executable and DSH entrypoint, without traversing the installed dependency tree again.
+
+### 家庭门户的 Mac DSH 入口
+
+默认仍监听回环地址。需要接入家庭门户时，在 `~/Library/Application Support/Safarier/dsh/lan-listener.json` 写入 `{"version":1,"enabled":true,"bindAddress":"10.0.0.108"}`，文件必须由当前用户所有且权限为 `0600`。仅接受本机实际持有的 RFC 1918 IPv4，不允许通配地址。重启 Safarier 的 DSH 后生效；应仅在受信任的局域网启用。
+
+Mac 地址保持 DSH 原生认证。家庭门户的 `/dsh-mac/` 必须经管理员 SSO 网关，不得在 Nginx 直接转发到 Mac。运行中的 Safarier 在同目录写入 `native-launch.json`（`0600`），包含仅供网关交换原生会话的启动凭据；不要把该文件、原生 URL 或令牌放进菜单、日志或浏览器。DSH 重启会更换启动令牌，需要同步新的凭据到群晖的 Mac 专用 Secret；该配置本身不会自动同步。
+
 Node version in that source anchor records the reviewer's finding; this tool does not execute Node and cannot itself establish the version or native module compatibility. Reviewers must verify those against the Node bytes included in the pinned manifest/image before approving the source edit.
 
 The intended future user-private sidecar path is `~/Library/Application Support/Safarier/DSHRuntime/`, but this tool does not select, create, or access it. DSH_HOME and agents are separate writable user data, not part of this image or installer. This component provides a startup-time integrity check, not protection against a malicious process running as the same user throughout execution; mount lifetime, Node execution and subsequent module loading remain the responsibility of a separately reviewed runtime integration. No privileged installation, app identity binding, or automatic fallback to global DSH is implemented here.
@@ -47,7 +55,7 @@ A read-only mount prevents writes through that mount, but does not by itself pro
 python3 scripts/dsh-runtime/unified-release.py
 ```
 
-当前默认材料为 `dist/releases/2026-11-16-dsh-rc2/runtime-artifact`，对应官方 `@deepseek-ai/dsh@0.2.2-rc.2` 和 Node 24.19.0；`scripts/build-dsh.sh` 同样固定安装 rc.2。材料需按上述流程准备和审核，源码中的 Swift/Python 固定锚须与材料一致。此前 rc.1 材料和已安装版本保留供回退。
+当前默认材料为 `dist/releases/2026-11-19-dsh-rc2-source/runtime-artifact`，由 DeepSeek Harness 官方仓库的 rc.2 源码构建，搭配 Node 24.19.0。参见[构建记录](../../docs/verification/2026-11-19-dsh-rc2-source-build.md)。`scripts/build-dsh.sh` 是从 npm 安装同版本的旧流程，不能复现当前固定镜像。材料需按上述流程准备和审核，源码中的 Swift/Python 固定锚须与材料一致。
 
 进度条显示已完成的七个阶段和当前步骤，不代表耗时或文件处理百分比；终端中的长步骤会定期显示运行状态，重定向输出时保留简洁阶段记录。失败时显示出错步骤，不标记完成。
 

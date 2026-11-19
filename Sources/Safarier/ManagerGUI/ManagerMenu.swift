@@ -76,6 +76,25 @@ final class ManagerMenu: NSObject, NSMenuItemValidation {
         view.addItem(item("进入全屏幕", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]))
         view.addItem(.separator())
         let environment = submenu("环境")
+        let host = NSMenu(title: "SSH Host")
+        let hostEntry = NSMenuItem(title: "SSH Host", action: nil, keyEquivalent: "")
+        hostEntry.submenu = host
+        environment.addItem(.separator())
+        environment.addItem(hostEntry)
+        for action in ManagerHostAction.allCases {
+            let title: String
+            switch action {
+            case .status: title = "查询 Host 状态"
+            case .start: title = "启动 Host…"
+            case .authorize: title = "为 Host 授权…"
+            case .authorizationStatus: title = "查看授权结果"
+            case .stop: title = "停止 Host…"
+            }
+            let hostItem = item(title, #selector(performHostAction(_:)))
+            hostItem.target = self
+            hostItem.representedObject = action.rawValue
+            host.addItem(hostItem)
+        }
         let window = submenu("窗口")
         window.addItem(item("最小化", #selector(NSWindow.performMiniaturize(_:)), "m"))
         window.addItem(item("缩放", #selector(NSWindow.performZoom(_:))))
@@ -104,6 +123,9 @@ final class ManagerMenu: NSObject, NSMenuItemValidation {
     }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(openJEVConfig(_:)) { return model.sheet == nil }
+        if let raw = item.representedObject as? String, let action = ManagerHostAction(rawValue: raw) {
+            return model.hostActionEnabled(action, for: model.selectedProfile)
+        }
         guard let raw = item.representedObject as? String, let command = ManagerMenuCommand(rawValue: raw) else { return true }
         if model.sheet != nil && [.newProfile, .newSubscription, .edit].contains(command) { return false }
         let profile = model.selectedProfile
@@ -126,5 +148,12 @@ final class ManagerMenu: NSObject, NSMenuItemValidation {
         case .cycle: if !WindowCycler.activateOtherSafarier(forward: true) { NSSound.beep() }
         case .toggleSidebar: break
         }
+    }
+
+    @objc private func performHostAction(_ item: NSMenuItem) {
+        guard let raw = item.representedObject as? String,
+              let action = ManagerHostAction(rawValue: raw),
+              let profile = model.selectedProfile else { return }
+        model.performHostAction(action, for: profile)
     }
 }

@@ -78,6 +78,7 @@ enum ManagerGUI {
 @MainActor
 final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let workspace: SafarierWorkspace
+    private let hostService: ManagerHostDaemonService
     let automationManager: AutomationManager
     private var state = ManagerLaunchState()
     private var model: ManagerModel?
@@ -88,8 +89,15 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private let windowSize = ManagerWindowSize()
     private var normalWindowSize: ManagerNormalWindowSize?
     private var windowWasClosed = false
+    private var hostTerminationPending = false
 
-    init(workspace: SafarierWorkspace, quietStart: Bool = false) { self.workspace = workspace; self.automationManager = .shipping(workspace: workspace); self.promoteOnActivation = quietStart; super.init() }
+    init(workspace: SafarierWorkspace, quietStart: Bool = false) {
+        self.workspace = workspace
+        self.hostService = ManagerHostDaemonService()
+        self.automationManager = .shipping(workspace: workspace)
+        self.promoteOnActivation = quietStart
+        super.init()
+    }
     func installEventHandlers() {
         let events = NSAppleEventManager.shared()
         // ascr/noop and aevt/oapp,rapp; these are public Apple Event codes.
@@ -139,6 +147,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         state.handle(.windowClosed(pendingCommands: ManagerAutomationHooks.combinedPendingWork)).contains(.terminate)
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if hostTerminationPending { return .terminateLater }
         let effects = state.handle(.quitRequested(pendingCommands: ManagerAutomationHooks.combinedPendingWork))
         if effects.contains(.deferTermination) {
             if effects.contains(.cancelPending) {
@@ -152,6 +161,10 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return .terminateLater
         }
         if effects.contains(.cancelPending) { ManagerAutomationHooks.cancelPending() }
+        if effects.contains(.terminate), hostService.needsTerminationCheck {
+            beginHostTerminationReply()
+            return .terminateLater
+        }
         return .terminateNow
     }
     func pendingCountDidChange() {
@@ -205,7 +218,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             case .showManagerWithoutActivation: showManager(activate: false)
             case .terminate: NSApp.terminate(nil)
             case .cancelPending: ManagerAutomationHooks.cancelPending()
-            case .replyToTermination: NSApp.reply(toApplicationShouldTerminate: true)
+            case .replyToTermination: beginHostTerminationReply()
             case .deferTermination: break
             }
         }
@@ -215,7 +228,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         TestingLaunchTrace.logger.notice("phase=show_enter windowExists=\(self.window != nil, privacy: .public) policy=\(NSApp.activationPolicy().rawValue, privacy: .public)")
         #endif
         if window == nil {
-            let model = ManagerModel(workspace: workspace)
+            let model = ManagerModel(workspace: workspace, hostService: hostService)
             self.model = model
             let content = NSHostingController(rootView: SafarierAppView(model: model).frame(minWidth: 920, minHeight: 580))
             let window = NSWindow(
@@ -269,6 +282,35 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
         TestingLaunchTrace.logger.notice("phase=show_return visible=\(self.window?.isVisible ?? false, privacy: .public) key=\(self.window?.isKeyWindow ?? false, privacy: .public) main=\(self.window?.isMainWindow ?? false, privacy: .public) policy=\(NSApp.activationPolicy().rawValue, privacy: .public)")
         #endif
+    }
+
+    private func beginHostTerminationReply() {
+        guard !hostTerminationPending else { return }
+        hostTerminationPending = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await hostService.stopOwnedChildrenForTermination()
+                guard !hostService.hasOwnedChildren else {
+                    throw ManagerHostFailure.unavailable("至少一个 GUI-owned Host 子进程或 socket 尚未确认停止；Manager 保持运行。请查询状态后重试。")
+                }
+                NSApp.reply(toApplicationShouldTerminate: true)
+            } catch {
+                hostTerminationPending = false
+                _ = state.handle(.terminationCancelled)
+                presentHostTerminationFailure(error)
+                NSApp.reply(toApplicationShouldTerminate: false)
+            }
+        }
+    }
+
+    private func presentHostTerminationFailure(_ error: Error) {
+        if model == nil { model = ManagerModel(workspace: workspace, hostService: hostService) }
+        apply(state.handle(.interactive))
+        model?.message = ManagerModel.Message(
+            title: "无法退出 Safarier",
+            detail: "\(error.localizedDescription)\n\nManager 保持运行以避免遗留 GUI-owned Host。处理上述情况后，可再次退出。"
+        )
     }
 }
 

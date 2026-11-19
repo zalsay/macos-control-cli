@@ -1,0 +1,386 @@
+import AppKit
+import Darwin
+import Foundation
+import SafarierCore
+
+enum ManagerHostAction: String, CaseIterable, Sendable {
+    case start, status, authorize, authorizationStatus, stop
+}
+
+enum ManagerHostMenuPolicy {
+    static func enabled(_ action: ManagerHostAction, profile: Profile?, busy: Bool) -> Bool {
+        guard !busy, let profile else { return false }
+        return (action != .start && action != .authorize) || profile.allowsAgentAccess
+    }
+}
+
+@MainActor
+protocol ManagerHostServicing {
+    func perform(_ action: ManagerHostAction, profileID: UUID) async throws -> String
+    func authorization(profileID: UUID, requestID: UUID?) async throws -> HostAuthorizationReceipt
+}
+
+/// Owns only Hosts started by this Manager instance. In particular, observing
+/// a pre-existing socket never adopts its server as a GUI-owned child.
+@MainActor
+final class ManagerHostDaemonService: ManagerHostServicing {
+    private static let startTimeout: TimeInterval = 15
+    private static let exchangeTimeout: TimeInterval = 75
+    private static let childExitTimeout: TimeInterval = 15
+    private static let socketRemovalTimeout: TimeInterval = 5
+
+    private var children: [UUID: ManagerHostChild] = [:]
+    private var startingProfiles: Set<UUID> = []
+    private var stopTasks: [UUID: (id: UUID, task: Task<Void, Error>)] = [:]
+    private var shutdownTask: (id: UUID, task: Task<Void, Error>)?
+    private var shuttingDown = false
+
+    var hasOwnedChildren: Bool { !children.isEmpty }
+    var needsTerminationCheck: Bool { !children.isEmpty || !startingProfiles.isEmpty }
+
+    func perform(_ action: ManagerHostAction, profileID: UUID) async throws -> String {
+        guard let executablePath = Bundle.main.executableURL?.path else {
+            throw ManagerHostFailure.unavailable("无法定位 Safarier 可执行文件。")
+        }
+        let applicationPath = Bundle.main.bundleURL.path
+        let runtimePath = RemoteHostRuntime.path(for: profileID)
+        switch action {
+        case .start:
+            return try await startOwnedChild(profileID: profileID, executablePath: executablePath,
+                                              applicationPath: applicationPath, runtimePath: runtimePath)
+        case .status:
+            return try await status(profileID: profileID, applicationPath: applicationPath, runtimePath: runtimePath)
+        case .stop:
+            return try await stop(profileID: profileID, applicationPath: applicationPath, runtimePath: runtimePath)
+        case .authorize, .authorizationStatus:
+            throw ManagerHostFailure.unavailable("请使用 Host 授权入口。")
+        }
+    }
+
+    func authorization(profileID: UUID, requestID: UUID?) async throws -> HostAuthorizationReceipt {
+        let runtimePath = RemoteHostRuntime.path(for: profileID)
+        let socketPath = runtimePath + "/control.sock"
+        guard await Self.socketExistsOffMain(socketPath) else {
+            throw ManagerHostFailure.unavailable("请先启动该环境的 Host。")
+        }
+        let operation: ControlOperation = requestID.map { .authorizationStatus(requestID: $0) } ?? .authorizationRequest
+        let childPID = children[profileID]?.pid
+        let reply = try await request(operation, applicationPath: Bundle.main.bundleURL.path,
+                                      runtimePath: runtimePath, expectedPeerPID: childPID)
+        guard let receipt = reply.authorization, !receipt.businessEventSent,
+              requestID.map({ receipt.requestID == $0 }) ?? (receipt.status == "pending") else {
+            throw ManagerHostFailure.unavailable("授权状态未确认；没有重试授权请求。")
+        }
+        return receipt
+    }
+
+    /// Called before Manager termination. This is deliberately restricted to
+    /// retained Process instances; a CLI-started daemon is never adopted here.
+    func stopOwnedChildrenForTermination() async throws {
+        if let shutdownTask {
+            try await shutdownTask.task.value
+            return
+        }
+        shuttingDown = true
+        let taskID = UUID()
+        let task = Task { @MainActor [self] in
+            let profileIDs = children.keys.sorted { $0.uuidString < $1.uuidString }
+            var failures: [String] = []
+            for profileID in profileIDs {
+                guard let child = children[profileID] else { continue }
+                do { try await stopOwnedChild(child, applicationPath: Bundle.main.bundleURL.path) }
+                catch { failures.append("\(profileID.uuidString): \(error.localizedDescription)") }
+            }
+            guard failures.isEmpty else {
+                throw ManagerHostFailure.unavailable("Manager 未退出：一个或多个 GUI-owned Host 未确认安全停止。\n" + failures.joined(separator: "\n"))
+            }
+        }
+        shutdownTask = (taskID, task)
+        do {
+            try await task.value
+        } catch {
+            if shutdownTask?.id == taskID { shutdownTask = nil }
+            shuttingDown = false
+            throw error
+        }
+        if shutdownTask?.id == taskID { shutdownTask = nil }
+    }
+
+    nonisolated static func arguments(for action: ManagerHostAction, applicationPath: String, profileID: UUID) -> [String] {
+        let operation: [String]
+        switch action {
+        case .start: operation = ["daemon", "serve"]
+        case .status: operation = ["status"]
+        case .stop: operation = ["daemon", "stop"]
+        case .authorize: operation = ["authorization-request"]
+        case .authorizationStatus: operation = ["authorization-status"]
+        }
+        return ["control"] + operation + ["--app", applicationPath, "--runtime", RemoteHostRuntime.path(for: profileID)]
+    }
+
+    private func startOwnedChild(profileID: UUID, executablePath: String, applicationPath: String,
+                                 runtimePath: String) async throws -> String {
+        guard !shuttingDown else { throw ManagerHostFailure.unavailable("Manager 正在退出；请等待退出检查完成后再启动 Host。") }
+        guard startingProfiles.insert(profileID).inserted else {
+            throw ManagerHostFailure.unavailable("该环境的 Host 正在启动；请等待状态校验完成后重试。")
+        }
+        defer { startingProfiles.remove(profileID) }
+        if let child = children[profileID] {
+            if !child.process.isRunning { child.recordExit(child.process.terminationStatus) }
+            if !child.hasExited {
+                _ = try await status(profileID: profileID, applicationPath: applicationPath, runtimePath: runtimePath)
+                return "Manager 已拥有该环境的 Host 子进程，且通过其私有 socket 的状态校验。此状态不验证 Apple Events 或浏览器控制权限。"
+            }
+            guard !(await Self.socketExistsOffMain(child.socketPath)) else {
+                throw ManagerHostFailure.unavailable("Manager 启动的 Host 子进程已退出，但原 socket 仍存在；为避免碰触替代进程，不会重启或接管。请确认 Host 状态后重试。")
+            }
+            children[profileID] = nil
+        }
+
+        let socketPath = runtimePath + "/control.sock"
+        if await Self.socketExistsOffMain(socketPath) {
+            throw ManagerHostFailure.unavailable("该环境已有 Host daemon，但不是本 Manager 保留的子进程；不会接管或在退出时停止它。请使用显式「停止 Host」操作，或先确认该 daemon 的来源。")
+        }
+        guard !shuttingDown else { throw ManagerHostFailure.unavailable("Manager 正在退出；请等待退出检查完成后再启动 Host。") }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = Self.arguments(for: .start, applicationPath: applicationPath, profileID: profileID)
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let child = ManagerHostChild(process: process, profileID: profileID, runtimePath: runtimePath)
+        process.terminationHandler = { [weak child] process in
+            let status = process.terminationStatus
+            Task { @MainActor in child?.recordExit(status) }
+        }
+        do { try process.run() }
+        catch { throw ManagerHostFailure.unavailable("无法启动 Safarier Host 子进程：\(error.localizedDescription)") }
+        children[profileID] = child
+
+        let deadline = Date().addingTimeInterval(Self.startTimeout)
+        while Date() < deadline {
+            if !process.isRunning { child.recordExit(process.terminationStatus) }
+            guard !child.hasExited else {
+                if !(await Self.socketExistsOffMain(socketPath)) { children[profileID] = nil }
+                throw ManagerHostFailure.unavailable("Safarier Host 子进程在 socket 状态校验前退出（退出码 \(child.exitStatus ?? process.terminationStatus)）。")
+            }
+            if await Self.socketExistsOffMain(socketPath) {
+                do {
+                    _ = try await request(.status, applicationPath: applicationPath, runtimePath: runtimePath,
+                                          expectedPeerPID: child.pid)
+                    return "Host 已由 Manager 直接启动，并通过其私有 socket 与子进程身份校验。此状态不验证 Apple Events 或浏览器控制权限。"
+                } catch {
+                    // Status is read-only; retry briefly while the newly-started
+                    // server finishes accepting its private socket.
+                }
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw ManagerHostFailure.unavailable("等待 GUI-owned Host 的私有 socket/PID 状态校验超时；进程仍由 Manager 跟踪，未强制结束。请查询状态或重试停止。")
+    }
+
+    private func status(profileID: UUID, applicationPath: String, runtimePath: String) async throws -> String {
+        let socketPath = runtimePath + "/control.sock"
+        guard await Self.socketExistsOffMain(socketPath) else { return "该环境的 Host daemon 当前未运行。" }
+        let reply = try await request(.status, applicationPath: applicationPath, runtimePath: runtimePath,
+                                      expectedPeerPID: children[profileID]?.pid)
+        guard reply.status == "ok" else { throw Self.failure(for: reply.error) }
+        return "该环境的 Host daemon 正在运行。状态检查不验证 Apple Events 或浏览器控制权限。"
+    }
+
+    private func stop(profileID: UUID, applicationPath: String, runtimePath: String) async throws -> String {
+        if let child = children[profileID] {
+            try await stopOwnedChild(child, applicationPath: applicationPath)
+            return "该环境由 Manager 启动的 Host 子进程已退出，且其私有控制 socket 已消失。"
+        }
+        let socketPath = runtimePath + "/control.sock"
+        guard await Self.socketExistsOffMain(socketPath) else { return "该环境的 Host daemon 当前未运行。" }
+        _ = try await request(.daemonStop, applicationPath: applicationPath, runtimePath: runtimePath, expectedPeerPID: nil)
+        guard await Self.waitForSocketAbsence(socketPath, timeout: Self.socketRemovalTimeout) else {
+            throw ManagerHostFailure.unavailable("停止命令已被接受，但固定 runtime 的控制 socket 仍存在；没有确认停止，也未强制结束任何进程。请查询状态后再试。")
+        }
+        return "该环境的 Host daemon 已停止。"
+    }
+
+    private func stopOwnedChild(_ child: ManagerHostChild, applicationPath: String) async throws {
+        let profileID = child.profileID
+        if let existing = stopTasks[profileID] {
+            try await existing.task.value
+            return
+        }
+        let taskID = UUID()
+        let task = Task { @MainActor [self] in try await stopOwnedChildNow(child, applicationPath: applicationPath) }
+        stopTasks[profileID] = (taskID, task)
+        defer { if stopTasks[profileID]?.id == taskID { stopTasks[profileID] = nil } }
+        try await task.value
+    }
+
+    private func stopOwnedChildNow(_ child: ManagerHostChild, applicationPath: String) async throws {
+        if !child.process.isRunning { child.recordExit(child.process.terminationStatus) }
+        if child.hasExited {
+            guard !(await Self.socketExistsOffMain(child.socketPath)) else {
+                throw ManagerHostFailure.unavailable("Manager 启动的 Host 子进程已退出，但 socket 仍存在；为避免停止同 runtime 的替代进程，Manager 保持运行。请检查状态并确认 socket 所属者。")
+            }
+            if children[child.profileID] === child { children[child.profileID] = nil }
+            return
+        }
+
+        do {
+            _ = try await request(.daemonStop, applicationPath: applicationPath, runtimePath: child.runtimePath,
+                                  expectedPeerPID: child.pid)
+        } catch {
+            if let hostFailure = error as? ManagerHostFailure, hostFailure.isSessionBusy { throw error }
+            let observedExit = await child.waitForExit(timeout: Self.childExitTimeout)
+            let socketAbsent = await Self.waitForSocketAbsence(child.socketPath, timeout: Self.socketRemovalTimeout)
+            if observedExit != nil && socketAbsent {
+                if children[child.profileID] === child { children[child.profileID] = nil }
+                return
+            }
+            throw ManagerHostFailure.unavailable("原始子进程退出或 socket 消失均未得到完整确认。Manager 保持运行，没有重试控制请求或强制结束进程。原始错误：\(error.localizedDescription) 请查询该 profile 的 Host 状态后再试。")
+        }
+        let exitStatus = await child.waitForExit(timeout: Self.childExitTimeout)
+        guard exitStatus != nil else {
+            throw ManagerHostFailure.unavailable("Host 已接受停止请求，但 Manager 尚未确认其原始子进程退出；没有发送 kill。Manager 保持运行，请查询状态后重试。")
+        }
+        guard await Self.waitForSocketAbsence(child.socketPath, timeout: Self.socketRemovalTimeout) else {
+            throw ManagerHostFailure.unavailable("原始 Host 子进程已退出，但 runtime socket 仍存在；可能有另一个进程接管。Manager 不会停止该进程，并保持运行。请确认 socket 所属者。")
+        }
+        if children[child.profileID] === child { children[child.profileID] = nil }
+    }
+
+    private func request(_ operation: ControlOperation, applicationPath: String, runtimePath: String,
+                         expectedPeerPID: Int32?) async throws -> ControlBrokerReply {
+        let request = ControlRequest(requestID: UUID(), operation: operation)
+        let data = try await Self.exchangeWithTimeout(request, applicationPath: applicationPath,
+                                                      runtimePath: runtimePath, expectedPeerPID: expectedPeerPID,
+                                                      timeout: Self.exchangeTimeout)
+        let reply = try ControlCLI.decodeReply(data, requestID: request.requestID)
+        guard reply.status == "ok" else { throw Self.failure(for: reply.error) }
+        return reply
+    }
+
+    nonisolated private static func exchangeWithTimeout(_ request: ControlRequest, applicationPath: String,
+                                                         runtimePath: String, expectedPeerPID: Int32?,
+                                                         timeout: TimeInterval) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            let gate = ManagerHostExchangeGate(continuation)
+            Task.detached(priority: .userInitiated) {
+                do {
+                    gate.finish(.success(try ControlCLI.exchange(request, applicationPath: applicationPath,
+                                                                 runtimePath: runtimePath, expectedPeerPID: expectedPeerPID)))
+                } catch { gate.finish(.failure(error)) }
+            }
+            Task.detached(priority: .utility) {
+                try? await Task.sleep(for: .seconds(timeout))
+                gate.finish(.failure(ManagerHostFailure.unavailable("Host 控制 socket 请求超时；停止是否完成无法确认，Manager 保持运行且不会强制结束进程。请查询状态后重试。")))
+            }
+        }
+    }
+
+    nonisolated private static func socketExistsOffMain(_ path: String) async -> Bool {
+        await Task.detached(priority: .utility) { socketExists(path) }.value
+    }
+
+    nonisolated private static func waitForSocketAbsence(_ path: String, timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if !(await socketExistsOffMain(path)) { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return !(await socketExistsOffMain(path))
+    }
+
+    nonisolated private static func socketExists(_ path: String) -> Bool {
+        var info = stat()
+        if lstat(path, &info) == 0 { return true }
+        if errno == ENOENT { return false }
+        return true // Never treat an unexpected filesystem error as "stopped".
+    }
+
+    private static func failure(for code: String?) -> ManagerHostFailure {
+        if code == "SESSION_BUSY" {
+            return .sessionBusy("Host 当前有活动或尚未交回的控制连接；Manager 保持运行且没有停止 Host。请先完成交回/释放连接，再重试停止或退出。")
+        }
+        if code == "UNAVAILABLE" || code == "INDETERMINATE_RESULT" {
+            return .unavailable("Host 停止结果未确认；Manager 保持运行且没有强制结束进程。请查询该 profile 的 Host 状态后重试。")
+        }
+        return .commandFailed("Safarier Host 命令未完成（\(code ?? "UNKNOWN")）。Manager 保持运行；请确认 Host 状态后重试。")
+    }
+}
+
+@MainActor
+private final class ManagerHostChild {
+    let process: Process
+    let profileID: UUID
+    let runtimePath: String
+    var pid: Int32 { process.processIdentifier }
+    private(set) var exitStatus: Int32?
+    private var exitWaiters: [UUID: CheckedContinuation<Int32?, Never>] = [:]
+
+    init(process: Process, profileID: UUID, runtimePath: String) {
+        self.process = process
+        self.profileID = profileID
+        self.runtimePath = runtimePath
+    }
+
+    var socketPath: String { runtimePath + "/control.sock" }
+    var hasExited: Bool { exitStatus != nil }
+
+    func recordExit(_ status: Int32) {
+        guard exitStatus == nil else { return }
+        exitStatus = status
+        let waiters = Array(exitWaiters.values)
+        exitWaiters.removeAll()
+        for waiter in waiters { waiter.resume(returning: status) }
+    }
+
+    func waitForExit(timeout: TimeInterval) async -> Int32? {
+        if let exitStatus { return exitStatus }
+        let id = UUID()
+        return await withCheckedContinuation { continuation in
+            if let exitStatus {
+                continuation.resume(returning: exitStatus)
+                return
+            }
+            exitWaiters[id] = continuation
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(timeout))
+                guard let self, let waiter = self.exitWaiters.removeValue(forKey: id) else { return }
+                waiter.resume(returning: nil)
+            }
+        }
+    }
+}
+
+private final class ManagerHostExchangeGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data, Error>?
+
+    init(_ continuation: CheckedContinuation<Data, Error>) { self.continuation = continuation }
+
+    func finish(_ result: Result<Data, Error>) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+
+enum ManagerHostFailure: LocalizedError {
+    case unavailable(String)
+    case commandFailed(String)
+    case sessionBusy(String)
+
+    var isSessionBusy: Bool {
+        if case .sessionBusy = self { return true }
+        return false
+    }
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable(let message), .commandFailed(let message), .sessionBusy(let message): return message
+        }
+    }
+}

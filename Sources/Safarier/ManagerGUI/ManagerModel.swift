@@ -105,12 +105,16 @@ final class ManagerModel: ObservableObject {
     @Published var sheet: Sheet?
     @Published var confirmation: Confirmation?
     @Published var message: Message?
+    @Published private(set) var hostOperation: ManagerHostAction?
 
     private var monitor: Timer?
     private var activationObserver: NSObjectProtocol?
+    private let hostService: any ManagerHostServicing
+    private var hostAuthorization: [UUID: HostAuthorizationReceipt] = [:]
 
-    init(workspace: SafarierWorkspace) {
+    init(workspace: SafarierWorkspace, hostService: (any ManagerHostServicing)? = nil) {
         self.workspace = workspace
+        self.hostService = hostService ?? ManagerHostDaemonService()
         reload()
         if let firstProfile = profiles.first {
             selection = .profile(firstProfile.id)
@@ -294,6 +298,51 @@ final class ManagerModel: ObservableObject {
         guard let pid = workspace.runnerPID(profile.id) else { return }
         if let app = NSRunningApplication(processIdentifier: pid), app.terminate() { return }
         kill(pid, SIGTERM)
+    }
+
+    func hostActionEnabled(_ action: ManagerHostAction, for profile: Profile?) -> Bool {
+        guard let profile, ManagerHostMenuPolicy.enabled(action, profile: profile, busy: hostOperation != nil)
+        else { return false }
+        switch action {
+        case .authorize: return hostAuthorization[profile.id]?.status != "pending"
+        case .authorizationStatus: return hostAuthorization[profile.id] != nil
+        default: return true
+        }
+    }
+
+    func performHostAction(_ action: ManagerHostAction, for profile: Profile) {
+        guard hostActionEnabled(action, for: profile) else { return }
+        hostOperation = action
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.hostOperation = nil }
+            do {
+                if action == .authorize || action == .authorizationStatus {
+                    let requestID = action == .authorizationStatus ? hostAuthorization[profile.id]?.requestID : nil
+                    guard action == .authorize || requestID != nil else { return }
+                    let receipt = try await hostService.authorization(profileID: profile.id, requestID: requestID)
+                    hostAuthorization[profile.id] = receipt
+                    let guidance = receipt.status == "pending"
+                        ? "\n请处理 macOS 提示，再通过「查看授权结果」查询。"
+                        : ""
+                    message = Message(title: "「\(profile.name)」Host 授权结果", detail: receipt.statusDescription + guidance)
+                    return
+                }
+                let detail = try await hostService.perform(action, profileID: profile.id)
+                let title: String
+                switch action {
+                case .start: title = "已启动「\(profile.name)」Host"
+                case .status: title = "「\(profile.name)」Host 状态"
+                case .stop:
+                    hostAuthorization[profile.id] = nil
+                    title = "已停止「\(profile.name)」Host"
+                case .authorize, .authorizationStatus: return
+                }
+                message = Message(title: title, detail: detail)
+            } catch {
+                report("「\(profile.name)」Host 操作失败", error)
+            }
+        }
     }
 
     // MARK: - profile

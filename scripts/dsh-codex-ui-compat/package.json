@@ -1,0 +1,27 @@
+{
+  "name": "safarier-dsh-codex-ui-compat",
+  "version": "1.1.0",
+  "private": true,
+  "description": "DSH-native Codex UI API path compatibility for Safarier reverse-proxy mounts",
+  "type": "module",
+  "main": "./index.js",
+  "files": [
+    "index.js",
+    "browser-bootstrap.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.2-rc.2 <0.3.0-0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
