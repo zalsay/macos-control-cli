@@ -258,7 +258,7 @@ final class DshControlledRuntimeTests: XCTestCase {
         let lib = tree.appendingPathComponent("dsh/node_modules/@deepseek-ai/dsh/lib")
         let libCopy = tree.appendingPathComponent("dsh/node_modules/@deepseek-ai/dsh/lib-copy")
         try FileManager.default.moveItem(at: lib, to: libCopy)
-        try FileManager.default.createSymbolicLink(at: lib.path, withDestinationPath: "lib-copy")
+        try FileManager.default.createSymbolicLink(atPath: lib.path, withDestinationPath: "lib-copy")
         do { _ = try await runtime.acquire(); XCTFail("symlinked DSH entry ancestor") } catch {}
         XCTAssertEqual(backend.detached, 3)
         try FileManager.default.removeItem(at: lib)
