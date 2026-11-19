@@ -31,6 +31,9 @@ pub enum HostCommand {
     Recover {
         state_dir: Option<PathBuf>,
     },
+    DisconnectAll {
+        state_dir: Option<PathBuf>,
+    },
 }
 
 impl std::fmt::Debug for ClientOptions {

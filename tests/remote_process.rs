@@ -178,6 +178,7 @@ impl ProcessGuard {
             .env_remove("OPENROUTER_API_KEY")
             .env_remove("TYPESAFE_API_KEY")
             .env_remove("MCC_FAKE_REMOTE_OCR")
+            .env_remove("MCC_FAKE_EXTERNAL_INPUT_UNCERTAIN")
             .env(
                 "MCC_CONFIG_DIR",
                 self.root
@@ -204,6 +205,12 @@ impl ProcessGuard {
             );
         if host && self.root.join("fixture-ocr").exists() {
             c.env("MCC_FAKE_REMOTE_OCR", "1");
+        }
+        if host {
+            c.env(
+                "MCC_FAKE_EXTERNAL_INPUT_UNCERTAIN",
+                self.root.join("external-input-uncertain"),
+            );
         }
         if host && self.root.join("fixture-auto-takeover").exists() {
             c.env("MCC_FAKE_HOST_AUTO_TAKEOVER", "1")
@@ -2238,5 +2245,92 @@ fn remote_script_backend_preflight_returns_late_failure_before_any_steps() {
     assert_eq!(native_action_count(&f, "observe"), 0);
     assert_eq!(native_action_count(&f, "type"), 0);
     ok(&call(&["disconnect", "--connection", id]));
+    f.isolated();
+}
+
+#[test]
+fn host_admin_disconnect_all_releases_and_reattaches() {
+    fn disconnect_all(f: &ProcessGuard) -> serde_json::Value {
+        ok(&run(f.command(true).args([
+            "host",
+            "disconnect-all",
+            "--state-dir",
+            s(&f.root.join("host-state")),
+        ])))
+    }
+    let mut f = ProcessGuard::new();
+    fs::write(f.root.join("fixture-auto-takeover"), b"enable").unwrap();
+    f.init();
+    f.start();
+    let pid = f.host.as_ref().unwrap().id();
+    let idle = disconnect_all(&f);
+    assert_eq!(idle["connected"], false);
+    assert_eq!(idle["alreadyDisconnected"], true);
+    let old = ok(&f.remote(
+        "owner",
+        "tls/host-ca.pem",
+        "token",
+        &["connect", "--window", "42"],
+    ));
+    let old_id = old["connectionId"].as_str().unwrap();
+    fs::write(f.root.join("manual-pause"), b"explicit-stop").unwrap();
+    let before = ok(&f.remote("owner", "tls/host-ca.pem", "token", &["status"]));
+    assert_eq!(before["connected"], true);
+    assert_eq!(native_action_count(&f, "transport-auto-resume"), 0);
+    f.capture_owned();
+    let released = disconnect_all(&f);
+    assert_eq!(released["connected"], false);
+    assert_eq!(released["disconnected"], true);
+    assert_eq!(released["sessionsInvalidated"], true);
+    let status = ok(&f.remote("owner", "tls/host-ca.pem", "token", &["status"]));
+    assert_eq!(status["connected"], false);
+    assert_eq!(status["remoteHostState"], "ready");
+    let stale = f.remote(
+        "owner",
+        "tls/host-ca.pem",
+        "token",
+        &["observe", "--connection", old_id],
+    );
+    assert!(!stale.status.success(), "old connection must not observe");
+    let new = ok(&f.remote(
+        "owner",
+        "tls/host-ca.pem",
+        "token",
+        &["connect", "--window", "42"],
+    ));
+    assert_ne!(new["connectionId"], old["connectionId"]);
+    assert_eq!(f.host.as_ref().unwrap().id(), pid);
+    assert!(f.host.as_mut().unwrap().try_wait().unwrap().is_none());
+    f.isolated();
+}
+
+#[test]
+fn host_admin_disconnect_all_keeps_recovery_for_uncertain_mbc_input() {
+    let mut f = ProcessGuard::new();
+    f.init();
+    f.start();
+    ok(&f.remote(
+        "owner",
+        "tls/host-ca.pem",
+        "token",
+        &["connect", "--window", "42"],
+    ));
+    f.capture_owned();
+    let journal = f.root.join("host-state/host.json");
+    let before = fs::read(&journal).unwrap();
+    let cancels = native_action_count(&f, "cancel");
+    fs::write(f.root.join("external-input-uncertain"), b"unconfirmed").unwrap();
+    let out = run(f.command(true).args([
+        "host",
+        "disconnect-all",
+        "--state-dir",
+        s(&f.root.join("host-state")),
+    ]));
+    assert!(!out.status.success());
+    assert_eq!(json(&out)["error"]["code"], "CANCEL_UNCONFIRMED");
+    assert_eq!(fs::read(&journal).unwrap(), before);
+    assert_eq!(native_action_count(&f, "cancel"), cancels);
+    let status = ok(&f.remote("owner", "tls/host-ca.pem", "token", &["status"]));
+    assert_eq!(status["remoteHostState"], "recovery_required");
     f.isolated();
 }

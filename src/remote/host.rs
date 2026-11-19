@@ -15,7 +15,15 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    io::{Read, Write},
     net::TcpListener,
+    os::{
+        fd::AsRawFd,
+        unix::{
+            fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
+            net::{UnixListener, UnixStream},
+        },
+    },
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -26,6 +34,7 @@ use std::{
 use tungstenite::Message;
 
 static STOP: AtomicBool = AtomicBool::new(false);
+const HOST_ADMIN_MAX_BYTES: usize = 4096;
 struct SignalRegistrations(Vec<signal_hook::SigId>);
 impl Drop for SignalRegistrations {
     fn drop(&mut self) {
@@ -112,6 +121,8 @@ struct Core {
     backend_running: bool,
     transitioning: bool,
     active_transports: usize,
+    admin_busy: bool,
+    admin_recovery: bool,
 }
 impl Core {
     fn capabilities(&self) -> Vec<String> {
@@ -157,6 +168,279 @@ fn state_path(path: Option<PathBuf>, scope: Scope) -> Result<PathBuf> {
         return Err(fail("INVALID_ARGUMENT"));
     }
     Ok(root)
+}
+fn host_admin_error(code: &str) -> Error {
+    Error::new(code, "Host 本机管理操作失败")
+}
+fn admin_socket_path(state_dir: &Path, scope: Scope) -> Result<PathBuf> {
+    if !state_dir.is_absolute() {
+        return Err(host_admin_error("INVALID_ARGUMENT"));
+    }
+    let canonical = state_dir
+        .canonicalize()
+        .map_err(|_| host_admin_error("HOST_NOT_RUNNING"))?;
+    let metadata =
+        std::fs::symlink_metadata(&canonical).map_err(|_| host_admin_error("HOST_NOT_RUNNING"))?;
+    crate::private_files::check_private(&metadata, true)
+        .map_err(|_| host_admin_error("INSECURE_ADMIN_SOCKET"))?;
+    if metadata.permissions().mode() & 0o7777 != 0o700 {
+        return Err(host_admin_error("INSECURE_ADMIN_SOCKET"));
+    }
+    let mut identity = canonical.as_os_str().as_encoded_bytes().to_vec();
+    identity.push(0);
+    identity.extend_from_slice(scope.name().as_bytes());
+    let digest = ring::digest::digest(&ring::digest::SHA256, &identity);
+    let name = digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let uid = unsafe { libc::geteuid() };
+    // Keep the socket short even if the state directory is deeply nested.
+    Ok(PathBuf::from(format!("/tmp/mcc-host-admin-{uid}")).join(format!("{name}.sock")))
+}
+fn check_admin_parent(parent: &Path) -> Result<()> {
+    let metadata =
+        std::fs::symlink_metadata(parent).map_err(|_| host_admin_error("INSECURE_ADMIN_SOCKET"))?;
+    crate::private_files::check_private(&metadata, true)
+        .map_err(|_| host_admin_error("INSECURE_ADMIN_SOCKET"))?;
+    if !metadata.is_dir() || metadata.permissions().mode() & 0o7777 != 0o700 {
+        return Err(host_admin_error("INSECURE_ADMIN_SOCKET"));
+    }
+    Ok(())
+}
+fn ensure_admin_parent(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| host_admin_error("INSECURE_ADMIN_SOCKET"))?;
+    match std::fs::DirBuilder::new().mode(0o700).create(parent) {
+        Ok(()) => (),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+        Err(_) => return Err(host_admin_error("ADMIN_SOCKET_UNAVAILABLE")),
+    }
+    check_admin_parent(parent)
+}
+fn remove_stale_admin_socket(path: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(host_admin_error("INSECURE_ADMIN_SOCKET")),
+    };
+    if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(host_admin_error("INSECURE_ADMIN_SOCKET"));
+    }
+    match UnixStream::connect(path) {
+        Ok(_) => return Err(host_admin_error("HOST_ALREADY_RUNNING")),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) => {}
+        Err(_) => return Err(host_admin_error("ADMIN_SOCKET_BUSY")),
+    }
+    let current =
+        std::fs::symlink_metadata(path).map_err(|_| host_admin_error("ADMIN_SOCKET_BUSY"))?;
+    if !current.file_type().is_socket()
+        || current.uid() != unsafe { libc::geteuid() }
+        || current.dev() != metadata.dev()
+        || current.ino() != metadata.ino()
+    {
+        return Err(host_admin_error("ADMIN_SOCKET_BUSY"));
+    }
+    std::fs::remove_file(path).map_err(|_| host_admin_error("ADMIN_SOCKET_BUSY"))
+}
+struct AdminSocketGuard {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+impl Drop for AdminSocketGuard {
+    fn drop(&mut self) {
+        if std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+            metadata.file_type().is_socket()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.dev() == self.device
+                && metadata.ino() == self.inode
+        }) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+fn bind_admin_listener(path: &Path) -> Result<(UnixListener, AdminSocketGuard)> {
+    ensure_admin_parent(path)?;
+    remove_stale_admin_socket(path)?;
+    let listener =
+        UnixListener::bind(path).map_err(|_| host_admin_error("ADMIN_SOCKET_UNAVAILABLE"))?;
+    if std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).is_err() {
+        let _ = std::fs::remove_file(path);
+        return Err(host_admin_error("ADMIN_SOCKET_UNAVAILABLE"));
+    }
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| host_admin_error("ADMIN_SOCKET_UNAVAILABLE"))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| host_admin_error("ADMIN_SOCKET_UNAVAILABLE"))?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o7777 != 0o600
+    {
+        return Err(host_admin_error("INSECURE_ADMIN_SOCKET"));
+    }
+    Ok((
+        listener,
+        AdminSocketGuard {
+            path: path.to_path_buf(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+    ))
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostAdminRequest {
+    protocol_version: u32,
+    scope: Scope,
+    command: String,
+}
+fn admin_peer_uid(stream: &UnixStream) -> Result<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+            return Err(host_admin_error("ADMIN_PEER_REJECTED"));
+        }
+        Ok(uid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut credentials = std::mem::MaybeUninit::<libc::ucred>::zeroed();
+        let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                credentials.as_mut_ptr().cast(),
+                &mut length,
+            )
+        };
+        if result != 0 || length as usize != std::mem::size_of::<libc::ucred>() {
+            return Err(host_admin_error("ADMIN_PEER_REJECTED"));
+        }
+        let credentials = unsafe { credentials.assume_init() };
+        if credentials.pid <= 0 {
+            return Err(host_admin_error("ADMIN_PEER_REJECTED"));
+        }
+        Ok(credentials.uid)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = stream;
+        Err(host_admin_error("UNSUPPORTED_PLATFORM"))
+    }
+}
+fn admin_response(bytes: &[u8], scope: Scope) -> Result<Value> {
+    let mut response: Value =
+        serde_json::from_slice(bytes).map_err(|_| host_admin_error("PROTOCOL_ERROR"))?;
+    if response["protocolVersion"] != crate::protocol::PROTOCOL_VERSION
+        || response["scope"].as_str() != Some(scope.name())
+        || !response["ok"].is_boolean()
+    {
+        return Err(host_admin_error("PROTOCOL_ERROR"));
+    }
+    if response["ok"] == false {
+        let code = response["error"]["code"]
+            .as_str()
+            .unwrap_or("ADMIN_SOCKET_UNAVAILABLE");
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or("Host 本机管理操作失败");
+        return Err(Error::new(code, message));
+    }
+    let object = response
+        .as_object_mut()
+        .ok_or_else(|| host_admin_error("PROTOCOL_ERROR"))?;
+    object.remove("ok");
+    object.remove("protocolVersion");
+    object.remove("scope");
+    Ok(response)
+}
+/// Same-user local maintenance command. It never opens WSS or reads the Host token.
+pub fn disconnect_all(state_dir: Option<PathBuf>, scope: Scope) -> Result<Value> {
+    if !cfg!(target_os = "macos") {
+        return Err(host_admin_error("UNSUPPORTED_PLATFORM"));
+    }
+    let state_dir = state_path(state_dir, scope)?;
+    let path = admin_socket_path(&state_dir, scope)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| host_admin_error("INSECURE_ADMIN_SOCKET"))?;
+    check_admin_parent(parent)?;
+    let metadata =
+        std::fs::symlink_metadata(&path).map_err(|_| host_admin_error("HOST_NOT_RUNNING"))?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o7777 != 0o600
+    {
+        return Err(host_admin_error("INSECURE_ADMIN_SOCKET"));
+    }
+    let mut stream =
+        UnixStream::connect(&path).map_err(|_| host_admin_error("HOST_NOT_RUNNING"))?;
+    if admin_peer_uid(&stream)? != unsafe { libc::geteuid() } {
+        return Err(host_admin_error("ADMIN_PEER_REJECTED"));
+    }
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(5))))
+        .map_err(|_| host_admin_error("ADMIN_SOCKET_UNAVAILABLE"))?;
+    let request = json!({
+        "protocolVersion":crate::protocol::PROTOCOL_VERSION,
+        "scope":scope.name(),
+        "command":"disconnect-all"
+    });
+    let mut request =
+        serde_json::to_vec(&request).map_err(|_| host_admin_error("PROTOCOL_ERROR"))?;
+    request.push(b'\n');
+    stream
+        .write_all(&request)
+        .and_then(|_| stream.shutdown(std::net::Shutdown::Write))
+        .map_err(|_| host_admin_error("ADMIN_SOCKET_UNAVAILABLE"))?;
+    let mut bytes = Vec::new();
+    (&mut stream)
+        .take((HOST_ADMIN_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| host_admin_error("ADMIN_OUTCOME_UNKNOWN"))?;
+    if bytes.len() > HOST_ADMIN_MAX_BYTES {
+        return Err(host_admin_error("ADMIN_OUTCOME_UNKNOWN"));
+    }
+    let response = match admin_response(&bytes, scope) {
+        Ok(response) => response,
+        Err(error)
+            if matches!(
+                error.code.as_str(),
+                "BUSY"
+                    | "RECOVERY_REQUIRED"
+                    | "CANCEL_UNCONFIRMED"
+                    | "NOT_OWNER"
+                    | "ADMIN_OUTCOME_UNKNOWN"
+                    | "ADMIN_SOCKET_UNAVAILABLE"
+                    | "HOST_NOT_RUNNING"
+                    | "INVALID_ARGUMENT"
+            ) =>
+        {
+            return Err(error);
+        }
+        Err(_) => return Err(host_admin_error("ADMIN_OUTCOME_UNKNOWN")),
+    };
+    if response["connected"] != false
+        || !(response["disconnected"] == true
+            || response["released"] == true
+            || response["alreadyDisconnected"] == true)
+    {
+        return Err(host_admin_error("ADMIN_OUTCOME_UNKNOWN"));
+    }
+    Ok(response)
 }
 fn read_journal(store: &LockedStateDir) -> Result<Option<Journal>> {
     store
@@ -293,6 +577,206 @@ fn state_name(state: State) -> &'static str {
         State::RecoveryRequired => "recovery_required",
     }
 }
+fn disconnect_all_with(
+    core: &Arc<Mutex<Core>>,
+    disconnect: impl FnOnce(Scope, &str) -> Result<Value>,
+) -> Result<Value> {
+    let (scope, owner, previous_journal) = {
+        let mut c = locked(core)?;
+        if c.admin_busy || c.active_transports != 0 || c.backend_running || c.transitioning {
+            return Err(fail("BUSY"));
+        }
+        if c.owner.is_none() && (c.admin_recovery || c.manager.state() != State::Ready) {
+            return Err(fail("RECOVERY_REQUIRED"));
+        }
+        if c.owner.is_some() && STOP.load(Ordering::Acquire) {
+            return Err(fail("BUSY"));
+        }
+        let owner = c
+            .owner
+            .as_ref()
+            .map(|owner| (owner.sid.clone(), owner.capability.clone()));
+        let previous_journal = match owner.as_ref() {
+            Some((_, capability)) => match read_journal(&c.journal)? {
+                Some(journal)
+                    if !journal.clean
+                        && journal.owner == *capability
+                        && journal.scope == c.scope =>
+                {
+                    Some(journal)
+                }
+                _ => return Err(fail("RECOVERY_REQUIRED")),
+            },
+            None => {
+                if read_journal(&c.journal)?
+                    .is_some_and(|journal| !journal.clean || journal.scope != c.scope)
+                {
+                    return Err(fail("RECOVERY_REQUIRED"));
+                }
+                None
+            }
+        };
+        c.admin_busy = true;
+        (c.scope, owner, previous_journal)
+    };
+
+    let receipt = match owner.as_ref() {
+        None => None,
+        Some((_, capability)) => match disconnect(scope, capability) {
+            Ok(receipt)
+                if receipt["connected"] == false
+                    && (receipt["disconnected"] == true
+                        || receipt["released"] == true
+                        || receipt["alreadyDisconnected"] == true) =>
+            {
+                Some(receipt)
+            }
+            Ok(_) => {
+                return admin_disconnect_failed(core, host_admin_error("ADMIN_OUTCOME_UNKNOWN"))
+            }
+            Err(error) if error.code == "BUSY" => {
+                let mut c = locked(core)?;
+                c.admin_busy = false;
+                return Err(error);
+            }
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "CANCEL_UNCONFIRMED" | "RECOVERY_REQUIRED"
+                ) =>
+            {
+                return admin_disconnect_failed(core, error)
+            }
+            Err(_) => {
+                return admin_disconnect_failed(core, host_admin_error("ADMIN_OUTCOME_UNKNOWN"))
+            }
+        },
+    };
+
+    let mut c = locked(core)?;
+    if !c.admin_busy
+        || c.active_transports != 0
+        || c.backend_running
+        || c.transitioning
+        || match (&owner, &c.owner) {
+            (None, None) => false,
+            (Some((sid, capability)), Some(current)) => {
+                current.sid != *sid || current.capability != *capability
+            }
+            _ => true,
+        }
+    {
+        c.admin_busy = false;
+        c.admin_recovery = true;
+        c.manager.require_recovery();
+        return Err(host_admin_error("RECOVERY_REQUIRED"));
+    }
+    if let Some((_, capability)) = &owner {
+        if c.write_journal(&Journal {
+            clean: true,
+            owner: capability.clone(),
+            daemon_pid: None,
+            helper_pid: None,
+            scope,
+        })
+        .is_err()
+        {
+            c.admin_busy = false;
+            c.admin_recovery = true;
+            c.manager.require_recovery();
+            return Err(host_admin_error("RECOVERY_REQUIRED"));
+        }
+    }
+    if c.manager.acknowledge_disconnect_all().is_err() {
+        if let Some(journal) = previous_journal {
+            let _ = c.write_journal(&journal);
+        }
+        c.admin_busy = false;
+        c.admin_recovery = true;
+        c.manager.require_recovery();
+        return Err(host_admin_error("RECOVERY_REQUIRED"));
+    }
+    if let Some(files) = c.files.as_mut() {
+        files.release_all();
+    }
+    c.owner = None;
+    c.pause_proof = None;
+    c.admin_busy = false;
+    c.admin_recovery = false;
+    Ok(json!({
+        "disconnected":receipt.as_ref().is_some_and(|receipt| receipt["disconnected"] == true),
+        "connected":false,
+        "alreadyDisconnected":receipt
+            .as_ref()
+            .is_none_or(|receipt| receipt["disconnected"] != true),
+        "sessionsInvalidated":true,
+        "transfersInvalidated":true,
+        "framesInvalidated":true
+    }))
+}
+fn admin_disconnect_failed<T>(core: &Arc<Mutex<Core>>, error: Error) -> Result<T> {
+    let mut c = locked(core)?;
+    c.admin_busy = false;
+    c.admin_recovery = true;
+    c.manager.require_recovery();
+    Err(error)
+}
+fn disconnect_all_core(core: &Arc<Mutex<Core>>) -> Result<Value> {
+    disconnect_all_with(core, |scope, capability| {
+        let runtime = Runtime::from_env_for_scope(scope)?;
+        daemon::remote_disconnect_all(&runtime, capability)
+    })
+}
+fn serve_admin_connection(mut stream: UnixStream, core: &Arc<Mutex<Core>>, scope: Scope) {
+    let response = (|| -> Result<Value> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(5))))
+            .map_err(|_| host_admin_error("ADMIN_SOCKET_UNAVAILABLE"))?;
+        if admin_peer_uid(&stream)? != unsafe { libc::geteuid() } {
+            return Err(host_admin_error("ADMIN_PEER_REJECTED"));
+        }
+        let mut bytes = Vec::new();
+        (&mut stream)
+            .take((HOST_ADMIN_MAX_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| host_admin_error("PROTOCOL_ERROR"))?;
+        if bytes.len() > HOST_ADMIN_MAX_BYTES {
+            return Err(host_admin_error("PROTOCOL_ERROR"));
+        }
+        let request: HostAdminRequest =
+            serde_json::from_slice(&bytes).map_err(|_| host_admin_error("PROTOCOL_ERROR"))?;
+        if request.protocol_version != crate::protocol::PROTOCOL_VERSION
+            || request.scope != scope
+            || request.command != "disconnect-all"
+        {
+            return Err(host_admin_error("SCOPE_MISMATCH"));
+        }
+        disconnect_all_core(core)
+    })();
+    let mut response = crate::protocol::response_for(response, scope);
+    response["localAdmin"] = json!(true);
+    if let Ok(mut bytes) = serde_json::to_vec(&response) {
+        if bytes.len() <= HOST_ADMIN_MAX_BYTES {
+            bytes.push(b'\n');
+            let _ = stream.write_all(&bytes);
+        }
+    }
+}
+fn serve_admin_listener(listener: UnixListener, core: Arc<Mutex<Core>>, scope: Scope) {
+    while !STOP.load(Ordering::Acquire) {
+        match listener.accept() {
+            Ok((stream, _)) => serve_admin_connection(stream, &core, scope),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => {
+                eprintln!("MCC Host local disconnect-all listener stopped");
+                break;
+            }
+        }
+    }
+}
 fn cached_frame_failure(cached: bool, scope: Scope, error: Error) -> Result<Value> {
     if cached
         && matches!(
@@ -369,6 +853,14 @@ struct ActiveGuard {
     cancel: Arc<AtomicBool>,
     permit: Option<u64>,
     finished: bool,
+}
+struct QueryTransportGuard(Arc<Mutex<Core>>);
+impl Drop for QueryTransportGuard {
+    fn drop(&mut self) {
+        if let Ok(mut core) = self.0.lock() {
+            core.active_transports = core.active_transports.saturating_sub(1);
+        }
+    }
 }
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
@@ -680,7 +1172,10 @@ fn reconcile_local_resume(core: &Arc<Mutex<Core>>, sid: &str, scope: Scope) -> R
     // native lease and reconcile it while no Host flight or backend worker exists.
     let resume = {
         let c = locked(core)?;
-        if c.manager.state() == State::LostPaused && c.active_transports == 0 && !c.backend_running
+        if !c.admin_busy
+            && c.manager.state() == State::LostPaused
+            && c.active_transports == 0
+            && !c.backend_running
         {
             c.owner
                 .as_ref()
@@ -697,6 +1192,7 @@ fn reconcile_local_resume(core: &Arc<Mutex<Core>>, sid: &str, scope: Scope) -> R
             if proof.matches(&state) {
                 let mut c = locked(core)?;
                 if c.manager.state() == State::LostPaused
+                    && !c.admin_busy
                     && c.active_transports == 0
                     && !c.backend_running
                     && c.owner
@@ -720,6 +1216,9 @@ fn serve_connection(
 ) -> Result<()> {
     let (boot, scope, allow_files, capabilities) = {
         let c = locked(&core)?;
+        if c.admin_busy {
+            return Err(fail("BUSY"));
+        }
         (
             c.boot.clone(),
             c.scope,
@@ -753,6 +1252,9 @@ fn serve_connection(
     };
     let (sid, rebound) = {
         let mut c = locked(&core)?;
+        if c.admin_busy {
+            return Err(fail("BUSY"));
+        }
         let current = match requested.as_deref() {
             Some(session) => c.manager.session_is_current(
                 session,
@@ -800,11 +1302,24 @@ fn serve_connection(
         let req = serde_json::to_vec(&request).map_err(|_| fail("PROTOCOL_ERROR"))?;
         let value = {
             let mut c = locked(&core)?;
+            if c.admin_busy || c.admin_recovery {
+                return send_untracked_result(
+                    &mut ws,
+                    &id,
+                    sequence,
+                    crate::protocol::response_for_host(Err(fail("RECOVERY_REQUIRED")), scope),
+                );
+            }
             let now = c.now();
             c.requests.consume(&sid, now)?;
-            serde_json::from_slice::<Value>(&c.manager.query_cached(&sid, sequence, &id, &req)?)
-                .map_err(|_| fail("PROTOCOL_ERROR"))?
+            let value = serde_json::from_slice::<Value>(
+                &c.manager.query_cached(&sid, sequence, &id, &req)?,
+            )
+            .map_err(|_| fail("PROTOCOL_ERROR"))?;
+            c.active_transports += 1;
+            value
         };
+        let _transport = QueryTransportGuard(core.clone());
         return send(
             &mut ws,
             &ServerControl::Result {
@@ -856,6 +1371,25 @@ fn serve_connection(
         .as_str()
         .ok_or_else(|| fail("INVALID_ARGUMENT"))?
         .to_string();
+    {
+        let c = locked(&core)?;
+        if c.admin_busy {
+            return send_untracked_result(
+                &mut ws,
+                &env.id,
+                env.sequence,
+                crate::protocol::response_for_host(Err(fail("BUSY")), scope),
+            );
+        }
+        if c.admin_recovery && action != "status" {
+            return send_untracked_result(
+                &mut ws,
+                &env.id,
+                env.sequence,
+                crate::protocol::response_for_host(Err(fail("RECOVERY_REQUIRED")), scope),
+            );
+        }
+    }
     if rebound && !protocol::session_rebind_read_only(&action) {
         return send_untracked_result(
             &mut ws,
@@ -879,6 +1413,9 @@ fn serve_connection(
     {
         let adopted = (|| -> Result<()> {
             let mut c = locked(&core)?;
+            if c.admin_busy || c.admin_recovery {
+                return Err(fail("BUSY"));
+            }
             if !matches!(c.manager.state(), State::Ready | State::LostPaused) {
                 return Ok(());
             }
@@ -945,7 +1482,7 @@ fn serve_connection(
             return Err(fail("REMOTE_STOPPING"));
         }
         let now = c.now();
-        if c.backend_running || c.transitioning {
+        if c.admin_busy || c.admin_recovery || c.backend_running || c.transitioning {
             return Err(fail("BUSY"));
         }
         if matches!(
@@ -1414,6 +1951,8 @@ pub fn run(options: HostOptions, scope: Scope) -> Result<Value> {
         backend_running: false,
         transitioning: false,
         active_transports: 0,
+        admin_busy: false,
+        admin_recovery: false,
     }));
     let listener = TcpListener::bind(options.listen).map_err(|_| fail("REMOTE_LISTEN_FAILED"))?;
     listener
@@ -1430,13 +1969,42 @@ pub fn run(options: HostOptions, scope: Scope) -> Result<Value> {
         .map_err(|_| fail("REMOTE_SIGNAL_FAILED"))?;
         signals.0.push(id);
     }
+    let (admin_worker, admin_socket_guard) = if cfg!(target_os = "macos") {
+        match admin_socket_path(&state_path(options.state_dir.clone(), scope)?, scope)
+            .and_then(|path| bind_admin_listener(&path))
+        {
+            Ok((admin_listener, guard)) => (
+                Some(std::thread::spawn({
+                    let core = core.clone();
+                    move || serve_admin_listener(admin_listener, core, scope)
+                })),
+                Some(guard),
+            ),
+            Err(error) => {
+                eprintln!("MCC Host local disconnect-all unavailable ({})", error.code);
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
     // The desktop supervisor opts in; existing CLI callers retain one final JSON line.
+    // Emit readiness only after the listener, signals, and best-effort local admin path
+    // have been initialized.
     if std::env::var_os("MCC_HOST_READY").as_deref() == Some(std::ffi::OsStr::new("1")) {
         use std::io::Write;
         let mut output = std::io::stdout().lock();
-        writeln!(output, "{}", json!({"hostReady":true,"listen":options.listen.to_string(),"recoveryRequired":recovery}))
-            .and_then(|()| output.flush())
-            .map_err(|e| crate::protocol::Error::io("无法写入 Host 启动回执", e))?;
+        writeln!(
+            output,
+            "{}",
+            json!({
+                "hostReady": true,
+                "listen": options.listen.to_string(),
+                "recoveryRequired": recovery
+            })
+        )
+        .and_then(|()| output.flush())
+        .map_err(|e| crate::protocol::Error::io("无法写入 Host 启动回执", e))?;
     }
     let admission = Admission::new();
     let backends: BackendThreads = Arc::new(Mutex::new(Vec::new()));
@@ -1493,26 +2061,41 @@ pub fn run(options: HostOptions, scope: Scope) -> Result<Value> {
             }
         }
         let mut c = locked(&core)?;
-        let now = c.now();
-        if c.manager
-            .expire(now)
-            .is_ok_and(|e| e == Effect::PauseOwnedOperation)
-        {
+        let expiry = if c.admin_busy || c.transitioning {
+            Ok(Effect::None)
+        } else {
+            let now = c.now();
+            c.manager.expire(now)
+        };
+        if expiry.is_ok_and(|e| e == Effect::PauseOwnedOperation) {
+            // Claim the transition while the native pause is pending so a local
+            // disconnect cannot race the cancellation confirmation.
+            c.transitioning = true;
             let owner = c.owner.as_ref().map(|o| o.capability.clone());
             drop(c);
-            if let Some(owner) = owner {
-                if let Ok(runtime) = Runtime::from_env_for_scope(scope) {
-                    let result = daemon::remote_pause(&runtime, &owner, None);
-                    if let Ok(mut c) = core.lock() {
-                        if result.as_ref().is_ok_and(|v| v["paused"] == true) {
-                            c.pause_proof = result.as_ref().ok().and_then(PauseProof::from_receipt);
-                            let _ = c.manager.acknowledge_pause();
-                        }
-                    }
+            let result = owner.as_ref().map(|owner| {
+                Runtime::from_env_for_scope(scope)
+                    .and_then(|runtime| daemon::remote_pause(&runtime, owner, None))
+            });
+            if let Ok(mut c) = core.lock() {
+                if result
+                    .as_ref()
+                    .is_some_and(|r| r.as_ref().is_ok_and(|v| v["paused"] == true))
+                {
+                    c.pause_proof = result
+                        .as_ref()
+                        .and_then(|r| r.as_ref().ok())
+                        .and_then(PauseProof::from_receipt);
+                    let _ = c.manager.acknowledge_pause();
                 }
+                c.transitioning = false;
             }
         }
     }
+    if let Some(worker) = admin_worker {
+        let _ = worker.join();
+    }
+    drop(admin_socket_guard);
     let owner = {
         let c = locked(&core)?;
         c.owner.as_ref().map(|o| o.capability.clone())
