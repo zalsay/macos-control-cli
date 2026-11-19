@@ -1,3 +1,4 @@
+mod builtin_scripts;
 mod jev;
 
 mod host;
@@ -233,6 +234,13 @@ fn script_path(app: State<'_, App>, id: String) -> Result<String> {
     Ok(app.store.export_path(&id)?.to_string_lossy().into_owned())
 }
 #[tauri::command]
+fn wechat_login_command(app: State<'_, App>) -> Result<builtin_scripts::GeneratedCommand> {
+    builtin_scripts::wechat_login_command(
+        &app.store,
+        include_str!("../scripts/wechat-channels-login.py"),
+    )
+}
+#[tauri::command]
 async fn script_import(app: State<'_, App>, handle: AppHandle) -> Result<Option<Script>> {
     let store = app.store.clone();
     background(move || {
@@ -320,6 +328,7 @@ fn main() {
             script_save,
             script_delete,
             script_path,
+            wechat_login_command,
             script_import,
             script_export
         ])

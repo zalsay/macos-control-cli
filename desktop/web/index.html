@@ -50,10 +50,10 @@
     <section id="scripts" aria-labelledby="scripts-title" hidden>
       <header><div class="eyebrow">MCC / WORKFLOWS</div><h1 id="scripts-title">脚本库</h1><p>管理可复用的 JSON 操作流程，支持在每一步选择 ESP。</p></header>
       <div class="library">
-        <div class="card library-list"><div class="card-heading"><h2>我的脚本</h2><span class="count" id="script-count">0</span></div><input id="search" aria-label="搜索脚本" placeholder="搜索脚本"><div class="buttons compact"><button id="script-new">新建</button><button id="script-import" class="primary">导入 JSON</button></div><div id="script-list" class="item-list"></div></div>
+        <div class="card library-list"><div class="card-heading"><h2>我的脚本</h2><span class="count" id="script-count">0</span></div><input id="search" aria-label="搜索脚本" placeholder="搜索脚本"><div class="buttons compact"><button id="script-new">新建</button><button id="script-import" class="primary">导入 JSON</button></div><div id="script-list" class="item-list"></div><h2>内置流程</h2><div class="item-list"><button id="script-wechat-login-command">视频号微信快捷登录<small>生成 CLI --plan 命令；不会在 Panel 中运行</small></button></div></div>
         <div class="card editor"><label for="script-name">脚本名称</label><input id="script-name" autocomplete="off"><div class="card-heading editor-heading"><label for="script-json">JSON 编辑器</label><small id="esp-steps">ESP：无</small></div><textarea id="script-json" rows="13" spellcheck="false" aria-label="JSON 编辑器"></textarea><p id="script-error" class="error" role="status" hidden></p>
           <div class="buttons compact wrap"><button id="script-save" class="primary">校验并保存</button><button id="script-copy" data-saved>复制副本</button><button id="script-export" data-saved>导出</button><button id="script-command" data-saved>CLI 命令</button><button id="script-delete" data-saved class="danger">删除</button></div>
-          <div id="command-group" hidden><label for="command-text">复制后替换连接 ID，再用终端执行</label><input id="command-text" readonly></div>
+          <div id="command-group" hidden><label id="command-title" for="command-text">复制后替换连接 ID，再用终端执行</label><input id="command-text" readonly><small id="command-note"></small></div>
         </div>
       </div>
       <p class="footnote">导入时保留原文件。脚本的正式运行由 MCC CLI 完成。</p>

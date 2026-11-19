@@ -31,6 +31,8 @@ open 'src-tauri/target/debug/bundle/macos/MCC Control Panel.app'
 
 可新建、导入、校验、搜索、编辑、复制和导出 [MCC JSON 脚本](SCRIPT.md)。`eb: true` 的步骤会在编辑器顶部标出；校验失败会显示步骤编号（如适用）。删除只移除库内副本。保存后点「CLI 命令」复制模板，将连接 ID（需要时也包括帧 ID）替换为当前会话的实际值。流程仍通过 `mcc script` 执行；面板中没有运行脚本的入口。
 
+「内置流程」中的「视频号微信快捷登录」是独立的 Python/MCC CLI 流程，不是 JSON 脚本。点击只会在剪贴板生成带 `--plan` 的命令，不会从 Panel 启动进程；检查计划后，如确需执行，用户须自行在终端将 `--plan` 改为 `--execute`。命令使用当前已保存的 MCC、Host 地址/端口、token 文件以及 TLS 证书同目录的 `host-ca.pem`（若存在），不写入 token 内容。通配监听地址生成同地址族回环客户端 URL；若证书 SAN 不含此 URL，须将命令的 `--remote` 改成证书中的主机名/IP，不能关闭 TLS 校验或变更 Host 监听来规避。缺少 CA 时会保留系统 TLS 校验并提示如何提供信任。内置 runner 写在 `control-panel/builtins/`（目录 0700、文件 0600），CLI 远端状态隔离在 `control-panel/remote-state/wechat-channels-login/`；两者不属于可编辑或导出的 JSON 脚本。
+
 面板配置和脚本库存于 `<MCC_CONFIG_DIR>/control-panel/`，默认 `~/.config/mcc/control-panel/`。CLI 命令使用的库内导出路径会在再次复制命令时更新，独立导出文件则不随库变更。
 
 ## 客户端设置：Jev

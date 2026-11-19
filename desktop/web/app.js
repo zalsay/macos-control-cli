@@ -197,6 +197,8 @@ bind('script-command', async () => {
   const path = await invoke('script_path', {id:selected.id});
   const quoted = "'" + path.replaceAll("'", "'\\''") + "'";
   $('command-text').value = `mcc script --connection 'CONNECTION_ID' --file ${quoted}${selected.needs_frame ? " --frame 'FRAME_ID'" : ''}`;
+  $('command-title').textContent = '复制后替换连接 ID，再用终端执行';
+  $('command-note').textContent = '';
   $('command-group').hidden = false;
   $('command-text').select();
   try {await navigator.clipboard.writeText($('command-text').value); notice('已复制 CLI 命令。');}
@@ -284,6 +286,16 @@ for (const id of ['jev-make-default','jev-toggle']) $(id).addEventListener('clic
 });
 document.querySelector('[data-page="settings"]').addEventListener('click', () => { if (!jevView) void withJev(refreshJev); });
 
+bind('script-wechat-login-command', async () => {
+  const generated = await invoke('wechat_login_command');
+  $('command-title').textContent = '仅生成命令；默认 --plan。检查后如需实际操作，请在终端将 --plan 改为 --execute。';
+  $('command-text').value = generated.command;
+  $('command-note').textContent = generated.note;
+  $('command-group').hidden = false;
+  $('command-text').select();
+  try {await navigator.clipboard.writeText(generated.command); notice('已复制视频号登录计划命令。');}
+  catch {notice('计划命令已选中，可按 ⌘C 复制。');}
+});
 openScript(null);
 Promise.allSettled([
   invoke('settings').then(value => {for (const name of hostFields) $(name).value = value.host[name]; $('bin_dir').value = value.bin_dir; initialized = true;}),

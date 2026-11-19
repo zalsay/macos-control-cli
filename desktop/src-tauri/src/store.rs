@@ -170,6 +170,19 @@ impl Store {
         write_atomic(&path, item.content.as_bytes())?;
         Ok(path)
     }
+    pub fn materialize_wechat_login_runner(&self, source: &str) -> Result<PathBuf> {
+        self.private_root()?;
+        private_dir(&self.root.join("builtins"))?;
+        let path = self.root.join("builtins/wechat-channels-login.py");
+        write_atomic(&path, source.as_bytes())?;
+        Ok(path)
+    }
+    pub fn wechat_login_remote_state_dir(&self) -> Result<PathBuf> {
+        self.private_root()?;
+        let path = self.root.join("remote-state/wechat-channels-login");
+        private_dir(&path)?;
+        Ok(path)
+    }
     pub fn delete_script(&self, id: &str) -> Result<()> {
         remove(&self.script_path(id)?)?;
         remove(&self.root.join("exports").join(format!("{id}.json")))

@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>MCC 控制台需要自动化控制 Google Chrome，以便按你的指示操作浏览器。</string>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>MCC 控制台使用蓝牙查找 ESP32 并检查固件状态。</string>
 </dict>
