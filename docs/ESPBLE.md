@@ -40,7 +40,7 @@ Use the [macOS control panel](CONTROL-PANEL.md) to discover candidates, test fir
 
 ## Coordinates and input
 
-- Coordinates are integer screen percentages from **0 to 100**, not ordinary MCC's window-frame pixels. The current ESP firmware is configured for one 3440×1440 screen. S3 computes the existing mouse curves.
+- Coordinates are integer screen percentages from **0 to 100**, not ordinary MCC's window-frame pixels. Before each move or click, MBC reads the receiving Mac’s current main-display bounds in macOS desktop coordinates and waits for the firmware to acknowledge `screen <width> <height>`. The ESP32 computes the existing curves using those dimensions. The sender must be the HID recipient; via Host this is the Host Mac. Pointer input requires matching updated firmware. An unsupported or unacknowledged sync stops the action without falling back to 3440×1440.
 - `click x,y` moves and left-clicks. Without coordinates, MBC uses the last explicit move/click target in the current argument sequence, or reads the sending Mac's main-screen pointer and rounds to percentages. Reading the pointer assumes sender and HID recipient are the same Mac and introduces rounding error.
 - `type` uses the firmware's US HID keyboard mapping: printable ASCII, newline, and Tab. The client splits text and preserves trailing spaces. Direct Chinese / arbitrary Unicode input is unsupported; the target Mac's input source determines the resulting characters.
 - `key` supports the client's existing key names and `cmd`/`gui`, `ctrl`, `shift`, and `alt` combinations.

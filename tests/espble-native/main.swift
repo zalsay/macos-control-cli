@@ -18,6 +18,12 @@ require(request.espBle, "native decode preserves eb")
 let plan = try ESPBlePlan.make(request, screen: screen, displayCount: 1)
 require(plan.arguments == ["--click", "15,28"], "map screen point to integer percent")
 require(plan.point == CGPoint(x: 516, y: 403.2), "report rounded screen point")
+let laptop = CGRect(x: 0, y: 0, width: 1512, height: 982)
+let laptopPlan = try ESPBlePlan.make(request, screen: laptop, displayCount: 1)
+require(laptopPlan.arguments == ["--click", "33,41"], "map using receiving Mac's changed dimensions")
+try laptopPlan.verifyScreen(laptop, displayCount: 1)
+fails("BLE_UNSUPPORTED") { try laptopPlan.verifyScreen(screen, displayCount: 1) }
+fails("BLE_UNSUPPORTED") { try laptopPlan.verifyScreen(laptop, displayCount: 2) }
 raw["eb"] = "true"
 fails("INVALID_ARGUMENT") { _ = try NativeRequest.decode(raw) }
 fails("BLE_UNSUPPORTED") { _ = try ESPBlePlan.make(request, screen: screen, displayCount: 2) }

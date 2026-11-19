@@ -44,6 +44,7 @@ private final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDele
     var writeConfirmed = false
     var replyConfirmed = false
     var expectedReply = ""
+    private var screenConfirmed: (() -> Void)?
     var deadline = Date(timeIntervalSinceNow: 20)
     let hostControlled: Bool
     var commandNumber = 0
@@ -62,6 +63,7 @@ private final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDele
     }
     func fail(_ message: String) {
         print("ERROR: \(message)")
+        screenConfirmed = nil
         failed = true
         done = true
     }
@@ -163,11 +165,12 @@ private final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDele
             if hostControlled { print("HOST_DONE \(commandNumber)") }
             done = true; return
         }
+        let display = CGMainDisplayID()
+        let screen = CGDisplayBounds(display)
         let command: String
         switch actions.removeFirst() {
         case .command(let value): command = value
         case .clickCurrent:
-            let screen = CGDisplayBounds(CGMainDisplayID())
             guard let point = CGEvent(source: nil)?.location, screen.contains(point) else {
                 fail("Cannot read pointer on main screen; use --click x,y"); return
             }
@@ -176,22 +179,48 @@ private final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDele
             command = "click \(x) \(y)"
         }
         let verb = command.split(separator: " ").first.map(String.init) ?? ""
+        let reply: String
         switch verb {
-        case "move", "click", "press", "scroll": expectedReply = "OK " + command
-        case "type": expectedReply = "OK type \""
-        case "key": expectedReply = "OK key"
-        case "status": expectedReply = "OK connected="
-        default: expectedReply = "OK"
+        case "move", "click", "press", "scroll": reply = "OK " + command
+        case "type": reply = "OK type \""
+        case "key": reply = "OK key"
+        case "status": reply = "OK connected="
+        default: reply = "OK"
         }
+        let pointer = ["move", "click", "press"].contains(verb)
+        let authorized = { [self] in
+            authorizeAndWrite(command, reply: reply, peripheral: p, rx: rx,
+                              validate: { !pointer || (CGMainDisplayID() == display && CGDisplayBounds(display) == screen) })
+        }
+        if pointer {
+            guard let size = ScreenSync(bounds: screen) else { fail("Cannot read a valid main screen size"); return }
+            let sync = size.command
+            guard sync.utf8.count + 1 <= min(128, p.maximumWriteValueLength(for: .withResponse)) else {
+                fail("Screen size command exceeds BLE packet limit"); return
+            }
+            // A screen update never moves the pointer. Wait for both confirmations
+            // before asking the Host to authorize the actual input packet.
+            screenConfirmed = authorized
+            write(sync, reply: size.reply, peripheral: p, rx: rx)
+        } else {
+            authorized()
+        }
+    }
+    private func write(_ command: String, reply: String, peripheral: CBPeripheral, rx: CBCharacteristic) {
+        expectedReply = reply
+        print("SEND: \(command)")
+        waiting = true
+        writeConfirmed = false
+        replyConfirmed = false
         deadline = Date(timeIntervalSinceNow: 20)
-        let write = { [self] in
+        peripheral.writeValue(Data((command + "\n").utf8), for: rx, type: .withResponse)
+    }
+    private func authorizeAndWrite(_ command: String, reply: String, peripheral: CBPeripheral,
+                                   rx: CBCharacteristic, validate: @escaping () -> Bool) {
+        let send = { [self] in
             guard !done else { return }
-            print("SEND: \(command)")
-            waiting = true
-            writeConfirmed = false
-            replyConfirmed = false
-            deadline = Date(timeIntervalSinceNow: 20)
-            p.writeValue(Data((command + "\n").utf8), for: rx, type: .withResponse)
+            guard validate() else { fail("Main display changed; pointer command not sent"); return }
+            write(command, reply: reply, peripheral: peripheral, rx: rx)
         }
         if hostControlled {
             let number = commandNumber
@@ -201,10 +230,10 @@ private final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDele
                 DispatchQueue.main.async { [self] in
                     guard !done else { return }
                     guard authorization == "GO \(number)" else { fail("Host input permit missing"); return }
-                    write()
+                    send()
                 }
             }
-        } else { write() }
+        } else { send() }
     }
     func peripheral(_ p: CBPeripheral, didWriteValueFor c: CBCharacteristic, error: Error?) {
         if let error { fail(error.localizedDescription); return }
@@ -215,6 +244,11 @@ private final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDele
     func advanceIfConfirmed() {
         guard !done, waiting, writeConfirmed, replyConfirmed else { return }
         waiting = false
+        if let confirmed = screenConfirmed {
+            screenConfirmed = nil
+            confirmed()
+            return
+        }
         if hostControlled { print("HOST_ACK \(commandNumber)"); commandNumber += 1 }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.sendNext() }
     }
@@ -222,7 +256,10 @@ private final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDele
         if let error { fail(error.localizedDescription); return }
         guard c.uuid == txID, let data = c.value, let message = String(data: data, encoding: .utf8) else { return }
         print("RECV: \(message)")
-        if message.hasPrefix("ERR") { fail(message); return }
+        if message.hasPrefix("ERR") {
+            fail(screenConfirmed == nil ? message : "ESP rejected screen synchronization; use updated pilot-2 firmware (\(message))")
+            return
+        }
         if waiting && message.hasPrefix("OK") {
             let matches = expectedReply.hasSuffix("=") || expectedReply.hasSuffix("\"") || expectedReply == "OK"
                 ? message.hasPrefix(expectedReply) : message == expectedReply

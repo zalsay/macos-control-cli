@@ -5,6 +5,20 @@ import Darwin
 struct ESPBlePlan {
     let arguments: [String]
     let point: CGPoint?
+    let screen: CGRect?
+
+    init(arguments: [String], point: CGPoint?, screen: CGRect? = nil) {
+        self.arguments = arguments
+        self.point = point
+        self.screen = screen
+    }
+
+    func verifyScreen(_ current: CGRect, displayCount: Int) throws {
+        guard let screen else { return }
+        guard displayCount == 1, current == screen else {
+            throw HelperFailure(code: "BLE_UNSUPPORTED", message: "主屏尺寸或显示器数量已变更，请重新观察后再发送 ESP 输入")
+        }
+    }
 
     static func make(_ request: NativeRequest, screen: CGRect, displayCount: Int) throws -> ESPBlePlan {
         func unsupported(_ message: String) -> HelperFailure { HelperFailure(code: "BLE_UNSUPPORTED", message: message) }
@@ -23,12 +37,12 @@ struct ESPBlePlan {
             }
             if request.action == "click" {
                 guard request.clickCount == 1 else { throw unsupported("现有 ESP 固件不提供有时序保证的双击") }
-                return ESPBlePlan(arguments: ["--click", "\(x),\(y)"], point: rounded)
+                return ESPBlePlan(arguments: ["--click", "\(x),\(y)"], point: rounded, screen: screen)
             }
             // MCC scroll is in pixels; HID is in wheel notches. Keep direction and
             // document the approximation instead of silently truncating to Int8.
             let ticks = max(1, Int(ceil(Double(abs(request.deltaY)) / 40))) * (request.deltaY > 0 ? -1 : 1)
-            return ESPBlePlan(arguments: ["--move", "\(x),\(y)", "--scroll", "\(ticks)"], point: rounded)
+            return ESPBlePlan(arguments: ["--move", "\(x),\(y)", "--scroll", "\(ticks)"], point: rounded, screen: screen)
         case "type": return ESPBlePlan(arguments: ["--type", request.text], point: nil)
         case "press":
             let key = request.key.lowercased().replacingOccurrences(of: "arrow", with: "")
@@ -120,6 +134,13 @@ struct ESPBleInput {
                 if line == "HOST_READY \(completed)" && !inFlight && !done && completed < commands.count {
                     try verify()
                     let pointer = commands[completed].hasPrefix("move ") || commands[completed].hasPrefix("click ")
+                    if pointer && plan.screen != nil {
+                        var count: UInt32 = 0
+                        guard CGGetActiveDisplayList(0, nil, &count) == .success else {
+                            throw HelperFailure(code: "BLE_UNSUPPORTED", message: "无法复核 ESP 输入的显示器范围")
+                        }
+                        try plan.verifyScreen(CGDisplayBounds(CGMainDisplayID()), displayCount: Int(count))
+                    }
                     try cancellation.beginBLECommand(permit: permit, pointer: pointer) {
                         try input.fileHandleForWriting.write(contentsOf: Data("GO \(completed)\n".utf8))
                     }

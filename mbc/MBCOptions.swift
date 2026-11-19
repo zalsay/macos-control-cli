@@ -1,5 +1,18 @@
 import Foundation
 
+// Use macOS desktop coordinates (the same dimensions used for percent mapping),
+// not Retina backing pixels. HID report coordinates remain normalized.
+struct ScreenSync {
+    let command: String
+    var reply: String { "OK " + command }
+
+    init?(bounds: CGRect) {
+        guard let width = Int(exactly: bounds.size.width), let height = Int(exactly: bounds.size.height),
+              (2...65535).contains(width), (2...65535).contains(height) else { return nil }
+        command = "screen \(width) \(height)"
+    }
+}
+
 enum MBCError: Error, CustomStringConvertible {
     case invalid(String)
     var description: String {
@@ -50,7 +63,7 @@ struct MBCOptions {
     操作按参数顺序执行，逐条等待固件回执。每次连接/每条命令超时 20 秒；
     失败即停止，不自动重试。OK 表示固件已处理命令，需另行确认界面结果。
     目标设备固定为 pilot-2，需先与目标 Mac 配对；输入发送到目标 Mac 当前焦点。
-    当前固件使用单屏 3440×1440 配置；坐标是百分比，不是像素。
+    坐标是主屏百分比，不是像素；移动前同步当前主屏尺寸，需新版 pilot-2 固件。
     --click 无前一坐标时读取本机主屏指针并取整到百分比，会产生取整偏移；
     这要求控制端与 HID 接收端是同一台 Mac。跨设备控制请显式传入坐标。
     --type 不支持直接输入中文/任意 Unicode，实际字符取决于目标 Mac 的输入源。

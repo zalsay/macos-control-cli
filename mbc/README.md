@@ -38,7 +38,7 @@ MCC 的 `bash build.sh` / `bash build.sh debug` 会同时构建这两个客户�
 --dry-run           JSON 命令计划，不连接 BLE
 ```
 
-设备名沿用 `pilot-2`。NUS 服务 UUID 为 `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`，RX 和 TX 分别为同前缀的 `0002` 和 `0003`。客户端不打开 USB 串口。当前已刷固件按 3440×1440 单屏配置，命令坐标仍为百分比。无坐标点击读取控制端指针时会取整，且要求控制端和 HID 接收端是同一台 Mac。
+设备名沿用 `pilot-2`。NUS 服务 UUID 为 `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`，RX 和 TX 分别为同前缀的 `0002` 和 `0003`。客户端不打开 USB 串口。新版 MBC 在每次移动或点击前读取 HID 接收 Mac 的主屏逻辑尺寸并同步给固件，收到 `OK screen <宽> <高>` 后才发送指针动作。需配套支持 `screen` 命令的固件；旧固件不会回退到固定尺寸。命令坐标仍为百分比。远端以 Host Mac 为准。无坐标点击读取控制端指针时会取整，且要求控制端和 HID 接收端是同一台 Mac。
 
 MCC Host 的普通输入可追加 `--eb`，由原 helper 逐条授权后交给此客户端执行；该接口仍接收截图像素坐标并返回 MCC JSON。内部进程参数 `--host-controlled` 只增加 stdin/stdout 的逐条授权握手，复用现有参数校验、BLE 连接和 ACK；不修改固件协议，也不更改上面的独立 CLI 用法。具体边界见 [Host 操作级 ESP 输入](../docs/ESPBLE.md#per-operation-esp-input-through-host)。
 
