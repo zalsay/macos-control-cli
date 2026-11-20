@@ -2,17 +2,42 @@
 import json
 import os
 from pathlib import Path
+import plistlib
+import re
 import subprocess
 import unittest
 
-BINARY = os.environ.get("MBC_BINARY", str(Path(__file__).resolve().parents[2] / "target/mbc/macos-ble-control"))
+BINARY_PATH = Path(os.environ.get("MBC_BINARY", str(Path(__file__).resolve().parents[2] / "target/mbc/macos-ble-control"))).resolve()
+BINARY = str(BINARY_PATH)
 
 
 def run(*args):
     return subprocess.run([BINARY, *args], capture_output=True, text=True, timeout=25)
 
 
+def embedded_info_plist(binary):
+    load_commands = subprocess.run(["/usr/bin/otool", "-l", str(binary)], capture_output=True,
+                                   text=True, check=True, timeout=10).stdout
+    section = re.search(r"sectname __info_plist\s+segname __TEXT\s+addr\s+\S+\s+size\s+(0x[0-9a-fA-F]+)\s+offset\s+(\d+)",
+                        load_commands)
+    if section is None:
+        raise AssertionError(f"{binary} is missing the __TEXT,__info_plist section")
+    size, offset = (int(section.group(1), 16), int(section.group(2)))
+    return plistlib.loads(Path(binary).read_bytes()[offset:offset + size])
+
+
 class CLITests(unittest.TestCase):
+    def test_both_executables_embed_bluetooth_usage_description(self):
+        for name in ("mbc", "macos-ble-control"):
+            with self.subTest(name=name):
+                binary = BINARY_PATH.parent / name
+                self.assertTrue(binary.is_file(), f"missing built executable: {binary}")
+                info = embedded_info_plist(binary)
+                self.assertEqual(info.get("CFBundleIdentifier"), "com.copis.macos-ble-control.cli")
+                purpose = info.get("NSBluetoothAlwaysUsageDescription")
+                self.assertIsInstance(purpose, str)
+                self.assertTrue(purpose.strip())
+
     def test_help_exits_without_bluetooth_activity(self):
         result = run("--help")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

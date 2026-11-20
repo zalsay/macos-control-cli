@@ -56,7 +56,7 @@ cp "$PACKAGE_DIR/assets/copis-logo.png" "$PACKAGE_BUILD/assets/copis-logo.png"
 cp "$PACKAGE_DIR/assets/copis-logo.png" "$PACKAGE_BUILD/source/assets/copis-logo.png"
 cp -R "$PACKAGE_DIR/src" "$PACKAGE_DIR/swift" "$PACKAGE_DIR/tests" "$PACKAGE_DIR/docs" "$PACKAGE_BUILD/source/"
 mkdir -p "$PACKAGE_BUILD/source/mbc/tests"
-cp "$PACKAGE_DIR"/mbc/*.swift "$PACKAGE_DIR/mbc/build.sh" "$PACKAGE_DIR/mbc/install.sh" "$PACKAGE_DIR/mbc/README.md" "$PACKAGE_BUILD/source/mbc/"
+cp "$PACKAGE_DIR"/mbc/*.swift "$PACKAGE_DIR/mbc/Info.plist" "$PACKAGE_DIR/mbc/build.sh" "$PACKAGE_DIR/mbc/install.sh" "$PACKAGE_DIR/mbc/README.md" "$PACKAGE_BUILD/source/mbc/"
 cp "$PACKAGE_DIR"/mbc/tests/*.py "$PACKAGE_BUILD/source/mbc/tests/"
 cp "$PACKAGE_DIR/Cargo.toml" "$PACKAGE_DIR/Cargo.lock" "$PACKAGE_DIR/build.sh" "$PACKAGE_DIR/install.sh" "$PACKAGE_DIR/README.md" "$PACKAGE_DIR/README.zh-CN.md" "$PACKAGE_DIR/USAGE.md" "$PACKAGE_DIR/LICENSE" "$PACKAGE_DIR/.gitignore" "$PACKAGE_BUILD/source/"
 cat > "$PACKAGE_BUILD/module.json" <<MANIFEST

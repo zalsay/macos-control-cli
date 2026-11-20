@@ -4,6 +4,7 @@ MCC 项目内的 ESP32-S3 BLE 控制客户端，使用 Swift、CoreBluetooth 和
 
 - `MBCMain.swift`：复用原 BLE 连接、顺序写入、回执和命令超时逻辑。
 - `MBCOptions.swift`：参数校验、命令计划、ASCII 文本分段及空白字符处理。
+- `Info.plist`：嵌入两个 CLI 可执行文件，为 macOS 蓝牙 TCC 提供非空用途说明，并沿用稳定签名标识。
 - `build.sh`：原生构建并签名 `macos-ble-control` 和 `mbc` 两个等价可执行文件。
 - `install.sh`：可选的独立 MBC 用户级安装；不修改 MCC 安装或 shell 配置。
 - `tests/test_mbc_cli.py`：CLI 定向测试，全部使用帮助、无效参数或 `--dry-run`，不发送实际输入。

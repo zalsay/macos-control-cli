@@ -2,6 +2,8 @@
 import json
 import os
 from pathlib import Path
+import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -12,10 +14,22 @@ legacy_package = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else None
 metadata = json.loads((package / "module.json").read_text())
 assert metadata.get("bleClient") == "macos-ble-control", "Package must declare its bundled BLE client"
 for relative in ("mbc", "macos-ble-control", "source/mbc/MBCMain.swift", "source/mbc/MBCOptions.swift",
-                 "source/mbc/build.sh", "source/mbc/install.sh", "source/mbc/README.md", "source/mbc/tests/test_mbc_cli.py"):
+                 "source/mbc/Info.plist", "source/mbc/build.sh", "source/mbc/install.sh", "source/mbc/README.md",
+                 "source/mbc/tests/test_mbc_cli.py"):
     assert (package / relative).is_file(), f"Missing bundled BLE payload: {relative}"
 for binary in ("mbc", "macos-ble-control"):
-    subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(package / binary)], check=True)
+    path = package / binary
+    subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(path)], check=True)
+    load_commands = subprocess.run(["/usr/bin/otool", "-l", str(path)], capture_output=True,
+                                   text=True, check=True, timeout=10).stdout
+    section = re.search(r"sectname __info_plist\s+segname __TEXT\s+addr\s+\S+\s+size\s+(0x[0-9a-fA-F]+)\s+offset\s+(\d+)",
+                        load_commands)
+    assert section, f"{binary} is missing the __TEXT,__info_plist section"
+    size, offset = (int(section.group(1), 16), int(section.group(2)))
+    info = plistlib.loads(path.read_bytes()[offset:offset + size])
+    assert info.get("CFBundleIdentifier") == "com.copis.macos-ble-control.cli"
+    purpose = info.get("NSBluetoothAlwaysUsageDescription")
+    assert isinstance(purpose, str) and purpose.strip(), f"{binary} has no Bluetooth usage description"
 
 with tempfile.TemporaryDirectory(prefix="mcc-mbc-package-") as tmp:
     root = Path(tmp)

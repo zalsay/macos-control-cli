@@ -15,6 +15,8 @@ case "$(uname -m)" in
 esac
 mkdir -p "$mbc_output"
 mbc_output=$(CDPATH= cd -P "$mbc_output" && pwd)
+mbc_info_plist=$mbc_source_dir/Info.plist
+/usr/bin/plutil -lint "$mbc_info_plist"
 for mbc_name in mbc macos-ble-control; do
     [ ! -d "$mbc_output/$mbc_name" ] && [ ! -L "$mbc_output/$mbc_name" ] || {
         printf 'ERROR: 拒绝覆盖目录或链接 %s\n' "$mbc_output/$mbc_name" >&2; exit 1;
@@ -24,6 +26,7 @@ mbc_staging=$(mktemp -d "$mbc_output/.mbc-build.XXXXXX")
 trap 'rm -rf "$mbc_staging"' 0
 xcrun swiftc -O -warnings-as-errors -target "$mbc_swift_target" \
     "$mbc_source_dir/MBCOptions.swift" "$mbc_source_dir/MBCMain.swift" \
+    -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$mbc_info_plist" \
     -o "$mbc_staging/macos-ble-control"
 /usr/bin/codesign --force --sign "${COPIS_CHROME_SIGN_IDENTITY:--}" \
     --identifier com.copis.macos-ble-control.cli "$mbc_staging/macos-ble-control"
