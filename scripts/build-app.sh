@@ -67,6 +67,8 @@ write_manager_metadata() {
 	<key>LSUIElement</key>
 	<true/>
 ${SCRIPT_KEYS}
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Safarier AI 通过 DSH 连接你选择的蓝牙设备时需要使用蓝牙。</string>
 	<key>NSCameraUsageDescription</key>
 	<string>网页请求使用摄像头时（例如视频会议），Safarier AI 会先询问你。</string>
 	<key>NSMicrophoneUsageDescription</key>

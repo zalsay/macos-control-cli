@@ -19,6 +19,7 @@ trap 'rm -rf "$TMP"' EXIT
 SAFARIER_METADATA_ONLY=1 SAFARIER_SCRIPTING_CANDIDATE=0 SAFARIER_APP_OUT="$TMP/default" "$ROOT/scripts/build-app.sh"
 PLIST="$TMP/default/Contents/Info.plist"
 [ "$(plutil -extract LSUIElement raw -o - "$PLIST")" = true ]
+[ "$(plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST")" = "Safarier AI 通过 DSH 连接你选择的蓝牙设备时需要使用蓝牙。" ]
 if /usr/libexec/PlistBuddy -c 'Print :NSAppleScriptEnabled' "$PLIST" >/dev/null 2>&1; then echo "default scripting enabled" >&2; exit 1; fi
 if /usr/libexec/PlistBuddy -c 'Print :OSAScriptingDefinition' "$PLIST" >/dev/null 2>&1; then echo "default dictionary enabled" >&2; exit 1; fi
 [ ! -e "$TMP/default/Contents/Resources/Safarier.sdef" ]
