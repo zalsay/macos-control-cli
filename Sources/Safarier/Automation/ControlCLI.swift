@@ -163,8 +163,7 @@ enum ControlCLI {
             validated = reply
         })
         guard let validated else { throw ControlRuntime.Failure.indeterminate }
-        if case .daemonStop = request.operation, validated.status == "ok",
-           expectedEndpointIdentity != nil {
+        if case .daemonStop = request.operation, validated.status == "ok" {
             try runtime.waitForSocketRemoval(socketPin)
         }
         replyReceived = true
@@ -181,20 +180,44 @@ enum ControlCLI {
         return reply
     }
     private static func start(applicationPath: String, runtimePath: String) throws -> Int32 {
-        _ = try ControlRuntime(path: runtimePath, create: true)
-        var info = stat()
-        let socketPath = runtimePath + "/control.sock"
-        if lstat(socketPath, &info) == 0 { return try exchange(.status, applicationPath: applicationPath, runtimePath: runtimePath) }
-        guard errno == ENOENT, let executable = Bundle.main.executableURL else { throw ControlRuntime.Failure.unsafe }
+        let runtime = try ControlRuntime(path: runtimePath, create: true)
+        guard let executable = Bundle.main.executableURL else { throw ControlRuntime.Failure.unsafe }
+
+        // A participating daemon holds this lock for its complete lifetime.
+        // While it is held, only an authenticated status exchange can prove
+        // the existing endpoint; a refused/absent probe never authorizes spawn.
+        let startupDeadline = ContinuousClock.now.advanced(by: .seconds(Int(AutomationLimits.actionSeconds)))
+        var startupLock = try runtime.acquireStartupLock(waitSeconds: 0)
+        while startupLock == nil && ContinuousClock.now < startupDeadline {
+            if try runtime.endpointIsConnectable() {
+                return try exchange(.status, applicationPath: applicationPath, runtimePath: runtimePath)
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+            startupLock = try runtime.acquireStartupLock(waitSeconds: 0)
+        }
+        guard let lock = startupLock else { throw ControlRuntime.Failure.indeterminate }
+        defer { lock.release() }
+
+        switch try runtime.startupSocketState(lockedBy: lock) {
+        case .active:
+            // Preserve the existing authenticated status contract. In
+            // particular, a pathname alone never adopts or validates a daemon.
+            return try exchange(.status, applicationPath: applicationPath, runtimePath: runtimePath)
+        case .absent, .stale(_):
+            break // Only the serving process may recover a proven stale socket.
+        }
+
         let process = Process()
         process.executableURL = executable
         process.arguments = ["control", "daemon", "serve", "--app", applicationPath, "--runtime", runtimePath]
         process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
         try process.run()
-        let deadline = Date().addingTimeInterval(AutomationLimits.actionSeconds)
-        while Date() < deadline, process.isRunning {
-            if lstat(socketPath, &info) == 0 { return try exchange(.status, applicationPath: applicationPath, runtimePath: runtimePath) }
-            guard errno == ENOENT else { throw ControlRuntime.Failure.unsafe }
+        // The child is now waiting for this lock. Release it before polling.
+        lock.release()
+        while ContinuousClock.now < startupDeadline, process.isRunning {
+            if try runtime.endpointIsConnectable() {
+                return try exchange(.status, applicationPath: applicationPath, runtimePath: runtimePath)
+            }
             Thread.sleep(forTimeInterval: 0.05)
         }
         throw ControlRuntime.Failure.indeterminate

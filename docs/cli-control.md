@@ -53,9 +53,17 @@ sfa launch "$PROFILE_UUID"
 
 `launch` 请求已有 Manager，不会代为启动 Manager。启动会请求激活浏览器窗口；返回成功不等于窗口已获得焦点或控制连接已建立。接管要求浏览器已不在前台且窗口不是 key/main；用户切换到其他应用后再 connect。不会在 connect 时自动切换前台应用，以 connect 的真实结果为准。
 
+从 Manager 启动允许 Agent 控制的环境时，Manager 会在后台确保默认本地控制 daemon 已启动。多个环境共用 `~/.safarier-control/control.sock`；这不会启动独立的环境 SSH Host、申请系统授权或建立浏览器控制会话。DSH 使用默认 runtime 时，先用 `sfa control status` 确认监听，再用 `sfa control capabilities` 确认 daemon 能与当前 Manager 通信。下文显式 `--runtime` 的隔离示例仍需单独执行 `daemon start`。
+
 Manager 唯一性检查只计入已完成 GUI 启动且未退出的应用；同 bundle ID 下未启动 GUI 的 CLI/daemon 注册记录不会被计作第二个 Manager。多个真正的 GUI Manager 仍拒绝歧义路由。
 
 AppleEvents 权限查询和业务请求均使用已核验 Manager 的系统进程序列号（PSN），绑定这一次进程启动。不会再按 bundle ID 查找接收者，避免同一可执行文件的 `sfa daemon` 被系统选成目标。PID 只用于从已持有的 Manager 获取并核验进程身份，不直接作为 AppleEvent 地址；Manager 更换时仍需重新建立客户端。
+
+### DSH 中的并发控制
+
+Safarier 内置 DSH 可安装独立的 [SFA tool bundle](../scripts/dsh-sfa-tool/README.md)。同一个环境的自动化任务应统一使用这个 tool，不要混用 DSH 的 Bash、另一个 DSH 进程或直接调用 `sfa`：这个锁只协调同一 DSH 进程内的 tool 调用，并不替代 Manager 的 profile 和会话校验。
+
+冷启动必须由显式 `connect` 请求取得环境锁后进行；已运行的浏览器不应重复 launch。任务完成时通过 tool 交还控制，保留窗口。当前 CLI 没有停止单个浏览器环境的正常退出接口，`daemon stop` 只针对控制服务，不是浏览器退出命令。
 
 ### Manager 重启后重新接管
 
@@ -96,6 +104,8 @@ ctl observe --connection "$CONNECTION_UUID" > "$SF_EVIDENCE/observe.json"
 ```
 
 每步检查退出码和 JSON `status`；失败时不要继续粘贴后续命令。control 默认使用当前实际 bundle，无需手写 `--app`；整轮保持同一 App 选择（不切换 `SF_APP`）与 `--runtime`。
+
+`daemon start` 不把 `control.sock` 文件存在当成 daemon 已运行：现有监听须通过身份和状态检查。只有在运行目录没有 daemon 持锁、旧 socket 与该目录的归属记录匹配且连接被拒绝时，才会清理残留并创建新监听。连接被拒绝但没有归属记录的旧版 socket，以及其他状态不明的文件，都会保留并报错。`daemon stop` 会等待原 socket 消失，确认后才报告成功。
 connect 返回 `connection` 与 `viewport`，没有 target；需要比较窗口身份时，`ctl state --connection "$CONNECTION_UUID"` 的 `state.target` 包含 profile/runnerInstance/window/page 四项 identity。
 observe 返回 `frame`、`screenshotPath`、`viewport` 和可选 `ocr`。注册会话的截图文件保留最近32张，超出后轮换旧文件。先查看截图；OCR unavailable 不等于截图失效。需保留证据时，在结束控制前复制 PNG 到独立 evidence，artifact 可能随清理删除。
 `frame` 绑定这次截图，输入坐标是该图的像素坐标；viewport 提供截图尺寸、页面视口与缩放信息。不要把屏幕全局坐标传入。每个连接保留最近32个 frame，不因导航或文档版本变化立即废弃；坐标按所引用截图的 viewport 换算。agent 自行判断是否需要新截图。未知或已移出保留范围的 frame 返回 `INVALID_FRAME`，没有发送输入。

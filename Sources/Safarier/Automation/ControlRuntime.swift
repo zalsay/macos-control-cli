@@ -11,11 +11,81 @@ import SafarierCore
 // operations use independent local buffers and verify the path on each use.
 final class ControlRuntime: @unchecked Sendable {
     enum Failure: Error { case unsafe, disconnected, protocolError, indeterminate, cleanupUnconfirmed }
+    struct SocketIdentity: Equatable, Sendable {
+        let device: UInt64
+        let inode: UInt64
+        let owner: UInt32
+        let mode: UInt32
+        let birthSeconds: Int64
+        let birthNanoseconds: Int64
+
+        fileprivate init(_ value: stat) {
+            device = UInt64(truncatingIfNeeded: value.st_dev)
+            inode = UInt64(truncatingIfNeeded: value.st_ino)
+            owner = UInt32(truncatingIfNeeded: value.st_uid)
+            mode = UInt32(truncatingIfNeeded: value.st_mode)
+            birthSeconds = Int64(value.st_birthtimespec.tv_sec)
+            birthNanoseconds = Int64(value.st_birthtimespec.tv_nsec)
+        }
+
+        fileprivate init(device: UInt64, inode: UInt64, owner: UInt32, mode: UInt32,
+                         birthSeconds: Int64, birthNanoseconds: Int64) {
+            self.device = device; self.inode = inode; self.owner = owner; self.mode = mode
+            self.birthSeconds = birthSeconds; self.birthNanoseconds = birthNanoseconds
+        }
+    }
+    enum StartupSocketState: Sendable {
+        case absent
+        case active
+        case stale(SocketIdentity)
+    }
+    private enum SocketProbe {
+        case absent
+        case connected(SocketIdentity)
+        case refused(SocketIdentity)
+    }
+
+    /// The runtime directory itself is the cross-process advisory lock. The
+    /// lock stays held for the entire daemon lifetime, not only through bind.
+    /// A directory is intentionally used so a crash cannot orphan a separate
+    /// lock inode and cause later processes to lock different files.
+    final class StartupLock: @unchecked Sendable {
+        fileprivate let runtime: ObjectIdentifier
+        fileprivate let fd: Int32
+        private let guardLock = NSLock()
+        private var held = true
+
+        fileprivate init(runtime: ObjectIdentifier, fd: Int32) {
+            self.runtime = runtime
+            self.fd = fd
+        }
+
+        fileprivate var isHeld: Bool {
+            guardLock.lock(); defer { guardLock.unlock() }
+            return held
+        }
+
+        func release() {
+            guardLock.lock()
+            let shouldRelease = held
+            held = false
+            guardLock.unlock()
+            if shouldRelease {
+                _ = flock(fd, LOCK_UN)
+                close(fd)
+            }
+        }
+
+        deinit { release() }
+    }
+
     private let path: String
     private let directory: Int32
     private let device: dev_t
     private let inode: ino_t
     private static let socketName = "control.sock"
+    private static let ownershipName = ".control.socket-owner"
+    private static let ownershipRecordLimit = 256
 
     init(path: String, create: Bool) throws {
         guard path.hasPrefix("/"), !path.hasSuffix("/"), !path.utf8.contains(0) else { throw Failure.unsafe }
@@ -90,6 +160,173 @@ final class ControlRuntime: @unchecked Sendable {
               (value.st_mode & S_IFMT) == S_IFSOCK, value.st_uid == geteuid(), value.st_mode & 0o7777 == 0o600 else { throw Failure.unsafe }
         return value
     }
+    private func identity(_ value: stat) -> SocketIdentity { SocketIdentity(value) }
+    private func validateStartupLock(_ lock: StartupLock) throws {
+        guard lock.runtime == ObjectIdentifier(self), lock.isHeld else { throw Failure.unsafe }
+        try validateRoot()
+        var held = stat(), root = stat()
+        guard fstat(lock.fd, &held) == 0, fstat(directory, &root) == 0,
+              Self.same(held, root), held.st_dev == device, held.st_ino == inode else { throw Failure.unsafe }
+    }
+
+    /// Try to obtain the runtime lock for a bounded time. A nil result means a
+    /// participating daemon/startup still owns it; other errors fail closed.
+    func acquireStartupLock(waitSeconds: Double) throws -> StartupLock? {
+        guard waitSeconds.isFinite, waitSeconds >= 0, waitSeconds <= 30 else { throw Failure.unsafe }
+        try validateRoot()
+        let fd = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw Failure.unsafe }
+        var held = stat(), root = stat()
+        guard fstat(fd, &held) == 0, fstat(directory, &root) == 0,
+              Self.same(held, root), held.st_dev == device, held.st_ino == inode else {
+            close(fd); throw Failure.unsafe
+        }
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(waitSeconds))
+        while true {
+            if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+                let lock = StartupLock(runtime: ObjectIdentifier(self), fd: fd)
+                do { try validateStartupLock(lock); return lock }
+                catch { lock.release(); throw error }
+            }
+            let error = errno
+            if error == EINTR { continue }
+            guard error == EWOULDBLOCK || error == EAGAIN else { close(fd); throw Failure.unsafe }
+            guard ContinuousClock.now < deadline else { close(fd); return nil }
+            Thread.sleep(forTimeInterval: 0.025)
+        }
+    }
+
+    /// Read-only socket probe. ECONNREFUSED is deliberately only a candidate:
+    /// on Darwin it can also mean that a listening socket's backlog is full.
+    private func probeSocket(lockedBy lock: StartupLock?) throws -> SocketProbe {
+        if let lock { try validateStartupLock(lock) } else { try validateRoot() }
+        var entry = stat()
+        if fstatat(directory, Self.socketName, &entry, AT_SYMLINK_NOFOLLOW) != 0 {
+            guard errno == ENOENT else { throw Failure.unsafe }
+            try validateRoot()
+            return .absent
+        }
+        guard (entry.st_mode & S_IFMT) == S_IFSOCK, entry.st_uid == geteuid(),
+              entry.st_mode & 0o7777 == 0o600 else { throw Failure.unsafe }
+        let pin = try socketStat()
+        guard Self.same(entry, pin) else { throw Failure.unsafe }
+        let fd = try newSocket()
+        defer { close(fd) }
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { throw Failure.unsafe }
+        var addr = try address()
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        let connectError = connected == 0 ? 0 : errno
+        try validateRoot()
+        let after = try socketStat()
+        guard Self.same(pin, after) else { throw Failure.unsafe }
+        if connected == 0 { return .connected(identity(after)) }
+        guard connectError == ECONNREFUSED else { throw Failure.unsafe }
+        return .refused(identity(after))
+    }
+
+    /// Call only while holding the runtime lock. A refused connect is stale
+    /// only when the durable owner record proves that this exact socket inode
+    /// was created by a prior lock-owning daemon. Untracked/legacy sockets are
+    /// never unlinked automatically.
+    func startupSocketState(lockedBy lock: StartupLock) throws -> StartupSocketState {
+        try validateStartupLock(lock)
+        switch try probeSocket(lockedBy: lock) {
+        case .absent: return .absent
+        case .connected: return .active
+        case .refused(let observed):
+            guard try readOwnershipRecord() == observed else { throw Failure.unsafe }
+            return .stale(observed)
+        }
+    }
+
+    /// Used by start callers when another participant currently owns the
+    /// lifetime lock. It never recovers or deletes anything.
+    func endpointIsConnectable() throws -> Bool {
+        switch try probeSocket(lockedBy: nil) {
+        case .absent, .refused: return false
+        case .connected: return true
+        }
+    }
+
+    private func readOwnershipRecord() throws -> SocketIdentity? {
+        try validateRoot()
+        let fd = openat(directory, Self.ownershipName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        if fd < 0 {
+            guard errno == ENOENT else { throw Failure.unsafe }
+            return nil
+        }
+        defer { close(fd) }
+        var held = stat(), named = stat()
+        guard fstat(fd, &held) == 0, fstatat(directory, Self.ownershipName, &named, AT_SYMLINK_NOFOLLOW) == 0,
+              Self.same(held, named), (held.st_mode & S_IFMT) == S_IFREG,
+              held.st_uid == geteuid(), held.st_mode & 0o7777 == 0o600,
+              held.st_nlink == 1, held.st_size > 0, held.st_size <= off_t(Self.ownershipRecordLimit) else { throw Failure.unsafe }
+        var bytes = [UInt8](repeating: 0, count: Int(held.st_size) + 1)
+        let count = bytes.withUnsafeMutableBytes { raw in pread(fd, raw.baseAddress!, raw.count, 0) }
+        guard count == held.st_size else { throw Failure.unsafe }
+        try validateRoot()
+        var after = stat()
+        guard fstatat(directory, Self.ownershipName, &after, AT_SYMLINK_NOFOLLOW) == 0,
+              Self.same(held, after) else { throw Failure.unsafe }
+        guard let text = String(bytes: bytes.prefix(Int(count)), encoding: .utf8) else { throw Failure.unsafe }
+        let fields = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard fields.count == 8, fields[0] == "1", fields[7].isEmpty,
+              let device = UInt64(fields[1]), let inode = UInt64(fields[2]),
+              let owner = UInt32(fields[3]), let mode = UInt32(fields[4]),
+              let birthSeconds = Int64(fields[5]), let birthNanoseconds = Int64(fields[6]),
+              birthSeconds > 0, birthNanoseconds >= 0, birthNanoseconds < 1_000_000_000 else { throw Failure.unsafe }
+        return SocketIdentity(device: device, inode: inode, owner: owner, mode: mode,
+                              birthSeconds: birthSeconds, birthNanoseconds: birthNanoseconds)
+    }
+
+    private func writeOwnershipRecord(_ pin: SocketIdentity, lockedBy lock: StartupLock) throws {
+        try validateStartupLock(lock)
+        let fd = openat(directory, Self.ownershipName, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0o600)
+        guard fd >= 0 else { throw Failure.unsafe }
+        defer { close(fd) }
+        var held = stat(), named = stat()
+        guard fstat(fd, &held) == 0, fstatat(directory, Self.ownershipName, &named, AT_SYMLINK_NOFOLLOW) == 0,
+              Self.same(held, named), (held.st_mode & S_IFMT) == S_IFREG,
+              held.st_uid == geteuid(), held.st_mode & 0o7777 == 0o600, held.st_nlink == 1,
+              held.st_size <= off_t(Self.ownershipRecordLimit) else { throw Failure.unsafe }
+        let text = "1\n\(pin.device)\n\(pin.inode)\n\(pin.owner)\n\(pin.mode)\n\(pin.birthSeconds)\n\(pin.birthNanoseconds)\n"
+        let bytes = Array(text.utf8)
+        guard bytes.count <= Self.ownershipRecordLimit, ftruncate(fd, 0) == 0 else { throw Failure.unsafe }
+        var offset = 0
+        while offset < bytes.count {
+            let written = bytes.withUnsafeBytes { raw in pwrite(fd, raw.baseAddress!.advanced(by: offset), bytes.count - offset, off_t(offset)) }
+            if written < 0 && errno == EINTR { continue }
+            guard written > 0 else { throw Failure.unsafe }
+            offset += written
+        }
+        guard fsync(fd) == 0, fstat(fd, &held) == 0,
+              fstatat(directory, Self.ownershipName, &named, AT_SYMLINK_NOFOLLOW) == 0,
+              Self.same(held, named), held.st_size == off_t(bytes.count) else { throw Failure.unsafe }
+        try validateStartupLock(lock)
+    }
+
+    func removeStaleSocket(_ expected: SocketIdentity, lockedBy lock: StartupLock) throws {
+        try validateStartupLock(lock)
+        guard case .stale(let observed) = try startupSocketState(lockedBy: lock), observed == expected,
+              try readOwnershipRecord() == expected else { throw Failure.unsafe }
+        let current = try socketStat()
+        guard identity(current) == expected else { throw Failure.unsafe }
+        // All Safarier writers serialize on the private runtime directory lock,
+        // and the runtime is mode 0700. POSIX has no unlink-by-inode syscall, so
+        // a same-UID process deliberately ignoring this protocol could still
+        // race the final unlinkat; that actor is outside this lock's guarantee.
+        guard unlinkat(directory, Self.socketName, 0) == 0 else { throw Failure.unsafe }
+        try validateRoot()
+        var after = stat()
+        guard fstatat(directory, Self.socketName, &after, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT else { throw Failure.unsafe }
+    }
+
     private func newSocket() throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw Failure.unsafe }
@@ -102,8 +339,14 @@ final class ControlRuntime: @unchecked Sendable {
         guard existing >= 0, fcntl(fd, F_SETFD, existing | FD_CLOEXEC) == 0,
               setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled))) == 0 else { throw Failure.unsafe }
     }
-    func listenSocket() throws -> (Int32, stat) {
-        try validateRoot()
+    func listenSocket(lockedBy lock: StartupLock) throws -> (Int32, stat) {
+        try validateStartupLock(lock)
+        switch try startupSocketState(lockedBy: lock) {
+        case .absent: break
+        case .active: throw Failure.unsafe
+        case .stale(let expected): try removeStaleSocket(expected, lockedBy: lock)
+        }
+        try validateStartupLock(lock)
         var existing = stat()
         guard fstatat(directory, Self.socketName, &existing, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT else { throw Failure.unsafe }
         let fd = try newSocket()
@@ -124,7 +367,9 @@ final class ControlRuntime: @unchecked Sendable {
             }
             let pinned = try socketStat()
             guard created.st_dev == pinned.st_dev, created.st_ino == pinned.st_ino else { throw Failure.unsafe }
-            try validateRoot()
+            try validateStartupLock(lock)
+            try writeOwnershipRecord(identity(pinned), lockedBy: lock)
+            try validateStartupLock(lock)
             guard listen(fd, 8) == 0 else { throw Failure.unsafe }
             return (fd, pinned)
         } catch {
@@ -151,7 +396,8 @@ final class ControlRuntime: @unchecked Sendable {
         try validateRoot(); let now = try socketStat()
         guard Self.same(now, pinned) else { throw Failure.unsafe }
     }
-    func removeOwnedSocket(_ pinned: stat) throws {
+    func removeOwnedSocket(_ pinned: stat, lockedBy lock: StartupLock) throws {
+        try validateStartupLock(lock)
         try validateSocket(pinned)
         guard unlinkat(directory, Self.socketName, 0) == 0 else { throw Failure.unsafe }
     }

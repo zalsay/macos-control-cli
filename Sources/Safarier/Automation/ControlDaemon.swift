@@ -467,7 +467,11 @@ enum ControlDaemon {
         let broker = try ControlBroker(applicationPath: applicationPath, runtimePath: runtimePath)
         let instance = ControlRuntime.applicationInstance(applicationPath)
         let admission = ControlAdmission()
-        let (listener, socketPin) = try runtime.listenSocket()
+        guard let startupLock = try runtime.acquireStartupLock(waitSeconds: 3) else {
+            throw ControlRuntime.Failure.indeterminate
+        }
+        defer { startupLock.release() }
+        let (listener, socketPin) = try runtime.listenSocket(lockedBy: startupLock)
         let source = DispatchSource.makeReadSource(fileDescriptor: listener, queue: DispatchQueue.global(qos: .userInitiated))
         source.setCancelHandler {
             Darwin.close(listener)
@@ -526,7 +530,7 @@ enum ControlDaemon {
                                 // The authenticated, idle stop was committed by the
                                 // broker before replying. A disconnected client must
                                 // not leave the broker permanently stuck in stopping.
-                                do { try runtime.removeOwnedSocket(socketPin) }
+                                do { try runtime.removeOwnedSocket(socketPin, lockedBy: startupLock) }
                                 catch {
                                     NavigationDiagnostic.emitID(request.requestID, "server.stop.cleanup", "CLEANUP_UNCONFIRMED")
                                 }

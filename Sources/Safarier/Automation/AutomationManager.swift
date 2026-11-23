@@ -83,6 +83,7 @@ import AppKit
     private var retainedRunners: [UUID: OwnedRunnerProcess] = [:]
     #if SAFARIER_BOUND_LOCAL_CANDIDATE
     private var registeredRegistry: RegisteredRunnerRegistry?
+    var onInteractiveRunnerLaunched: ((Profile) -> Void)?
     private var registeredConnector: (@MainActor (Profile) async throws -> any AutomationManagerEndpoint)?
     private var interactiveLaunches: [UUID: (request: AutomationRequest, caller: AutomationScriptCallerProof, reply: AutomationReply?)] = [:]
     #endif
@@ -159,6 +160,7 @@ import AppKit
     func launchRegisteredInteractive(_ profile: Profile, spawner: FoundationProcessSpawner, workspace: SafarierWorkspace) throws {
         guard let registeredRegistry else { throw AutomationError(code: .backendUnavailable) }
         try registeredRegistry.launch(profile, launcher: RunnerLauncher(spawner: spawner, logDirectory: workspace.logsDirectory))
+        onInteractiveRunnerLaunched?(profile)
     }
     func setRegisteredConnector(_ connector: @escaping @MainActor (Profile) async throws -> any AutomationManagerEndpoint) {
         registeredConnector = connector
@@ -506,6 +508,7 @@ import AppKit
                 guard !Task.isCancelled, !stopped else { throw AutomationError(code: .cancelled) }
                 let features = try spi.map { try SPIFeatures(parsing: $0) }
                 try registry.launch(profile, url: url, spiOverride: features, nonActivatingPresentation: true)
+                onInteractiveRunnerLaunched?(profile)
                 reply = AutomationReply(requestID: request.requestID, outcome: .success(.interactiveLaunched(profileID: profileID)))
             } catch is WorkspaceError { reply = failure(request, .profileAlreadyRunning) }
             catch let error as AutomationError { reply = AutomationReply(requestID: request.requestID, outcome: .failure(error)) }

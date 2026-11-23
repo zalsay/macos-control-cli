@@ -1,0 +1,12 @@
+{
+  "name": "safarier-dsh-sfa-tool",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Safarier browser control with DSH session ownership",
+  "type": "module",
+  "main": "./index.js",
+  "files": ["index.js", "cordis.patch.yml", "README.md"],
+  "engines": { "node": ">=22", "dsh": ">=0.2.2-rc.2 <0.3.0-0" },
+  "dsh": { "manifestVersion": 1, "bundle": { "patch": "./cordis.patch.yml" } },
+  "scripts": { "test": "node --test" }
+}

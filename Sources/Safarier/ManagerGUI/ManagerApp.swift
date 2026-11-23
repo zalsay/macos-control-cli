@@ -50,6 +50,9 @@ enum ManagerGUI {
         ManagerAutomationHooks.shutdownAutomation = { [weak delegate] in delegate?.automationManager.shutdown() }
         ManagerAutomationHooks.profilePermissionsChanged = { [weak delegate] allowed in delegate?.automationManager.profilePermissionsChanged(allowedProfileIDs: allowed) }
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
+        delegate.automationManager.onInteractiveRunnerLaunched = { [weak delegate] profile in
+            delegate?.scheduleLocalDaemon(for: profile)
+        }
         ManagerAutomationHooks.launchRegisteredInteractive = { [weak delegate] profile, spawner in
             guard let delegate else { throw AutomationError(code: .runnerExited) }
             try delegate.automationManager.launchRegisteredInteractive(profile, spawner: spawner, workspace: workspace)
@@ -120,6 +123,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         #endif
     }
     func recordAutomation() { handleLaunchEvent(.automation) }
+    fileprivate func scheduleLocalDaemon(for profile: Profile) { hostService.scheduleLocalDaemon(for: profile) }
     func recordInteractive() { handleLaunchEvent(.interactive) }
     func recordInteractiveWithoutActivation() { handleLaunchEvent(.interactiveWithoutActivation) }
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -201,6 +205,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         ManagerAutomationHooks.profilePermissionsChanged = nil
         #if SAFARIER_BOUND_LOCAL_CANDIDATE
         ManagerAutomationHooks.launchRegisteredInteractive = nil
+        automationManager.onInteractiveRunnerLaunched = nil
         #endif
         automationManager.onPendingWorkChanged = nil
         automationManager.shutdown()
