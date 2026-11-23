@@ -27,11 +27,7 @@ struct SafarierAppView: View {
 
     var body: some View {
         ZStack {
-            // 顶部控制栏与侧边菜单栏统一底色（原生 macOS 微半透明磨砂玻璃材质）
-            VisualEffectBackground(material: .sidebar, blendingMode: .behindWindow)
-
             chromeBackground
-                .opacity(MetallicTheme.chromeOpacity(for: colorScheme))
 
             VStack(spacing: 0) {
                 // 顶部原生统一控制栏 (Top Bar，贯穿全窗包括右侧区域)

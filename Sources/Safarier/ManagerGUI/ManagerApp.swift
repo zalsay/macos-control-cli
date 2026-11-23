@@ -261,8 +261,8 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             window.toolbar = nil
             window.titlebarSeparatorStyle = .none
             window.isMovableByWindowBackground = true
-            window.isOpaque = false
-            window.backgroundColor = .clear
+            window.isOpaque = true
+            window.backgroundColor = .windowBackgroundColor
             window.hasShadow = true
             window.minSize = NSSize(width: 920, height: 580)
             window.isReleasedWhenClosed = false
