@@ -33,12 +33,17 @@ final class ManagerHostDaemonService: ManagerHostServicing {
     private var startingProfiles: Set<UUID> = []
     private var stopTasks: [UUID: (id: UUID, task: Task<Void, Error>)] = [:]
     private var shutdownTask: (id: UUID, task: Task<Void, Error>)?
+    private var explicitExitTask: Task<Void, Error>?
+    private var explicitExitCompleted = false
     private var shuttingDown = false
 
     var hasOwnedChildren: Bool { !children.isEmpty }
     var needsTerminationCheck: Bool { !children.isEmpty || !startingProfiles.isEmpty }
 
     func perform(_ action: ManagerHostAction, profileID: UUID) async throws -> String {
+        guard explicitExitTask == nil else {
+            throw ManagerHostFailure.unavailable("Manager 正在执行完整退出检查；请等待检查完成后再操作 Host。")
+        }
         guard let executablePath = Bundle.main.executableURL?.path else {
             throw ManagerHostFailure.unavailable("无法定位 Safarier 可执行文件。")
         }
@@ -58,6 +63,9 @@ final class ManagerHostDaemonService: ManagerHostServicing {
     }
 
     func authorization(profileID: UUID, requestID: UUID?) async throws -> HostAuthorizationReceipt {
+        guard explicitExitTask == nil else {
+            throw ManagerHostFailure.unavailable("Manager 正在执行完整退出检查；请等待检查完成后再操作 Host。")
+        }
         let runtimePath = RemoteHostRuntime.path(for: profileID)
         let socketPath = runtimePath + "/control.sock"
         guard await Self.socketExistsOffMain(socketPath) else {
@@ -77,6 +85,10 @@ final class ManagerHostDaemonService: ManagerHostServicing {
     /// Called before Manager termination. This is deliberately restricted to
     /// retained Process instances; a CLI-started daemon is never adopted here.
     func stopOwnedChildrenForTermination() async throws {
+        if let explicitExitTask {
+            try await explicitExitTask.value
+            return
+        }
         if let shutdownTask {
             try await shutdownTask.task.value
             return
@@ -104,6 +116,138 @@ final class ManagerHostDaemonService: ManagerHostServicing {
             throw error
         }
         if shutdownTask?.id == taskID { shutdownTask = nil }
+    }
+
+    /// Explicit full-exit action: stop only retained Manager-owned scoped Hosts
+    /// and the one documented default CLI runtime. It never discovers or adopts
+    /// other runtimes, and it never signals a process or removes a socket itself.
+    func stopBackendsForExplicitExit() async throws {
+        if let explicitExitTask {
+            try await explicitExitTask.value
+            return
+        }
+        guard shutdownTask == nil else {
+            throw ManagerHostFailure.unavailable("Manager 的系统退出检查正在进行；请等待当前检查完成。")
+        }
+        shuttingDown = true
+        let task = Task { @MainActor [self] in try await stopBackendsForExplicitExitNow() }
+        explicitExitTask = task
+        do {
+            try await task.value
+            explicitExitCompleted = true
+        } catch {
+            explicitExitTask = nil
+            explicitExitCompleted = false
+            shuttingDown = false
+            throw error
+        }
+    }
+
+    /// Reopen the start gate only when the UI has cancelled termination after
+    /// this explicit shutdown completed (for example, a later exit precondition
+    /// changed). A call during an in-flight shutdown is intentionally ignored.
+    func resumeAfterCancelledExplicitExit() {
+        guard explicitExitCompleted else { return }
+        explicitExitTask = nil
+        explicitExitCompleted = false
+        shuttingDown = false
+    }
+
+    private func stopBackendsForExplicitExitNow() async throws {
+        // Let starts already admitted before the menu action finish so their
+        // retained Process instances are included in the preflight set.
+        let startDeadline = Date().addingTimeInterval(Self.startTimeout + 1)
+        while !startingProfiles.isEmpty, Date() < startDeadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard startingProfiles.isEmpty else {
+            throw ManagerHostFailure.unavailable("仍有 Manager-owned Host 正在启动；未停止任何 backend。请等待启动状态确认后再重试退出。")
+        }
+        guard stopTasks.isEmpty else {
+            throw ManagerHostFailure.unavailable("已有 Manager-owned Host 停止操作正在进行；未开始全局退出停止。请等待当前操作确认后再重试。")
+        }
+
+        let applicationPath = Bundle.main.bundleURL.path
+        var targets: [(child: ManagerHostChild?, runtimePath: String, expectedPeerPID: Int32?)] = []
+        let owned = children.values.sorted { $0.profileID.uuidString < $1.profileID.uuidString }
+        var knownTargetSocketPaths = owned.map(\.socketPath)
+        for child in owned {
+            if !child.process.isRunning { child.recordExit(child.process.terminationStatus) }
+            if child.hasExited {
+                guard !(await Self.socketExistsOffMain(child.socketPath)) else {
+                    throw ManagerHostFailure.unavailable("Manager-owned Host 子进程已退出，但原 socket 仍存在；为避免触碰替代进程，未停止任何 backend。")
+                }
+                if children[child.profileID] === child { children[child.profileID] = nil }
+                continue
+            }
+            guard await Self.socketExistsOffMain(child.socketPath) else {
+                throw ManagerHostFailure.unavailable("Manager-owned Host 子进程仍运行，但原控制 socket 缺失；未停止任何 backend。")
+            }
+            targets.append((child, child.runtimePath, child.pid))
+        }
+
+        // This is the sole non-owned backend in the explicit full-exit scope:
+        // the default local CLI runtime, never profile enumeration or DSH.
+        let defaultRuntimePath = NSHomeDirectory() + "/.safarier-control"
+        let defaultSocketPath = defaultRuntimePath + "/control.sock"
+        knownTargetSocketPaths.append(defaultSocketPath)
+        if await Self.socketExistsOffMain(defaultSocketPath) {
+            targets.append((nil, defaultRuntimePath, nil))
+        }
+
+        // Read every known target before issuing the first mutation. Retain
+        // each authenticated endpoint identity and require the stop exchange to
+        // reach precisely the same socket inode and peer process incarnation.
+        var preflighted: [(child: ManagerHostChild?, runtimePath: String,
+                           endpoint: ControlCLI.EndpointIdentity, ready: Bool)] = []
+        for target in targets {
+            let (reply, endpoint) = try await requestWithEndpointIdentity(
+                .status, applicationPath: applicationPath, runtimePath: target.runtimePath,
+                expectedPeerPID: target.expectedPeerPID)
+            guard let ready = reply.readyToStop else {
+                throw ManagerHostFailure.unavailable("Host 未提供可验证的停止就绪状态；未停止任何 backend。")
+            }
+            preflighted.append((target.child, target.runtimePath, endpoint, ready))
+        }
+        guard preflighted.allSatisfy(\.ready) else {
+            throw ManagerHostFailure.sessionBusy("至少一个目标 Host 当前忙碌或状态未就绪；没有向任何 backend 发送停止请求。请完成交回/释放后再重试。")
+        }
+
+        for target in preflighted {
+            _ = try await requestWithEndpointIdentity(
+                .daemonStop, applicationPath: applicationPath, runtimePath: target.runtimePath,
+                expectedPeerPID: target.child?.pid, expectedEndpointIdentity: target.endpoint)
+            if let child = target.child {
+                let exitStatus = await child.waitForExit(timeout: Self.childExitTimeout)
+                guard exitStatus != nil else {
+                    throw ManagerHostFailure.unavailable("Host 已接受停止请求，但 Manager 未确认原始子进程退出；没有重试或强制结束。")
+                }
+                guard await Self.waitForSocketAbsence(child.socketPath, timeout: Self.socketRemovalTimeout) else {
+                    throw ManagerHostFailure.unavailable("原始 Host 子进程已退出，但其 socket 仍存在；为避免触碰替代进程，Manager 保持运行。")
+                }
+                if children[child.profileID] === child { children[child.profileID] = nil }
+            } else {
+                guard await Self.waitForSocketAbsence(target.runtimePath + "/control.sock",
+                                                      timeout: Self.socketRemovalTimeout) else {
+                    throw ManagerHostFailure.unavailable("默认 CLI Host 已接受停止请求，但固定 runtime 的 socket 仍存在；没有重试或删除 socket。")
+                }
+            }
+        }
+
+        // Catch a late replacement/restart without adopting or stopping it.
+        // Any new endpoint means the complete exit condition is unconfirmed.
+        for child in Array(children.values) {
+            if !child.process.isRunning { child.recordExit(child.process.terminationStatus) }
+            guard child.hasExited else {
+                throw ManagerHostFailure.unavailable("最终检查发现 Manager-owned Host 仍运行或原 socket 未消失；没有额外停止或强制结束任何进程。")
+            }
+            children[child.profileID] = nil
+        }
+        for socketPath in knownTargetSocketPaths {
+            guard !(await Self.socketExistsOffMain(socketPath)) else {
+                throw ManagerHostFailure.unavailable("最终检查发现原始退出目标的 socket 仍存在或被替换；没有重试停止或删除 socket。")
+            }
+        }
     }
 
     nonisolated static func arguments(for action: ManagerHostAction, applicationPath: String, profileID: UUID) -> [String] {
@@ -251,25 +395,36 @@ final class ManagerHostDaemonService: ManagerHostServicing {
 
     private func request(_ operation: ControlOperation, applicationPath: String, runtimePath: String,
                          expectedPeerPID: Int32?) async throws -> ControlBrokerReply {
+        let result = try await requestWithEndpointIdentity(operation, applicationPath: applicationPath,
+                                                           runtimePath: runtimePath, expectedPeerPID: expectedPeerPID)
+        return result.reply
+    }
+
+    private func requestWithEndpointIdentity(_ operation: ControlOperation, applicationPath: String,
+                                             runtimePath: String, expectedPeerPID: Int32?,
+                                             expectedEndpointIdentity: ControlCLI.EndpointIdentity? = nil)
+    async throws -> (reply: ControlBrokerReply, endpointIdentity: ControlCLI.EndpointIdentity) {
         let request = ControlRequest(requestID: UUID(), operation: operation)
-        let data = try await Self.exchangeWithTimeout(request, applicationPath: applicationPath,
-                                                      runtimePath: runtimePath, expectedPeerPID: expectedPeerPID,
-                                                      timeout: Self.exchangeTimeout)
+        let (data, endpointIdentity) = try await Self.exchangeWithTimeout(
+            request, applicationPath: applicationPath, runtimePath: runtimePath,
+            expectedPeerPID: expectedPeerPID, expectedEndpointIdentity: expectedEndpointIdentity,
+            timeout: Self.exchangeTimeout)
         let reply = try ControlCLI.decodeReply(data, requestID: request.requestID)
         guard reply.status == "ok" else { throw Self.failure(for: reply.error) }
-        return reply
+        return (reply, endpointIdentity)
     }
 
     nonisolated private static func exchangeWithTimeout(_ request: ControlRequest, applicationPath: String,
                                                          runtimePath: String, expectedPeerPID: Int32?,
-                                                         timeout: TimeInterval) async throws -> Data {
+                                                         expectedEndpointIdentity: ControlCLI.EndpointIdentity? = nil,
+                                                         timeout: TimeInterval) async throws -> (Data, ControlCLI.EndpointIdentity) {
         try await withCheckedThrowingContinuation { continuation in
             let gate = ManagerHostExchangeGate(continuation)
             Task.detached(priority: .userInitiated) {
-                do {
-                    gate.finish(.success(try ControlCLI.exchange(request, applicationPath: applicationPath,
-                                                                 runtimePath: runtimePath, expectedPeerPID: expectedPeerPID)))
-                } catch { gate.finish(.failure(error)) }
+                do { gate.finish(.success(try ControlCLI.exchangeWithEndpointIdentity(
+                    request, applicationPath: applicationPath, runtimePath: runtimePath,
+                    expectedPeerPID: expectedPeerPID, expectedEndpointIdentity: expectedEndpointIdentity))) }
+                catch { gate.finish(.failure(error)) }
             }
             Task.detached(priority: .utility) {
                 try? await Task.sleep(for: .seconds(timeout))
@@ -355,11 +510,11 @@ private final class ManagerHostChild {
 
 private final class ManagerHostExchangeGate: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<Data, Error>?
+    private var continuation: CheckedContinuation<(Data, ControlCLI.EndpointIdentity), Error>?
 
-    init(_ continuation: CheckedContinuation<Data, Error>) { self.continuation = continuation }
+    init(_ continuation: CheckedContinuation<(Data, ControlCLI.EndpointIdentity), Error>) { self.continuation = continuation }
 
-    func finish(_ result: Result<Data, Error>) {
+    func finish(_ result: Result<(Data, ControlCLI.EndpointIdentity), Error>) {
         lock.lock()
         let continuation = self.continuation
         self.continuation = nil

@@ -4,7 +4,16 @@ import SafarierCore
 @MainActor
 final class ManagerMenu: NSObject, NSMenuItemValidation {
     private let model: ManagerModel
-    init(model: ManagerModel) { self.model = model; super.init() }
+    private let onClosePanel: () -> Void
+    private let onExplicitExit: () -> Void
+    private let explicitExitInFlight: () -> Bool
+    init(model: ManagerModel, onClosePanel: @escaping () -> Void, onExplicitExit: @escaping () -> Void, explicitExitInFlight: @escaping () -> Bool) {
+        self.model = model
+        self.onClosePanel = onClosePanel
+        self.onExplicitExit = onExplicitExit
+        self.explicitExitInFlight = explicitExitInFlight
+        super.init()
+    }
 
     func make() -> NSMenu {
         let main = NSMenu()
@@ -28,7 +37,13 @@ final class ManagerMenu: NSObject, NSMenuItemValidation {
         app.addItem(item("隐藏 Safarier AI", #selector(NSApplication.hide(_:)), "h"))
         app.addItem(item("隐藏其他", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]))
         app.addItem(item("全部显示", #selector(NSApplication.unhideAllApplications(_:))))
-        app.addItem(.separator()); app.addItem(item("退出 Safarier AI", #selector(NSApplication.terminate(_:)), "q"))
+        app.addItem(.separator())
+        let closePanel = item("关闭 Manager 面板", #selector(closeManagerPanel(_:)), "q")
+        closePanel.target = self
+        app.addItem(closePanel)
+        let explicitExit = item("退出并停止 Backend…", #selector(explicitExit(_:)))
+        explicitExit.target = self
+        app.addItem(explicitExit)
         let file = submenu("文件")
         let edit = submenu("编辑")
         edit.addItem(item("撤销", Selector(("undo:")), "z")); edit.addItem(item("重做", Selector(("redo:")), "z", [.command, .shift]))
@@ -123,6 +138,7 @@ final class ManagerMenu: NSObject, NSMenuItemValidation {
     }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(openJEVConfig(_:)) { return model.sheet == nil }
+        if item.action == #selector(explicitExit(_:)) { return !explicitExitInFlight() }
         if let raw = item.representedObject as? String, let action = ManagerHostAction(rawValue: raw) {
             return model.hostActionEnabled(action, for: model.selectedProfile)
         }
@@ -135,6 +151,8 @@ final class ManagerMenu: NSObject, NSMenuItemValidation {
         guard model.sheet == nil else { return }
         model.sheet = .jevConfig
     }
+    @objc private func closeManagerPanel(_ item: NSMenuItem) { onClosePanel() }
+    @objc private func explicitExit(_ item: NSMenuItem) { onExplicitExit() }
     @objc private func performCommand(_ item: NSMenuItem) {
         guard let raw = item.representedObject as? String, let command = ManagerMenuCommand(rawValue: raw), validateMenuItem(item) else { return }
         switch command {

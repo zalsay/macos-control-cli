@@ -90,6 +90,9 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var normalWindowSize: ManagerNormalWindowSize?
     private var windowWasClosed = false
     private var hostTerminationPending = false
+    private var systemTerminationWaitingOnExplicitExit = false
+    private var explicitExitTerminationApproved = false
+    private var explicitExitState = ManagerExplicitExitState()
 
     init(workspace: SafarierWorkspace, quietStart: Bool = false) {
         self.workspace = workspace
@@ -144,10 +147,24 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return false
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        state.handle(.windowClosed(pendingCommands: ManagerAutomationHooks.combinedPendingWork)).contains(.terminate)
+        false
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if explicitExitTerminationApproved {
+            explicitExitTerminationApproved = false
+            let pending = ManagerAutomationHooks.combinedPendingWork
+            guard pending == 0 else {
+                hostService.resumeAfterCancelledExplicitExit()
+                showPendingWorkExitRefusal(pending)
+                return .terminateCancel
+            }
+            return .terminateNow
+        }
         if hostTerminationPending { return .terminateLater }
+        if explicitExitState.isShutdownInFlight {
+            systemTerminationWaitingOnExplicitExit = true
+            return .terminateLater
+        }
         let effects = state.handle(.quitRequested(pendingCommands: ManagerAutomationHooks.combinedPendingWork))
         if effects.contains(.deferTermination) {
             if effects.contains(.cancelPending) {
@@ -199,6 +216,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     func windowWillClose(_ notification: Notification) {
         saveManagerWindowSize()
         windowWasClosed = true
+        _ = state.handle(.windowClosed(pendingCommands: ManagerAutomationHooks.combinedPendingWork))
     }
     func windowWillEnterFullScreen(_ notification: Notification) { normalWindowSize?.changingFullScreen = true }
     func windowDidEnterFullScreen(_ notification: Notification) { normalWindowSize?.changingFullScreen = false }
@@ -255,7 +273,16 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self.window = window
             normalWindowSize = ManagerNormalWindowSize(size: window.frame.size)
             window.delegate = self
-            let menu = ManagerMenu(model: model); self.menu = menu; NSApp.mainMenu = menu.make()
+            let menu = ManagerMenu(
+                model: model,
+                onClosePanel: { [weak self] in self?.closeManagerPanel() },
+                onExplicitExit: { [weak self] in self?.requestExplicitExit() },
+                explicitExitInFlight: { [weak self] in
+                    guard let self else { return true }
+                    return explicitExitState.isShutdownInFlight || hostTerminationPending
+                }
+            )
+            self.menu = menu; NSApp.mainMenu = menu.make()
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 guard let forward = WindowCycler.direction(for: event), !(forward && event.charactersIgnoringModifiers == "`") else { return event }
                 MainActor.assumeIsolated { if !WindowCycler.activateOtherSafarier(forward: forward) { NSSound.beep() } }
@@ -302,6 +329,107 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 NSApp.reply(toApplicationShouldTerminate: false)
             }
         }
+    }
+
+    private func closeManagerPanel() {
+        window?.close()
+    }
+
+    private func requestExplicitExit() {
+        guard !explicitExitState.isShutdownInFlight, !hostTerminationPending else { return }
+        let pending = ManagerAutomationHooks.combinedPendingWork
+        guard pending == 0 else {
+            showPendingWorkExitRefusal(pending)
+            return
+        }
+
+        let confirmation = NSAlert()
+        confirmation.alertStyle = .warning
+        confirmation.messageText = "退出并停止 Backend？"
+        confirmation.informativeText = "将先停止 Safarier 管理的 Backend，确认停止后退出 Manager。不会取消待处理自动化，也不会主动关闭已打开的浏览器窗口或停止独立运行的 DSH；Safarier 原有的 DSH 退出清理仍会照常执行。"
+        confirmation.addButton(withTitle: "退出并停止 Backend")
+        confirmation.addButton(withTitle: "取消")
+        guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+
+        switch explicitExitState.request(pendingWork: ManagerAutomationHooks.combinedPendingWork) {
+        case .refusePendingWork:
+            showPendingWorkExitRefusal(ManagerAutomationHooks.combinedPendingWork)
+            return
+        case .alreadyInFlight:
+            return
+        case .beginShutdown:
+            break
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let pending = ManagerAutomationHooks.combinedPendingWork
+                guard pending == 0 else {
+                    explicitExitState.shutdownFailed()
+                    cancelDeferredSystemTermination()
+                    showPendingWorkExitRefusal(pending)
+                    return
+                }
+                try await hostService.stopBackendsForExplicitExit()
+                let pendingAfterStop = ManagerAutomationHooks.combinedPendingWork
+                guard pendingAfterStop == 0 else {
+                    explicitExitState.shutdownFailed()
+                    hostService.resumeAfterCancelledExplicitExit()
+                    cancelDeferredSystemTermination()
+                    showPendingWorkExitRefusal(pendingAfterStop)
+                    return
+                }
+                guard explicitExitState.shutdownSucceeded() else { return }
+                guard !hostService.needsTerminationCheck else {
+                    explicitExitState.shutdownFailed()
+                    hostService.resumeAfterCancelledExplicitExit()
+                    presentExplicitExitFailure(ManagerHostFailure.unavailable("Manager-owned Host 尚未确认全部停止。Manager 保持运行，请检查状态后重试。"))
+                    cancelDeferredSystemTermination()
+                    return
+                }
+                if systemTerminationWaitingOnExplicitExit {
+                    finishDeferredSystemTermination()
+                } else {
+                    explicitExitTerminationApproved = true
+                    NSApp.terminate(nil)
+                }
+            } catch {
+                explicitExitState.shutdownFailed()
+                cancelDeferredSystemTermination()
+                presentExplicitExitFailure(error)
+            }
+        }
+    }
+
+    private func finishDeferredSystemTermination() {
+        guard systemTerminationWaitingOnExplicitExit else { return }
+        systemTerminationWaitingOnExplicitExit = false
+        NSApp.reply(toApplicationShouldTerminate: true)
+    }
+
+    private func cancelDeferredSystemTermination() {
+        guard systemTerminationWaitingOnExplicitExit else { return }
+        systemTerminationWaitingOnExplicitExit = false
+        NSApp.reply(toApplicationShouldTerminate: false)
+    }
+
+    private func showPendingWorkExitRefusal(_ pending: Int) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "无法退出并停止 Backend"
+        alert.informativeText = "当前有 \(pending) 项待处理自动化。Manager 不会替你取消这些工作；请等待完成后再尝试。"
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+    }
+
+    private func presentExplicitExitFailure(_ error: Error) {
+        if model == nil { model = ManagerModel(workspace: workspace, hostService: hostService) }
+        apply(state.handle(.interactive))
+        model?.message = ManagerModel.Message(
+            title: "无法退出并停止 Backend",
+            detail: "\(error.localizedDescription)\n\nManager 保持运行；处理上述问题后可重新打开面板并重试。"
+        )
     }
 
     private func presentHostTerminationFailure(_ error: Error) {

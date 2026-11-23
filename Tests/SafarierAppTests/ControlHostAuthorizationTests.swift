@@ -38,6 +38,8 @@ final class ControlHostAuthorizationTests: XCTestCase {
         let statusID = UUID()
         let stillPending = try reply(await broker.handle(ControlRequest(requestID: statusID, operation: .authorizationStatus(requestID: requestID))))
         XCTAssertEqual(stillPending.authorization, pending)
+        let readiness = try reply(await broker.handle(ControlRequest(requestID: UUID(), operation: .status)))
+        XCTAssertEqual(readiness.readyToStop, false, "status must expose the same busy predicate used by daemonStop")
         let stopID = UUID()
         let stopped = try reply(await broker.handle(ControlRequest(requestID: stopID, operation: .daemonStop)))
         XCTAssertEqual(stopped.error, "SESSION_BUSY")
@@ -57,6 +59,13 @@ final class ControlHostAuthorizationTests: XCTestCase {
         XCTAssertFalse(receipt.businessEventSent)
         XCTAssertTrue(receipt.statusDescription.contains("历史回执"))
         XCTAssertEqual(authorizationCalls, 1)
+    }
+
+    func testIdleStatusReportsReadyToStop() async throws {
+        let broker = ControlBroker(testSender: { _ in throw ControlAppleEventClient.Failure.unavailable })
+        let status = try reply(await broker.handle(ControlRequest(requestID: UUID(), operation: .status)))
+        XCTAssertEqual(status.status, "ok")
+        XCTAssertEqual(status.readyToStop, true)
     }
 
     func testIdleStopCommitsOnceEvenWhenRequestIsReplayed() async throws {

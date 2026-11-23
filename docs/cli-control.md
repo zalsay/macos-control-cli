@@ -32,6 +32,10 @@ export SF_APP="/实际安装位置/Safarier AI.app"
 
 ## 2. 打开 Manager，选择环境
 
+关闭 Manager 面板（含窗口关闭按钮和 `⌘Q`）只关闭面板，保留后台 Manager、现有 Backend 和浏览器窗口。重新打开 Safarier AI 可回到同一面板，不需要为此重建控制连接。
+
+要结束 Manager 和受管理的 Backend，请选择应用菜单里的「退出并停止 Backend…」。这会检查 Manager 启动的 Host 和与当前安装匹配的默认本地控制服务。确认后先检查控制连接和未完成请求；有占用时先在原调用端交还控制，再重试。只有确认 Backend 停止后才退出 Manager；不强杀进程。已打开的浏览器和独立运行的 DSH 不会被这个菜单项关闭。
+
 仅当已有唯一 Manager 位于 sfa 选定的同一安装位置且身份校验通过时，才跳过启动。若路径不符或校验失败，先说明阻碍，按用户授权正常关闭并切换；不直接另开第二个 Manager。尚未打开时，可手动打开实际安装的 App，或在当前任务授权范围内使用 `open -g "/实际安装位置/Safarier AI.app" --args --show-manager-without-activation`；路径应与 sfa 选择的包一致。后续手动打开仍正常激活。随后列出环境：
 
 ```sh

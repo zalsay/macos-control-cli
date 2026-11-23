@@ -27,7 +27,8 @@ public enum ManagerLaunchCases {
         try check(state.handle(.automation) == [], "automation leaves human window alone"); n += 1
         try check(state.handle(.windowClosed(pendingCommands: 1)) == [], "pending keeps process"); n += 1
         try check(state.handle(.interactive) == [.showManager], "reopen"); n += 1
-        try check(state.handle(.windowClosed(pendingCommands: 0)) == [.terminate], "last window exits"); n += 1
+        try check(state.handle(.windowClosed(pendingCommands: 0)) == [], "closing empty panel keeps Manager resident"); n += 1
+        try check(state.handle(.interactive) == [.showManager], "closed empty panel can reopen"); n += 1
         var quit = ManagerLaunchState(); try check(quit.handle(.quit) == [.cancelPending, .terminate], "quit cancels own"); n += 1
         var deferred = ManagerLaunchState()
         try check(deferred.handle(.quitRequested(pendingCommands: 2)) == [.cancelPending, .deferTermination], "pending quit defers"); n += 1
@@ -41,8 +42,8 @@ public enum ManagerLaunchCases {
         try check(closeDrain.handle(.windowClosed(pendingCommands: 2)) == [], "window close with pending waits"); n += 1
         try check(closeDrain.handle(.automation) == [], "automation while draining no show"); n += 1
         try check(closeDrain.handle(.pendingCommandsChanged(1)) == [], "window pending still active"); n += 1
-        try check(closeDrain.handle(.pendingCommandsChanged(0)) == [.terminate], "last window drained terminates"); n += 1
-        try check(closeDrain.handle(.pendingCommandsChanged(0)) == [], "window drain terminates once"); n += 1
+        try check(closeDrain.handle(.pendingCommandsChanged(0)) == [], "pending drain never terminates resident Manager"); n += 1
+        try check(closeDrain.handle(.interactive) == [.showManager], "panel can reopen after pending work drains"); n += 1
         var reopenDrain = ManagerLaunchState()
         _ = reopenDrain.handle(.finishedLaunching); _ = reopenDrain.handle(.interactive)
         _ = reopenDrain.handle(.windowClosed(pendingCommands: 1))
@@ -82,6 +83,16 @@ public enum ManagerLaunchCases {
         for command in [ManagerMenuCommand.edit, .duplicate, .refresh, .reload] { try check(ManagerMenuDefinition.enabled(command, context: running), "enabled \(command)"); n += 1 }
         let stopped = ManagerMenuContext(hasSelectedProfile: true, selectedProfileStopped: true, hasSubscriptions: true)
         try check(ManagerMenuDefinition.enabled(.launch, context: stopped), "stopped launch enabled"); n += 1
+        var explicitExit = ManagerExplicitExitState()
+        try check(explicitExit.request(pendingWork: 1) == .refusePendingWork, "explicit exit refuses pending automation"); n += 1
+        try check(explicitExit.request(pendingWork: 0) == .beginShutdown, "explicit exit starts shutdown when idle"); n += 1
+        try check(explicitExit.isShutdownInFlight, "explicit exit marks shutdown busy"); n += 1
+        try check(explicitExit.request(pendingWork: 0) == .alreadyInFlight, "repeat explicit exit is capped"); n += 1
+        explicitExit.shutdownFailed()
+        try check(!explicitExit.isShutdownInFlight, "failed shutdown releases busy state"); n += 1
+        try check(explicitExit.request(pendingWork: 0) == .beginShutdown, "failed shutdown can be retried"); n += 1
+        try check(explicitExit.shutdownSucceeded(), "verified shutdown permits termination"); n += 1
+        try check(!explicitExit.shutdownSucceeded(), "termination is granted only once per shutdown"); n += 1
         return n
     }
 }

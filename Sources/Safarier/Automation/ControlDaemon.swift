@@ -9,6 +9,7 @@ struct ControlBrokerReply: Codable {
     let requestID: UUID
     var status: String
     var error: String?
+    var readyToStop: Bool?
     var connection: UUID?
     var frame: UUID?
     var screenshotPath: String?
@@ -243,11 +244,12 @@ final class ControlBroker {
     }
     private func perform(_ request: ControlRequest, reserved: Bool) async -> ControlBrokerReply {
         var result = ControlBrokerReply(request.requestID, status: "ok")
-        if case .status = request.operation { return result }
+        if case .status = request.operation {
+            result.readyToStop = canStop(excluding: request.requestID)
+            return result
+        }
         if case .daemonStop = request.operation {
-            guard sessions.isEmpty, pendingAcknowledgements.isEmpty, !opening,
-                  authorizationAttempt?.receipt.status != "pending",
-                  !cache.contains(where: { $0.key != request.requestID && $0.value.response == nil }) else { return response(request, "SESSION_BUSY") }
+            guard canStop(excluding: request.requestID) else { return response(request, "SESSION_BUSY") }
             stopping = true
             return result
         }
@@ -446,6 +448,14 @@ final class ControlBroker {
             session.uncertain = true
             return response(request, "INDETERMINATE_RESULT")
         }
+    }
+
+    /// Status preflight and daemonStop deliberately share the same admission
+    /// predicate. Each request excludes its own still-in-flight cache entry.
+    private func canStop(excluding requestID: UUID) -> Bool {
+        sessions.isEmpty && pendingAcknowledgements.isEmpty && !opening &&
+            authorizationAttempt?.receipt.status != "pending" &&
+            !cache.contains(where: { $0.key != requestID && $0.value.response == nil })
     }
 }
 

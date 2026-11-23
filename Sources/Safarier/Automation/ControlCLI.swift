@@ -1,9 +1,46 @@
 import Darwin
 import Foundation
+import SafarierControlSupport
 import SafarierCore
 
 @MainActor
 enum ControlCLI {
+    /// Authenticated identity for a particular local control endpoint. This is
+    /// an observation pin only; it never grants authority to signal a process.
+    struct EndpointIdentity: Sendable, Equatable {
+        struct Peer: Sendable, Equatable {
+            let pid: Int32
+            let uid: UInt32
+            let pidversion: UInt32
+            let birthSeconds: UInt64
+            let birthMicroseconds: UInt64
+            let auditDigest: Data
+
+            fileprivate init(_ proof: CSControlPeer) {
+                pid = proof.pid
+                uid = proof.uid
+                pidversion = proof.pidversion
+                birthSeconds = proof.birth_sec
+                birthMicroseconds = proof.birth_usec
+                auditDigest = withUnsafeBytes(of: proof.audit_digest) { Data($0) }
+            }
+        }
+
+        let socketDevice: UInt64
+        let socketInode: UInt64
+        let socketMode: UInt32
+        let socketOwner: UInt32
+        let peer: Peer
+
+        fileprivate init(socket: stat, peer: CSControlPeer) {
+            socketDevice = UInt64(truncatingIfNeeded: socket.st_dev)
+            socketInode = UInt64(truncatingIfNeeded: socket.st_ino)
+            socketMode = UInt32(truncatingIfNeeded: socket.st_mode)
+            socketOwner = UInt32(truncatingIfNeeded: socket.st_uid)
+            self.peer = Peer(peer)
+        }
+    }
+
     private static let usage = """
     Usage: Safarier control [--app ABSOLUTE_APP] [--runtime ABSOLUTE_PRIVATE_DIRECTORY] COMMAND
       daemon start|serve|stop
@@ -88,17 +125,34 @@ enum ControlCLI {
     /// control uses this entry point so the daemon sees the original request ID
     /// and retains its normal identity checks and replay protection.
     nonisolated static func exchange(_ request: ControlRequest, applicationPath: String, runtimePath: String,
-                                     expectedPeerPID: Int32? = nil) throws -> Data {
+                                     expectedPeerPID: Int32? = nil,
+                                     expectedEndpointIdentity: EndpointIdentity? = nil) throws -> Data {
+        try exchangeWithEndpointIdentity(request, applicationPath: applicationPath, runtimePath: runtimePath,
+                                         expectedPeerPID: expectedPeerPID,
+                                         expectedEndpointIdentity: expectedEndpointIdentity).data
+    }
+
+    nonisolated static func exchangeWithEndpointIdentity(_ request: ControlRequest, applicationPath: String,
+                                                         runtimePath: String, expectedPeerPID: Int32? = nil,
+                                                         expectedEndpointIdentity: EndpointIdentity? = nil)
+    throws -> (data: Data, endpointIdentity: EndpointIdentity) {
         let runtime = try ControlRuntime(path: runtimePath, create: false)
         let (fd, socketPin) = try runtime.connectSocket()
         defer { Darwin.close(fd) }
+        let connectedPeer = try ControlRuntime.peer(fd)
+        let endpointIdentity = EndpointIdentity(socket: socketPin, peer: connectedPeer)
+        guard expectedEndpointIdentity == nil || expectedEndpointIdentity == endpointIdentity,
+              expectedPeerPID == nil || connectedPeer.pid == expectedPeerPID else {
+            throw ControlRuntime.Failure.unsafe
+        }
+        let pinnedPeerPID = expectedEndpointIdentity?.peer.pid ?? expectedPeerPID
         let diagnosticRequest = request
         NavigationDiagnostic.emit(diagnosticRequest, "cli.request")
         var replyReceived = false
         defer { if !replyReceived { NavigationDiagnostic.emit(diagnosticRequest, "cli.failure", "error") } }
         var validated: ControlBrokerReply?
         let data = try ControlRuntime.clientExchange(fd, request: request, instance: ControlRuntime.applicationInstance(applicationPath),
-                                                     expectedPeerPID: expectedPeerPID, validatePath: {
+                                                     expectedPeerPID: pinnedPeerPID, validatePath: {
             try runtime.validateSocket(socketPin)
         }, validateReply: { bytes in
             guard let reply = try? JSONDecoder().decode(ControlBrokerReply.self, from: bytes),
@@ -109,12 +163,13 @@ enum ControlCLI {
             validated = reply
         })
         guard let validated else { throw ControlRuntime.Failure.indeterminate }
-        if case .daemonStop = request.operation, validated.status == "ok" {
+        if case .daemonStop = request.operation, validated.status == "ok",
+           expectedEndpointIdentity != nil {
             try runtime.waitForSocketRemoval(socketPin)
         }
         replyReceived = true
         NavigationDiagnostic.emit(diagnosticRequest, "cli.reply", validated.status == "ok" ? "ok" : (validated.error ?? "error"))
-        return data
+        return (data, endpointIdentity)
     }
 
     nonisolated static func decodeReply(_ data: Data, requestID: UUID) throws -> ControlBrokerReply {

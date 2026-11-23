@@ -22,7 +22,6 @@ public struct ManagerLaunchState: Sendable {
     private var humanWindow = false
     private var terminating = false
     private var awaitingTerminationReply = false
-    private var awaitingWindowDrain = false
     public init() {}
     public mutating func handle(_ event: ManagerLaunchEvent) -> [ManagerLaunchEffect] {
         switch event {
@@ -32,7 +31,6 @@ public struct ManagerLaunchState: Sendable {
         case .interactive:
             guard !terminating else { return [] }
             guard finished else { interactiveBeforeFinish = true; return [] }
-            awaitingWindowDrain = false
             humanWindow = true; return [.showManager]
         case .interactiveWithoutActivation:
             guard !finished, !terminating else { return [] }
@@ -48,15 +46,14 @@ public struct ManagerLaunchState: Sendable {
             if quietBeforeFinish { humanWindow = true; return [.showManagerWithoutActivation] }
             if interactiveBeforeFinish && !automationBeforeFinish { humanWindow = true; return [.showManager] }
             return []
-        case .windowClosed(let pending):
+        case .windowClosed:
             guard humanWindow, !terminating else { return [] }
             humanWindow = false
-            if pending > 0 { awaitingWindowDrain = true; return [] }
-            return [.terminate]
+            // Closing the Manager panel never ends the resident bridge.
+            return []
         case .terminationCancelled:
             terminating = false
             awaitingTerminationReply = false
-            awaitingWindowDrain = false
             return []
         case .quit:
             return handle(.quitRequested(pendingCommands: 0))
@@ -64,7 +61,6 @@ public struct ManagerLaunchState: Sendable {
             if awaitingTerminationReply { return [.deferTermination] }
             guard !terminating else { return [] }
             terminating = true
-            awaitingWindowDrain = false
             if pending > 0 { awaitingTerminationReply = true; return [.cancelPending, .deferTermination] }
             return [.cancelPending, .terminate]
         case .pendingCommandsChanged(let pending):
@@ -73,12 +69,39 @@ public struct ManagerLaunchState: Sendable {
                 awaitingTerminationReply = false
                 return [.replyToTermination]
             }
-            if awaitingWindowDrain && !terminating && !humanWindow {
-                awaitingWindowDrain = false
-                return [.terminate]
-            }
             return []
         }
+    }
+}
+
+public enum ManagerExplicitExitDecision: Equatable, Sendable {
+    case refusePendingWork
+    case alreadyInFlight
+    case beginShutdown
+}
+
+/// Guards the separately confirmed menu action that stops Manager-owned backends.
+public struct ManagerExplicitExitState: Sendable {
+    private var shutdownInFlight = false
+    public init() {}
+
+    public var isShutdownInFlight: Bool { shutdownInFlight }
+
+    public mutating func request(pendingWork: Int) -> ManagerExplicitExitDecision {
+        guard !shutdownInFlight else { return .alreadyInFlight }
+        guard pendingWork == 0 else { return .refusePendingWork }
+        shutdownInFlight = true
+        return .beginShutdown
+    }
+
+    public mutating func shutdownFailed() {
+        shutdownInFlight = false
+    }
+
+    public mutating func shutdownSucceeded() -> Bool {
+        guard shutdownInFlight else { return false }
+        shutdownInFlight = false
+        return true
     }
 }
 

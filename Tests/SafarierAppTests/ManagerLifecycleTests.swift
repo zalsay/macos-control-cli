@@ -18,7 +18,29 @@ final class ManagerLifecycleTests: XCTestCase {
 
         XCTAssertEqual(state.handle(.terminationCancelled), [])
         XCTAssertEqual(state.handle(.interactive), [.showManager])
-        XCTAssertEqual(state.handle(.windowClosed(pendingCommands: 0)), [.terminate])
+        XCTAssertEqual(state.handle(.windowClosed(pendingCommands: 0)), [])
+    }
+    func testClosingPanelWithOrWithoutPendingWorkNeverTerminatesAndCanReopen() {
+        var state = ManagerLaunchState()
+        XCTAssertEqual(state.handle(.finishedLaunching), [])
+        XCTAssertEqual(state.handle(.interactive), [.showManager])
+        XCTAssertEqual(state.handle(.windowClosed(pendingCommands: 0)), [])
+        XCTAssertEqual(state.handle(.interactive), [.showManager])
+        XCTAssertEqual(state.handle(.windowClosed(pendingCommands: 3)), [])
+        XCTAssertEqual(state.handle(.pendingCommandsChanged(0)), [])
+        XCTAssertEqual(state.handle(.interactive), [.showManager])
+    }
+    func testExplicitExitRequiresIdleWorkAndVerifiedShutdown() {
+        var exit = ManagerExplicitExitState()
+        XCTAssertEqual(exit.request(pendingWork: 2), .refusePendingWork)
+        XCTAssertEqual(exit.request(pendingWork: 0), .beginShutdown)
+        XCTAssertEqual(exit.request(pendingWork: 0), .alreadyInFlight)
+        exit.shutdownFailed()
+        XCTAssertFalse(exit.isShutdownInFlight)
+        XCTAssertFalse(exit.shutdownSucceeded())
+        XCTAssertEqual(exit.request(pendingWork: 0), .beginShutdown)
+        XCTAssertTrue(exit.shutdownSucceeded())
+        XCTAssertFalse(exit.shutdownSucceeded())
     }
     func testCancelledHostTerminationCanReenterPendingCommandDrain() {
         var state = ManagerLaunchState()
