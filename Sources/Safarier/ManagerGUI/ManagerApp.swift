@@ -94,6 +94,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var windowWasClosed = false
     private var hostTerminationPending = false
     private var systemTerminationWaitingOnExplicitExit = false
+    private var confirmedPendingCancellation = false
     private var explicitExitTerminationApproved = false
     private var explicitExitState = ManagerExplicitExitState()
 
@@ -157,7 +158,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if explicitExitTerminationApproved {
             explicitExitTerminationApproved = false
             let pending = ManagerAutomationHooks.combinedPendingWork
-            guard pending == 0 else {
+            guard pending == 0 || confirmedPendingCancellation else {
                 hostService.resumeAfterCancelledExplicitExit()
                 showPendingWorkExitRefusal(pending)
                 return .terminateCancel
@@ -218,6 +219,11 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func observeManagerWindowSize(_ window: NSWindow) {
         normalWindowSize?.observe(window.frame.size, fullScreen: window.styleMask.contains(.fullScreen), miniaturized: window.isMiniaturized)
     }
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === window else { return true }
+        requestExplicitExit()
+        return false // Keep the panel until explicit shutdown has been verified, including on cancellation.
+    }
     func windowWillClose(_ notification: Notification) {
         saveManagerWindowSize()
         windowWasClosed = true
@@ -253,7 +259,11 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if window == nil {
             let model = ManagerModel(workspace: workspace, hostService: hostService)
             self.model = model
-            let content = NSHostingController(rootView: SafarierAppView(model: model).frame(minWidth: 920, minHeight: 580))
+            let onExplicitExit: () -> Void = { [weak self] in self?.requestExplicitExit() }
+            let content = NSHostingController(
+                rootView: SafarierAppView(model: model, onExplicitExit: onExplicitExit)
+                    .frame(minWidth: 920, minHeight: 580)
+            )
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1140, height: 740),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -281,7 +291,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let menu = ManagerMenu(
                 model: model,
                 onClosePanel: { [weak self] in self?.closeManagerPanel() },
-                onExplicitExit: { [weak self] in self?.requestExplicitExit() },
+                onExplicitExit: onExplicitExit,
                 explicitExitInFlight: { [weak self] in
                     guard let self else { return true }
                     return explicitExitState.isShutdownInFlight || hostTerminationPending
@@ -340,23 +350,44 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         window?.close()
     }
 
-    private func requestExplicitExit() {
-        guard !explicitExitState.isShutdownInFlight, !hostTerminationPending else { return }
+    private var presentingExit = false
+    private func fullExitSnapshot() throws -> [ManagerExitTarget] {
+        try ManagerExitInventory.snapshot(dshPID: DshService.shared.fullExitProcessID)
+    }
+    private func confirmExit(_ targets: [ManagerExitTarget], force: Bool) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = force ? "强制结束剩余进程？" : "\(DisplayText.completeExit)？"
+        let summary = force ? "以下进程未正常退出。强制结束可能丢失未保存的页面或中断控制会话。取消将保留 Manager，已正常退出的进程不会重新启动。" : "将关闭当前安装的 Runner、受管理的 DSH 和 SFA 服务（含独立运行目录），然后退出 Manager。请先保存浏览器工作。"
         let pending = ManagerAutomationHooks.combinedPendingWork
-        guard pending == 0 else {
-            showPendingWorkExitRefusal(pending)
-            return
+        let work = pending > 0 ? "\n当前还有 \(pending) 项控制工作；强制退出会中断这些工作。" : ""
+        alert.informativeText = summary + work
+        let lines = (force ? [] : ["Manager · PID \(getpid())"]) + targets.map(\.label)
+        if !lines.isEmpty {
+            let list = NSTextView()
+            list.isEditable = false; list.drawsBackground = false
+            list.isVerticallyResizable = true; list.autoresizingMask = [.width]
+            list.textContainer?.widthTracksTextView = true
+            list.string = lines.joined(separator: "\n")
+            let box = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: min(160, 24 + 19 * lines.count)))
+            box.hasVerticalScroller = true; box.documentView = list
+            list.frame.size = box.contentSize
+            alert.accessoryView = box
         }
+        alert.addButton(withTitle: "取消").keyEquivalent = "\r"
+        alert.addButton(withTitle: force ? "强制结束列出的进程" : DisplayText.completeExit)
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+    private func requestExplicitExit() {
+        guard !presentingExit, !explicitExitState.isShutdownInFlight, !hostTerminationPending else { return }
+        presentingExit = true
+        defer { presentingExit = false }
+        confirmedPendingCancellation = false
+        let targets: [ManagerExitTarget]
+        do { targets = try fullExitSnapshot() } catch { presentExplicitExitFailure(error); return }
+        guard confirmExit(targets, force: false) else { return }
 
-        let confirmation = NSAlert()
-        confirmation.alertStyle = .warning
-        confirmation.messageText = "退出并停止 Backend？"
-        confirmation.informativeText = "将先停止 Safarier 管理的 Backend，确认停止后退出 Manager。不会取消待处理自动化，也不会主动关闭已打开的浏览器窗口或停止独立运行的 DSH；Safarier 原有的 DSH 退出清理仍会照常执行。"
-        confirmation.addButton(withTitle: "退出并停止 Backend")
-        confirmation.addButton(withTitle: "取消")
-        guard confirmation.runModal() == .alertFirstButtonReturn else { return }
-
-        switch explicitExitState.request(pendingWork: ManagerAutomationHooks.combinedPendingWork) {
+        switch explicitExitState.request(pendingWork: ManagerAutomationHooks.combinedPendingWork, allowBusyPreflight: true) {
         case .refusePendingWork:
             showPendingWorkExitRefusal(ManagerAutomationHooks.combinedPendingWork)
             return
@@ -369,16 +400,9 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let pending = ManagerAutomationHooks.combinedPendingWork
-                guard pending == 0 else {
-                    explicitExitState.shutdownFailed()
-                    cancelDeferredSystemTermination()
-                    showPendingWorkExitRefusal(pending)
-                    return
-                }
-                try await hostService.stopBackendsForExplicitExit()
+                try await closeConfirmedProcesses(targets)
                 let pendingAfterStop = ManagerAutomationHooks.combinedPendingWork
-                guard pendingAfterStop == 0 else {
+                guard pendingAfterStop == 0 || confirmedPendingCancellation else {
                     explicitExitState.shutdownFailed()
                     hostService.resumeAfterCancelledExplicitExit()
                     cancelDeferredSystemTermination()
@@ -401,10 +425,47 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 }
             } catch {
                 explicitExitState.shutdownFailed()
+                hostService.resumeAfterCancelledExplicitExit()
                 cancelDeferredSystemTermination()
-                presentExplicitExitFailure(error)
+                if !(error is CancellationError) { presentExplicitExitFailure(error) }
             }
         }
+    }
+
+    private func closeConfirmedProcesses(_ targets: [ManagerExitTarget]) async throws {
+        let approved = Set(targets)
+        func checkScope() throws {
+            guard Set(try fullExitSnapshot()).isSubset(of: approved) else {
+                throw ManagerHostFailure.unavailable("退出期间出现新进程，未向新进程发送信号。请重新确认。")
+            }
+        }
+        try checkScope()
+        var backendError: Error?
+        do { try await hostService.stopBackendsForExplicitExit(approved: targets) }
+        catch { backendError = error }
+        try checkScope()
+        if ManagerAutomationHooks.combinedPendingWork == 0 {
+            DshService.shared.stop(gracefulOnly: true)
+            for target in targets where target.role == .runner || target.role == .client { target.signal(SIGTERM) }
+            _ = await ManagerExitInventory.wait(targets.filter { $0.role == .runner })
+            // Runner normally disposes its own proxy. Only request termination of a leftover proxy after Runner exits.
+            if !targets.contains(where: { $0.role == .runner && $0.isAlive }) {
+                for target in targets where target.role == .proxy { target.signal(SIGTERM) }
+            }
+        }
+        let remaining = await ManagerExitInventory.wait(targets)
+        try checkScope()
+        if !remaining.isEmpty || ManagerAutomationHooks.combinedPendingWork > 0 {
+            guard confirmExit(remaining, force: true) else { throw CancellationError() }
+            try checkScope()
+            confirmedPendingCancellation = ManagerAutomationHooks.combinedPendingWork > 0
+            if confirmedPendingCancellation { ManagerAutomationHooks.cancelPendingCommands?() }
+            DshService.shared.stop(gracefulOnly: true)
+            for target in remaining { target.signal(SIGKILL) }
+            guard await ManagerExitInventory.wait(remaining).isEmpty else { throw ManagerHostFailure.unavailable("未能确认所有剩余进程退出。") }
+            try hostService.finishForcedExit()
+        } else if let backendError { throw backendError }
+        guard try fullExitSnapshot().isEmpty else { throw ManagerHostFailure.unavailable("仍有当前安装的进程，Manager 保持运行。") }
     }
 
     private func finishDeferredSystemTermination() {
@@ -422,7 +483,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func showPendingWorkExitRefusal(_ pending: Int) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "无法退出并停止 Backend"
+        alert.messageText = "无法\(DisplayText.completeExit)"
         alert.informativeText = "当前有 \(pending) 项待处理自动化。Manager 不会替你取消这些工作；请等待完成后再尝试。"
         alert.addButton(withTitle: "好")
         alert.runModal()
@@ -432,7 +493,7 @@ final class ManagerAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if model == nil { model = ManagerModel(workspace: workspace, hostService: hostService) }
         apply(state.handle(.interactive))
         model?.message = ManagerModel.Message(
-            title: "无法退出并停止 Backend",
+            title: "无法\(DisplayText.completeExit)",
             detail: "\(error.localizedDescription)\n\nManager 保持运行；处理上述问题后可重新打开面板并重试。"
         )
     }

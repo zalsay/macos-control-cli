@@ -223,10 +223,8 @@ final class ManagerHostDaemonService: ManagerHostServicing {
         if shutdownTask?.id == taskID { shutdownTask = nil }
     }
 
-    /// Explicit full-exit action: stop only retained Manager-owned scoped Hosts
-    /// and the one documented default CLI runtime. It never discovers or adopts
-    /// other runtimes, and it never signals a process or removes a socket itself.
-    func stopBackendsForExplicitExit() async throws {
+    /// Request orderly stop only on authenticated endpoints matching the confirmed inventory.
+    func stopBackendsForExplicitExit(approved: [ManagerExitTarget]) async throws {
         if let explicitExitTask {
             try await explicitExitTask.value
             return
@@ -235,7 +233,7 @@ final class ManagerHostDaemonService: ManagerHostServicing {
             throw ManagerHostFailure.unavailable("Manager 的系统退出检查正在进行；请等待当前检查完成。")
         }
         shuttingDown = true
-        let task = Task { @MainActor [self] in try await stopBackendsForExplicitExitNow() }
+        let task = Task { @MainActor [self] in try await stopBackendsForExplicitExitNow(approved: approved) }
         explicitExitTask = task
         do {
             try await task.value
@@ -248,6 +246,18 @@ final class ManagerHostDaemonService: ManagerHostServicing {
         }
     }
 
+    /// After a separately confirmed force stop, reconcile retained children only once they actually exited.
+    func finishForcedExit() throws {
+        guard explicitExitTask == nil || explicitExitCompleted, startingProfiles.isEmpty, localStartup == nil,
+              stopTasks.isEmpty, shutdownTask == nil else { throw ManagerHostFailure.unavailable("仍有 Backend 操作在进行。") }
+        for child in Array(children.values) + (localDaemon.map { [$0] } ?? []) {
+            guard !child.process.isRunning else { throw ManagerHostFailure.unavailable("仍有运行中的 Backend。") }
+            forget(child)
+        }
+        shuttingDown = true
+        explicitExitCompleted = true
+    }
+
     /// Reopen the start gate only when the UI has cancelled termination after
     /// this explicit shutdown completed (for example, a later exit precondition
     /// changed). A call during an in-flight shutdown is intentionally ignored.
@@ -258,7 +268,7 @@ final class ManagerHostDaemonService: ManagerHostServicing {
         shuttingDown = false
     }
 
-    private func stopBackendsForExplicitExitNow() async throws {
+    private func stopBackendsForExplicitExitNow(approved: [ManagerExitTarget]) async throws {
         // Let starts already admitted before the menu action finish so their
         // retained Process instances are included in the preflight set.
         let startDeadline = Date().addingTimeInterval(Self.startTimeout + 1)
@@ -292,13 +302,12 @@ final class ManagerHostDaemonService: ManagerHostServicing {
             targets.append((child, child.runtimePath, child.pid))
         }
 
-        // This is the sole non-owned backend in the explicit full-exit scope:
-        // the default local CLI runtime, never profile enumeration or DSH.
-        let defaultRuntimePath = Self.localRuntime
-        let defaultSocketPath = defaultRuntimePath + "/control.sock"
-        knownTargetSocketPaths.append(defaultSocketPath)
-        if localDaemon == nil, await Self.socketExistsOffMain(defaultSocketPath) {
-            targets.append((nil, defaultRuntimePath, nil))
+        // Include separate CLI runtimes only from the operator-confirmed installation inventory.
+        for process in approved {
+            guard case .daemon(let path) = process.role, process.isAlive,
+                  !targets.contains(where: { $0.runtimePath == path }) else { continue }
+            knownTargetSocketPaths.append(path + "/control.sock")
+            targets.append((nil, path, process.pid))
         }
 
         // Read every known target before issuing the first mutation. Retain
@@ -310,16 +319,15 @@ final class ManagerHostDaemonService: ManagerHostServicing {
             let (reply, endpoint) = try await requestWithEndpointIdentity(
                 .status, applicationPath: applicationPath, runtimePath: target.runtimePath,
                 expectedPeerPID: target.expectedPeerPID)
+            guard approved.contains(where: { $0.pid == endpoint.peer.pid && $0.version == endpoint.peer.pidversion && $0.role == .daemon(target.runtimePath) }) else {
+                throw ManagerHostFailure.unavailable("SFA 服务已更换；请重新确认退出目标。")
+            }
             guard let ready = reply.readyToStop else {
                 throw ManagerHostFailure.unavailable("Host 未提供可验证的停止就绪状态；未停止任何 backend。")
             }
             preflighted.append((target.child, target.runtimePath, endpoint, ready))
         }
-        guard preflighted.allSatisfy(\.ready) else {
-            throw ManagerHostFailure.sessionBusy("至少一个目标 Host 当前忙碌或状态未就绪；没有向任何 backend 发送停止请求。请完成交回/释放后再重试。")
-        }
-
-        for target in preflighted {
+        for target in preflighted where target.ready {
             _ = try await requestWithEndpointIdentity(
                 .daemonStop, applicationPath: applicationPath, runtimePath: target.runtimePath,
                 expectedPeerPID: target.child?.pid, expectedEndpointIdentity: target.endpoint)
@@ -338,6 +346,10 @@ final class ManagerHostDaemonService: ManagerHostServicing {
                     throw ManagerHostFailure.unavailable("默认 CLI Host 已接受停止请求，但固定 runtime 的 socket 仍存在；没有重试或删除 socket。")
                 }
             }
+        }
+
+        guard preflighted.allSatisfy(\.ready) else {
+            throw ManagerHostFailure.sessionBusy("有 SFA 服务仍被控制会话占用。")
         }
 
         // Catch a late replacement/restart without adopting or stopping it.

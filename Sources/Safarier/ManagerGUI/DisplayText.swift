@@ -5,6 +5,8 @@ import SafarierNetwork
 
 /// 界面上的文案和错误说明。
 enum DisplayText {
+    static let completeExit = "完整退出Safarier"
+
     static func mode(_ mode: ProfileMode) -> String {
         switch mode {
         case .persistent: return "持久"

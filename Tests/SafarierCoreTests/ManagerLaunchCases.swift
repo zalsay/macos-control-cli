@@ -83,6 +83,9 @@ public enum ManagerLaunchCases {
         for command in [ManagerMenuCommand.edit, .duplicate, .refresh, .reload] { try check(ManagerMenuDefinition.enabled(command, context: running), "enabled \(command)"); n += 1 }
         let stopped = ManagerMenuContext(hasSelectedProfile: true, selectedProfileStopped: true, hasSubscriptions: true)
         try check(ManagerMenuDefinition.enabled(.launch, context: stopped), "stopped launch enabled"); n += 1
+        var fullExit = ManagerExplicitExitState()
+        try check(fullExit.request(pendingWork: 1, allowBusyPreflight: true) == .beginShutdown, "confirmed close may inspect busy targets before force confirmation"); n += 1
+        try check(fullExit.request(pendingWork: 1, allowBusyPreflight: true) == .alreadyInFlight, "red close and menu cannot start two shutdowns"); n += 1
         var explicitExit = ManagerExplicitExitState()
         try check(explicitExit.request(pendingWork: 1) == .refusePendingWork, "explicit exit refuses pending automation"); n += 1
         try check(explicitExit.request(pendingWork: 0) == .beginShutdown, "explicit exit starts shutdown when idle"); n += 1

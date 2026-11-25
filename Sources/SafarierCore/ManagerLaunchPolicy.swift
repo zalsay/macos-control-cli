@@ -87,9 +87,9 @@ public struct ManagerExplicitExitState: Sendable {
 
     public var isShutdownInFlight: Bool { shutdownInFlight }
 
-    public mutating func request(pendingWork: Int) -> ManagerExplicitExitDecision {
+    public mutating func request(pendingWork: Int, allowBusyPreflight: Bool = false) -> ManagerExplicitExitDecision {
         guard !shutdownInFlight else { return .alreadyInFlight }
-        guard pendingWork == 0 else { return .refusePendingWork }
+        guard pendingWork == 0 || allowBusyPreflight else { return .refusePendingWork }
         shutdownInFlight = true
         return .beginShutdown
     }

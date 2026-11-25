@@ -41,7 +41,7 @@ final class ManagerMenu: NSObject, NSMenuItemValidation {
         let closePanel = item("关闭 Manager 面板", #selector(closeManagerPanel(_:)), "q")
         closePanel.target = self
         app.addItem(closePanel)
-        let explicitExit = item("退出并停止 Backend…", #selector(explicitExit(_:)))
+        let explicitExit = item("\(DisplayText.completeExit)…", #selector(explicitExit(_:)))
         explicitExit.target = self
         app.addItem(explicitExit)
         let file = submenu("文件")

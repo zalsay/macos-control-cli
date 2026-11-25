@@ -432,7 +432,16 @@ final class DshService: ObservableObject {
     }
 
     /// 停止 dsh 服务
-    func stop() {
+    var fullExitProcessID: Int32? {
+        #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
+        let child = controlledProcess
+        #else
+        let child = process
+        #endif
+        return child?.isRunning == true ? child?.processIdentifier : nil
+    }
+
+    func stop(gracefulOnly: Bool = false) {
         cachedWebView?.stopLoading()
         cachedWebView?.removeFromSuperview()
         cachedWebView = nil
@@ -447,7 +456,7 @@ final class DshService: ObservableObject {
             while proc.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
                 Thread.sleep(forTimeInterval: 0.05)
             }
-            if proc.isRunning {
+            if !gracefulOnly && proc.isRunning {
                 Darwin.kill(proc.processIdentifier, SIGKILL)
             }
         }

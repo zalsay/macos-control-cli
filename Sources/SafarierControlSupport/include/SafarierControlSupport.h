@@ -1,6 +1,9 @@
 #ifndef SAFARIER_CONTROL_SUPPORT_H
 #define SAFARIER_CONTROL_SUPPORT_H
 #include <stdint.h>
+/* Only for user-confirmed full-exit targets matching this installation. */
+uint32_t cs_exit_pidversion(int32_t pid);
+int cs_exit_signal(int32_t pid, uint32_t version, int sig);
 
 /* Observations of the actual connected AF_UNIX peer, never a routing target or
  * a grant to signal or terminate it. Recheck around each protocol phase. */

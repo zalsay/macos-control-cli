@@ -4,6 +4,7 @@ import SafarierCore
 /// 主管理窗口：参考 Codex UI 设计的左侧窄图标菜单栏 + 次级导航与内容详情分区展示。
 struct SafarierAppView: View {
     @ObservedObject var model: ManagerModel
+    let onExplicitExit: () -> Void
     @Environment(\.colorScheme) private var colorScheme
 
     /// 亮银钛金与液态玻璃设计规范：顶部控制栏与最左侧窄侧边栏共享的深邃黑曜石钛金冷调外壳背景 (#0C1018 / rgb(12, 16, 24))
@@ -36,7 +37,7 @@ struct SafarierAppView: View {
 
                 HStack(spacing: 0) {
                     // 最左侧窄图标菜单栏 (Activity Bar，仅保留 icon)
-                    ManagerActivityBar(model: model)
+                    ManagerActivityBar(model: model, onExplicitExit: onExplicitExit)
                         .frame(width: 52)
 
                     // 主分区展示内容区 (带有内圆角与微妙边框的独立容器)
@@ -169,6 +170,7 @@ enum ActivityBarBadge {
 
 struct ManagerActivityBar: View {
     @ObservedObject var model: ManagerModel
+    let onExplicitExit: () -> Void
     @ObservedObject private var dshService = DshService.shared
 
     var body: some View {
@@ -217,6 +219,14 @@ struct ManagerActivityBar: View {
             ) {
                 model.switchTab(.settings)
             }
+
+            ActivityBarItem(
+                systemImage: "power",
+                title: DisplayText.completeExit,
+                isSelected: false,
+                action: onExplicitExit
+            )
+            .accessibilityLabel(DisplayText.completeExit)
             .padding(.bottom, 12)
         }
         .padding(.top, 10)
