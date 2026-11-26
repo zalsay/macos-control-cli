@@ -97,7 +97,7 @@ class EntryProgressTests(unittest.TestCase):
     def test_entry_build_failure_does_not_publish_or_report_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             stderr, stdout, dest = self.run_entry(Path(tmp), fail_build=True)
-            self.assertIn('[1/7] 构建 testing release：失败', stderr)
+            self.assertIn('[1/7] 构建正式版 release：失败', stderr)
             self.assertNotIn('完成', stderr)
             self.assertEqual((dest / 'release-current.json').read_text(), 'old')
             self.assertIn('build output', stdout)

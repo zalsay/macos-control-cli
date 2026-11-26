@@ -847,7 +847,7 @@ import AppKit
             // Observe only the existing Manager and the exact authenticated
             // client registration; PID comparison is not routing authority.
             #if SAFARIER_INTERNAL_TEST_APP
-            let diagnosticBundleID = "sh.safarier.testing"
+            let diagnosticBundleID = "sh.safarier.app"
             #else
             let diagnosticBundleID = "sh.safarier.boundcandidate"
             #endif

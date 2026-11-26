@@ -6,7 +6,7 @@ import OSLog
 
 @MainActor
 private enum TestingLaunchTrace {
-    static let logger = Logger(subsystem: "sh.safarier.testing", category: "launch")
+    static let logger = Logger(subsystem: "sh.safarier.app", category: "launch")
 }
 #endif
 

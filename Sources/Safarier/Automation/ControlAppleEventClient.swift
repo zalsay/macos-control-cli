@@ -60,11 +60,10 @@ final class ControlAppleEventClient {
 
     init(applicationPath: String) throws {
         let bundleURL = URL(fileURLWithPath: applicationPath, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        let expectedID = "sh.safarier.app"
         #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
-        let expectedID = "sh.safarier.testing"
         let executableRelative = "Contents/MacOS/Safarier AI"
         #else
-        let expectedID = "sh.safarier.app"
         let executableRelative = "Contents/MacOS/Safarier"
         #endif
         guard Bundle(url: bundleURL)?.bundleIdentifier == expectedID else {

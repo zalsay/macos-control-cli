@@ -3,7 +3,7 @@ import AppKit
 import Darwin
 
 #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
-private let bid = "sh.safarier.testing"
+private let bid = "sh.safarier.app"
 #else
 private let bid = "sh.safarier.boundcandidate"
 #endif

@@ -7,7 +7,7 @@
 #include <string.h>
 static int captures, fail_capture, mismatch_capture, calls, creates, disposes, sends, ask;
 static OSStatus permission_result, create_result;
-static const char bid[] = "sh.safarier.testing";
+static const char bid[] = "sh.safarier.app";
 static const char path[] = "/synthetic/Safarier AI.app/Contents/MacOS/Safarier AI";
 static CSControlManager expected = {.pid=123, .uid=501, .birth_sec=100, .birth_usec=9, .code_hash_len=1, .code_hash={42}};
 int cs_control_capture_manager(int32_t pid, const char *exe, CSControlManager *out) {

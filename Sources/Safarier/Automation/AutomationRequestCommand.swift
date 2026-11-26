@@ -5,7 +5,7 @@ import OSLog
 import SafarierCore
 
 private enum AutomationRequestLifecycleDiagnostic {
-    private static let logger = Logger(subsystem: "sh.safarier.testing", category: "automation-command")
+    private static let logger = Logger(subsystem: "sh.safarier.app", category: "automation-command")
 
     enum Phase: String {
         case received, suspended, completionQueued, resumeBefore = "resume.before"

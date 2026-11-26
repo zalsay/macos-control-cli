@@ -49,8 +49,8 @@ class PackageTests(unittest.TestCase):
         self.assertTrue((other/'INCOMPLETE').is_file())
         self.assertFalse((other/'evidence.json').exists())
     def test_checks_both_signatures_and_all_pins(self):
-        runner = b'Identifier=sh.safarier.testing.runner\n'
-        main = b'Identifier=sh.safarier.testing\n'
+        runner = b'Identifier=sh.safarier.browser\n'
+        main = b'Identifier=sh.safarier.app\n'
         results = [subprocess.CompletedProcess([], 0, b'', b''), subprocess.CompletedProcess([], 0, b'', runner),
                    subprocess.CompletedProcess([], 0, b'', b''), subprocess.CompletedProcess([], 0, b'', main)]
         with mock.patch.object(package.build, 'validate_namespace') as namespace, \
@@ -74,8 +74,8 @@ class PackageTests(unittest.TestCase):
              mock.patch.object(package.build, 'validate_resources'), mock.patch.object(package.subprocess, 'run', side_effect=[ok, bad]):
             with self.assertRaisesRegex(ValueError, 'identifier'): package.check_app(self.app, self.pins)
     def test_app_pin_mismatch_rejected(self):
-        results = [subprocess.CompletedProcess([], 0, b'', b''), subprocess.CompletedProcess([], 0, b'', b'Identifier=sh.safarier.testing.runner\n'),
-                   subprocess.CompletedProcess([], 0, b'', b''), subprocess.CompletedProcess([], 0, b'', b'Identifier=sh.safarier.testing\n')]
+        results = [subprocess.CompletedProcess([], 0, b'', b''), subprocess.CompletedProcess([], 0, b'', b'Identifier=sh.safarier.browser\n'),
+                   subprocess.CompletedProcess([], 0, b'', b''), subprocess.CompletedProcess([], 0, b'', b'Identifier=sh.safarier.app\n')]
         with mock.patch.object(package.build, 'validate_namespace'), mock.patch.object(package.build, 'validate_metadata'), \
              mock.patch.object(package.build, 'validate_resources'), mock.patch.object(package.build, 'sha', return_value='b'*64), \
              mock.patch.object(package.subprocess, 'run', side_effect=results):

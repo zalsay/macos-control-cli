@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble a reviewed testing candidate and runtime; never install or publish."""
+"""Assemble a reviewed local release and runtime; never install or publish."""
 import argparse
 import hashlib
 import importlib.util
@@ -44,7 +44,7 @@ def check_app(app, pins):
     build.validate_metadata(app, 'testing')
     build.validate_resources(app, 'testing')
     runner = app / build.variant_layout('testing')['runner_rel']
-    for bundle, identifier in ((runner, 'sh.safarier.testing.runner'), (app, 'sh.safarier.testing')):
+    for bundle, identifier in ((runner, 'sh.safarier.browser'), (app, 'sh.safarier.app')):
         subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '--verbose=2', str(bundle)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         detail = subprocess.run(['/usr/bin/codesign', '-d', '--verbose=4', str(bundle)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stderr.decode('utf-8', 'replace')
         if re.findall(r'^Identifier=(.+)$', detail, re.MULTILINE) != [identifier]:
@@ -87,9 +87,9 @@ def package_release(app, artifact, pinfile, output):
     copied_hashes = installer_hashes(installer)
     if copied_hashes != source_installer_hashes or installer_hashes(HERE) != source_installer_hashes:
         raise ValueError('installer source or copy changed')
-    instructions = '''Safarier testing candidate - manual sidecar update\n\nThe bundled installer Python files are NOT covered by the App signature. Use installer scripts only from your independently trusted and reviewed repository source, and compare their SHA-256 values with evidence.json and an independently trusted record. evidence.json is a receipt, not a trust anchor.\n\nCreate the following user-private directory only if it does not already exist, and ensure it is owned by you with mode 0700:\n  ~/Library/Application Support/Safarier/DSHRuntime\n\nFrom a trusted reviewed repository checkout, run (replace RELEASE_DIR with this directory):\n  python3 scripts/dsh-runtime/install.py install --artifact "RELEASE_DIR/runtime-artifact" --versions-root "$HOME/Library/Application Support/Safarier/DSHRuntime"\n\nAfter successful sidecar installation, manually replace the App only when appropriate. Do not replace a running App. The DSH_HOME and agents user data are separate and are not changed by this packaging tool.\n\nThis is a testing candidate, not a published release. Installer/runtime execution and App integration require independent review and acceptance.\n'''
+    instructions = '''Safarier local release - manual sidecar update\n\nThe bundled installer Python files are NOT covered by the App signature. Use installer scripts only from your independently trusted and reviewed repository source, and compare their SHA-256 values with evidence.json and an independently trusted record. evidence.json is a receipt, not a trust anchor.\n\nCreate the following user-private directory only if it does not already exist, and ensure it is owned by you with mode 0700:\n  ~/Library/Application Support/Safarier/DSHRuntime\n\nFrom a trusted reviewed repository checkout, run (replace RELEASE_DIR with this directory):\n  python3 scripts/dsh-runtime/install.py install --artifact "RELEASE_DIR/runtime-artifact" --versions-root "$HOME/Library/Application Support/Safarier/DSHRuntime"\n\nAfter successful sidecar installation, manually replace the App only when appropriate. Do not replace a running App. The DSH_HOME and agents user data are separate and are not changed by this packaging tool.\n\nThis is a local ad-hoc signed release, not notarized or publicly published. Installer/runtime execution and App integration require independent review and acceptance.\n'''
     (output/'INSTALL.txt').write_text(instructions)
-    evidence = {'variant':'testing', 'app_pins':pins, 'installer_sha256':copied_hashes,
+    evidence = {'variant':'production', 'app_pins':pins, 'installer_sha256':copied_hashes,
                 'runtime': {'manifest_sha256':anchor.manifest_sha256, 'image_sha256':anchor.image_sha256, 'node_version':anchor.node_version},
                 'trust':'receipt only; compare with independent reviewed records'}
     (output/'evidence.json').write_text(json.dumps(evidence, indent=2, sort_keys=True)+'\n')
@@ -101,6 +101,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('app', 'artifact', 'app-pins', 'output'): parser.add_argument('--'+name, type=Path, required=True)
     args = parser.parse_args()
-    print('Testing candidate assembled (not installed or published):', package_release(args.app, args.artifact, args.app_pins, args.output))
+    print('Local release assembled (not installed or published):', package_release(args.app, args.artifact, args.app_pins, args.output))
 
 if __name__ == '__main__': main()

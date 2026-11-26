@@ -29,9 +29,8 @@ ICON_SOURCE = ROOT / 'scripts/make-icon.swift'
 ICON_SOURCE_SHA256 = 'd082f2ef1cc08fe30a4d38ce1e647074136fd571333851f55a02af8f3d6b4dcf'
 ICON_PATH = 'Contents/Resources/AppIcon.icns'
 ICON_SHA256 = 'ae937f29c597080775e53a52c8337aa5e0dc1d268a8b26ad25ec193c2e7d374c'
-# testing 候选自带的 mihomo（Clash 订阅节点用）：输入是已 ad-hoc 签名的固定文件（codesign 会改写字节，
-# 所以 pin 的是签名后形态；本机已验证同参数签名是字节可复现的）。哈希要和 Swift 侧
-# Sources/SafarierCore/BundleResourcePin.swift 的 localCandidate 契约一致，换二进制时两处一起审核更新。
+# Release compatibility lock, not a digest or a provenance check.
+MIHOMO_VERSION = '1.19.33'
 MIHOMO_REL = 'Contents/Helpers/mihomo'
 MIHOMO_ID = 'sh.safarier.mihomo'
 MIHOMO_SOURCE = ROOT / '.build/mihomo/mihomo-signed'
@@ -39,7 +38,6 @@ ATTEMPT = None
 EXPECTED = {
     'fixture': '45f599bd8d943192d3f93045559a825b8922f5b2df8106393fc896394355edc1',
     'sdef': '0cb1c89e68376982342c0a4821b8f9a719d99e4ceb5b476e5ec748e773b5890c',
-    'mihomo': 'ee492e45fe3843634fbb0e53f45f008eef3cee77b0178e58036bd0324a393d1b',
 }
 
 RUNNER_REL = 'Contents/Helpers/SafarierRunner.app'
@@ -203,8 +201,8 @@ def validate_metadata(app, variant='legacy'):
     layout = variant_layout(variant)
     with (app / 'Contents/Info.plist').open('rb') as f: main = plistlib.load(f)
     with (app / layout['runner_rel'] / 'Contents/Info.plist').open('rb') as f: runner = plistlib.load(f)
-    main_bid = 'sh.safarier.testing' if variant == 'testing' else 'sh.safarier.boundcandidate'
-    runner_bid = 'sh.safarier.testing.runner' if variant == 'testing' else 'sh.safarier.boundcandidate.runner'
+    main_bid = 'sh.safarier.app' if variant == 'testing' else 'sh.safarier.boundcandidate'
+    runner_bid = 'sh.safarier.browser' if variant == 'testing' else 'sh.safarier.boundcandidate.runner'
     if variant == 'testing' and (any(info.get(key) != leaf for info, leaf in ((main, layout['main_leaf']), (runner, layout['runner_leaf'])) for key in ('CFBundleName', 'CFBundleDisplayName')) or main.get('CFBundleIconFile') != 'AppIcon' or runner.get('CFBundleIconFile') != 'AppIcon'): raise RuntimeError('invalid testing metadata')
     if variant == 'testing' and main.get('NSAppleEventsUsageDescription') != AUTHORIZATION_USAGE:
         raise RuntimeError('invalid authorization usage description')
@@ -230,20 +228,32 @@ def validate_resources(app, variant='legacy'):
         raise RuntimeError('fixed icon hash mismatch')
     if variant == 'testing':
         mihomo = app / MIHOMO_REL
-        if mihomo.is_symlink() or not mihomo.is_file() or sha(mihomo) != EXPECTED['mihomo']:
-            raise RuntimeError('fixed mihomo hash mismatch')
+        if mihomo.is_symlink() or not mihomo.is_file():
+            raise RuntimeError('missing bundled mihomo')
+
+def check_mihomo_version(output, machine):
+    arch = {'arm64': 'arm64', 'x86_64': 'amd64'}.get(machine)
+    lines = output.splitlines()
+    fields = lines[0].split() if lines else []
+    if not arch or fields[:5] != ['Mihomo', 'Meta', MIHOMO_VERSION, 'darwin', arch]:
+        raise RuntimeError(f'expected Mihomo Meta {MIHOMO_VERSION} darwin {arch or machine}')
+
 
 def stage_mihomo(app, run):
-    # Only the reviewed binary with the reviewed hash may enter the candidate; never overwrite.
+    # Probe only the trusted local build input copied into this private stage.
+    # Package/installation verification checks receipt bytes without executing them.
     source, target = MIHOMO_SOURCE, app / MIHOMO_REL
     if source.is_symlink() or not source.is_file():
         raise RuntimeError('missing pinned mihomo input')
-    if sha(source) != EXPECTED['mihomo']:
-        raise RuntimeError('pinned mihomo hash mismatch')
     if target.exists() or target.is_symlink():
         raise RuntimeError('mihomo target already exists')
     shutil.copyfile(source, target)
     os.chmod(target, 0o755)
+    machine = os.uname().machine
+    run(['/usr/bin/lipo', target, '-verify_arch', machine])
+    run(['/usr/bin/codesign', '--verify', '--strict', target])
+    probe = run([target, '-v'])
+    check_mihomo_version(probe.with_suffix('.stdout').read_text(), machine)
     run(['/usr/bin/codesign', '--force', '--sign', '-', '--identifier', MIHOMO_ID, str(target)])
     run(['/usr/bin/codesign', '--verify', '--strict', '--verbose=2', str(target)])
 
@@ -363,8 +373,8 @@ def main(variant='legacy', configuration='debug'):
         'SAFARIER_VERSION': '1.0.1', 'SAFARIER_BUILD': '1'})
     plist_path = app / 'Contents/Info.plist'
     with plist_path.open('rb') as f: info = plistlib.load(f)
-    main_bid = 'sh.safarier.testing' if variant == 'testing' else 'sh.safarier.boundcandidate'
-    runner_bid = 'sh.safarier.testing.runner' if variant == 'testing' else 'sh.safarier.boundcandidate.runner'
+    main_bid = 'sh.safarier.app' if variant == 'testing' else 'sh.safarier.boundcandidate'
+    runner_bid = 'sh.safarier.browser' if variant == 'testing' else 'sh.safarier.boundcandidate.runner'
     info.update(CFBundleIdentifier=main_bid, CFBundleExecutable=layout['main_leaf'], LSUIElement=True)
     if variant == 'testing': info.update(CFBundleDisplayName=layout['main_leaf'], CFBundleName=layout['main_leaf'], NSAppleEventsUsageDescription=AUTHORIZATION_USAGE)
     for key in ('CFBundleIconFile', 'CFBundleIconName', 'CFBundleIcons', 'CFBundleURLTypes', 'CFBundleDocumentTypes', 'UTExportedTypeDeclarations', 'UTImportedTypeDeclarations'):

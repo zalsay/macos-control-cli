@@ -25,7 +25,7 @@ export SF_APP="/实际安装位置/Safarier AI.app"
 ```
 
 `SF_APP` 非空时只使用该显式位置，不 fallback；正常默认安装无需每次设置长路径。
-新包 Manager 的 Name/DisplayName/Executable 均为 `Safarier AI`；内嵌 `Contents/Helpers/Safarier AI Browser.app`，其 executable 为 `Contents/MacOS/Safarier AI Browser`，Name/DisplayName 同为 `Safarier AI Browser`。Bundle IDs 不变。
+新包 Manager 的 Name/DisplayName/Executable 均为 `Safarier AI`；内嵌 `Contents/Helpers/Safarier AI Browser.app`，其 executable 为 `Contents/MacOS/Safarier AI Browser`，Name/DisplayName 同为 `Safarier AI Browser`。正式版 Bundle ID 分别为 `sh.safarier.app` 和 `sh.safarier.browser`。从 `.testing` 切换后，先用 `sfa authorize` 查询新目标的自动化授权。
 安装缺失或版本不符时说明环境阻碍，按当前授权处理安装更新。测试授权不自动授权退出或替换现有用户 App/窗口。运行目录必须满足 CLI 原安全校验；不要从外置卷归档绕过安装路径，也不要 chmod 放宽门禁。
 
 本机构建推荐安装到 `~/Applications/Safarier AI.app`。本次实测系统 `/Applications` 为 `root:admin 0775`，组可写，不满足原身份校验对祖先目录 `(mode & 0022) == 0` 的要求；即使包的 pins 与签名正确也会拒绝，`SF_APP` 不会绕过该门禁。这是当前目录属性的限制，不是永久禁止所有 `/Applications` 安装；不要修改系统目录权限来绕过。
@@ -43,7 +43,7 @@ sfa profile list
 ```
 
 确认实际唯一 Manager 的路径、签名与 workspace。`profile list` 是表格输出，无 `--json`；按目标选 UUID，可使用已有“视频号”等授权环境，不要求新建 fixture。同名多项时先明确目标。
-CLI 与 Manager 必须使用一致的 `SAFARIER_HOME`/workspace；不要为了连接改 profile 设置或复制环境。testing 默认数据目录仍是 `~/Library/Application Support/Safarier Test`，不是 App 改名遗漏，不迁移现有数据。
+CLI 与 Manager 必须使用一致的 `SAFARIER_HOME`/workspace；不要为了连接改 profile 设置或复制环境。此次切换保留 `~/Library/Application Support/Safarier AI` 和原有钥匙串服务名，不迁移现有数据。
 目标未运行时普通启动；已有目标 Runner 窗口则直接进入连接步骤，不重复 launch：
 
 ```sh
@@ -189,14 +189,14 @@ release 成功应含 `controlReleased`：`inputReleased`、`artifactsCleaned`、
 
 ### 控制请求诊断日志
 
-控制链路使用 macOS 统一日志，子系统 `sh.safarier.testing`、类别 `navigation-trace`。日志仅记录动作固定类别、请求 UUID、固定阶段、已知结果码及单调时间；系统日志自身另带日期时间。`connect`、`observe`、`click`、`type`、`release`、`disconnect`（close）等可按同一个 `request` 关联 CLI、broker、Manager 和 Runner。release 的 `manager.release.child` 将原请求 UUID 放在 `request`，提交子请求 UUID 放在 `related_request`。 `click-target` 的 `broker.screenshot.child` 同样以 `request` 和 `related_request` 关联原请求与内部截图请求。`release.receipt` 的 `manual_interaction_enabled` 是回执中的布尔值，不是对焦点实际变化的观察。其它阶段未必全部出现：请求可能在进入某一层前被拒绝、超时或断开。
+控制链路使用 macOS 统一日志，子系统 `sh.safarier.app`、类别 `navigation-trace`。日志仅记录动作固定类别、请求 UUID、固定阶段、已知结果码及单调时间；系统日志自身另带日期时间。`connect`、`observe`、`click`、`type`、`release`、`disconnect`（close）等可按同一个 `request` 关联 CLI、broker、Manager 和 Runner。release 的 `manager.release.child` 将原请求 UUID 放在 `request`，提交子请求 UUID 放在 `related_request`。 `click-target` 的 `broker.screenshot.child` 同样以 `request` 和 `related_request` 关联原请求与内部截图请求。`release.receipt` 的 `manual_interaction_enabled` 是回执中的布尔值，不是对焦点实际变化的观察。其它阶段未必全部出现：请求可能在进入某一层前被拒绝、超时或断开。
 
 在本机查询或导出（日期范围按需缩小，文件存入用户自行选择的安全位置）：
 
 ```sh
-log show --style compact --last 1h --predicate 'subsystem == "sh.safarier.testing" AND category == "navigation-trace"'
-log stream --style compact --level default --predicate 'subsystem == "sh.safarier.testing" AND category == "navigation-trace"'
-log show --style compact --last 1h --predicate 'subsystem == "sh.safarier.testing" AND category == "navigation-trace"' > safarier-control-diagnostics.log
+log show --style compact --last 1h --predicate 'subsystem == "sh.safarier.app" AND category == "navigation-trace"'
+log stream --style compact --level default --predicate 'subsystem == "sh.safarier.app" AND category == "navigation-trace"'
+log show --style compact --last 1h --predicate 'subsystem == "sh.safarier.app" AND category == "navigation-trace"' > safarier-control-diagnostics.log
 ```
 
 系统日志由 macOS 管理，保留时间和容量受系统状态与配置控制，不能保证永久保存；需要留存时及时导出。旧版或其它同类别诊断也可能出现在查询中，分享导出文件前应检查其内容。Runner 的传统 stdout/stderr 仍在工作区 `logs/<profile UUID>.log`（同时启用 `SAFARIER_INTERNAL_TEST_APP` 和 `SAFARIER_BOUND_LOCAL_CANDIDATE` 的测试构建默认使用 `~/Library/Application Support/Safarier AI/`；其他构建默认使用 `~/Library/Application Support/Safarier/`。非空 `SAFARIER_HOME` 优先覆盖默认工作区）；该文件不包含所有进程的统一日志。

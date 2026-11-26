@@ -16,8 +16,8 @@ let role = ExecutableRole.resolve(arguments)
 // These checks are negative routing restrictions, not identity or permission proof.
 let bundleID = Bundle.main.bundleIdentifier
 #if SAFARIER_INTERNAL_TEST_APP
-let expectedMainBundleID = "sh.safarier.testing"
-let expectedRunnerBundleID = "sh.safarier.testing.runner"
+let expectedMainBundleID = "sh.safarier.app"
+let expectedRunnerBundleID = "sh.safarier.browser"
 let expectedMainLeaf = "Safarier AI"
 let expectedRunnerLeaf = "Safarier AI Browser"
 #else

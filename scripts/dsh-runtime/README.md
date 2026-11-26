@@ -47,7 +47,9 @@ These are build-review artifacts, not a trusted installation or runtime verifier
 
 A read-only mount prevents writes through that mount, but does not by itself protect the backing image against replacement or modification, establish the identity of a later mount, or prevent same-user unmount/remount. This tool is not a race-resistant execution boundary against concurrent same-user mutation. No trust anchor, installed version, production service, or running process is changed.
 
-## 统一 testing 构建、固定目录更新与安装
+## 统一正式版构建、固定目录更新与安装
+
+正式包使用可信本地构建的 mihomo，精确锁定 `1.19.33` 和本机构建对应的 Darwin 架构，不锁定跨构建的 SHA-256。收据中的 SHA-256 只用于复核同一次构建的副本。
 
 在 `/Volumes/RC500/dev/safarier` 运行：
 
@@ -59,7 +61,7 @@ python3 scripts/dsh-runtime/unified-release.py
 
 进度条显示已完成的七个阶段和当前步骤，不代表耗时或文件处理百分比；终端中的长步骤会定期显示运行状态，重定向输出时保留简洁阶段记录。失败时显示出错步骤，不标记完成。
 
-入口使用现有 release testing 构建及 `package-release.py`，复核受审 runtime 与 Swift 固定锚后生成配套目录，再更新 `dist/releases/Safarier AI.app`、`candidate-sha256.json` 和 `release-current.json`。新候选的 GUI 和 CLI 均待验收；候选自身的 pins 和 evidence 是一致性收据，不是独立信任锚。runtime 变化必须重新审核并更新相应源码锚；可用 `--artifact /绝对路径` 指定已审核材料，不能以其自带的 review.json 代替审核。
+入口使用正式版构建（Manager `sh.safarier.app`、Browser `sh.safarier.browser`）及 `package-release.py`，复核受审 runtime 与 Swift 固定锚后生成配套目录，再更新 `dist/releases/Safarier AI.app`、`candidate-sha256.json` 和 `release-current.json`。新候选的 GUI 和 CLI 均待验收；候选自身的 pins 和 evidence 是一致性收据，不是独立信任锚。runtime 变化必须重新审核并更新相应源码锚；可用 `--artifact /绝对路径` 指定已审核材料，不能以其自带的 review.json 代替审核。
 
 入口使用单写入锁，先校验完整候选并备份旧文件；普通失败尝试回滚。三个固定路径不是整体原子切换，更新期间读取可能看到中间态。其他写入者必须遵守该锁；此锁不能阻止不配合的并行修改。强退或回滚失败会留下 `dist/releases/.unified-transaction`，后续构建将停止：确认没有构建进程，按其中 `RECOVERY.txt` 检查备份、固定路径和 staging，恢复一致状态并核验后再手动移走事务目录。已成功更新的旧版本备份路径记录在 `release-current.json`。
 
@@ -69,4 +71,4 @@ python3 scripts/dsh-runtime/unified-release.py
 
 安装目录使用独立单写入锁；旧包保存在同目录 `.safarier-install-backup-*.noindex/previous.app`。普通失败尝试回滚，失败事务保留为 `.safarier-install-failed-*.noindex`；强退或回滚失败时保留 `.safarier-install-transaction`，后续安装会停止。确认构建及目标进程均已退出，按其中 `RECOVERY.txt` 检查目标、旧包和暂存包，恢复或校验后手动移走事务目录。锁只约束配合该流程的写入者；不提供对其他程序并发修改的保护。安装与固定目录更新是两个阶段，安装失败或中断时 release 可能已经更新，错误信息会指出这一点，须分别核对两个位置；不要假定它们一致。
 
-这是本地 ad-hoc 签名、未公证的 testing 候选。sidecar 仍按配套 `INSTALL.txt` 独立处理，自动 App 安装不代表 sidecar 已安装或 GUI/CLI 验收通过。
+这是本地 ad-hoc 签名、未公证的正式标识构建。sidecar 仍按配套 `INSTALL.txt` 独立处理，自动 App 安装不代表 sidecar 已安装或 GUI/CLI 验收通过。

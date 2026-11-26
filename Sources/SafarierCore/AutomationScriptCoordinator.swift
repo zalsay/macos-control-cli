@@ -4,7 +4,7 @@ import OSLog
 
 /// Fixed metadata only. Request payloads and arbitrary error text are never logged.
 public enum NavigationDiagnostic {
-    private static let logger = Logger(subsystem: "sh.safarier.testing", category: "navigation-trace")
+    private static let logger = Logger(subsystem: "sh.safarier.app", category: "navigation-trace")
     public static func category(_ action: AutomationAction) -> String? {
         switch action {
         case .openSession: return "connect"
@@ -111,7 +111,7 @@ public enum NavigationDiagnostic {
 #if SAFARIER_BOUND_LOCAL_CANDIDATE
 /// Diagnostic metadata only: never accepts payloads, tokens or page data.
 public enum ReleaseDiagnostic {
-    private static let logger = Logger(subsystem: "sh.safarier.testing", category: "navigation-trace")
+    private static let logger = Logger(subsystem: "sh.safarier.app", category: "navigation-trace")
     public static func emit(_ request: AutomationRequest, phase: String,
                             remainingSeconds: Double, relatedRequestID: UUID? = nil,
                             result: String = "ok") {

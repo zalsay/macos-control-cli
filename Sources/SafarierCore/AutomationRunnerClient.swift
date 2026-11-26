@@ -226,7 +226,7 @@ public actor AutomationRunnerClient {
                     diagnosticCode = "privateDirectoryInvalid"
                 } else { diagnosticCode = "unknown" }
                 fputs("BOUND_DIAG phase=\(diagnosticPhase) elapsed_ms=\(diagnosticElapsed) result=\(diagnosticCode)\n", stderr)
-                Logger(subsystem: "sh.safarier.testing", category: "bound-start").notice("phase=\(diagnosticPhase, privacy: .public) elapsed_ms=\(diagnosticElapsed, privacy: .public) result=\(diagnosticCode, privacy: .public)")
+                Logger(subsystem: "sh.safarier.app", category: "bound-start").notice("phase=\(diagnosticPhase, privacy: .public) elapsed_ms=\(diagnosticElapsed, privacy: .public) result=\(diagnosticCode, privacy: .public)")
                 #endif
                 pair.parent.close(); try? pair.child.close()
                 if let context { await context.safeClose() }

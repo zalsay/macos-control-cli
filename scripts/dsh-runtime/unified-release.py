@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and stage a local testing candidate, then update the fixed release paths."""
+"""Build and stage a local release, then update the fixed release paths."""
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -220,7 +220,7 @@ def main():
             reject_residual(destination)
             anchor_source = verify_swift_anchor(artifact)
             package.verify.verify_artifact(artifact, package.install.required_anchor().hashes)
-        with progress.step('构建 testing release'):
+        with progress.step('构建正式版 release'):
             package.build.main('testing', 'release')
             attempt = package.build.ATTEMPT
             layout = package.build.variant_layout('testing')
@@ -228,7 +228,7 @@ def main():
             pins = attempt / 'candidate-sha256.json'
         with progress.step('打包候选与 sidecar'):
             unique = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex
-            output = destination / ('unified-testing-' + unique)
+            output = destination / ('unified-release-' + unique)
             package.package_release(app, artifact, pins, output)
         with progress.step('准备并校验固定路径候选'):
             stage = attempt / 'fixed-release-stage'; stage.mkdir()
@@ -240,14 +240,14 @@ def main():
             metadata = {'updatedAtUTC': datetime.now(timezone.utc).isoformat(), 'sourceBuild': str(attempt),
                 'sourceBundle': str(output / 'Safarier AI.app'), 'destination': str(destination / 'Safarier AI.app'),
                 'sidecarPackage': str(output), 'sidecarInstructions': str(output / 'INSTALL.txt'),
-                'variant': 'testing', 'configuration': 'release', 'pinCount': len(parsed),
+                'variant': 'production', 'configuration': 'release', 'pinCount': len(parsed),
                 'pinsSHA256': package.build.sha(stage / 'candidate-sha256.json'),
                 'pinsTrust': 'candidate consistency evidence, not an independent trust anchor',
                 'runtimeImageSHA256': package.install.required_anchor().image_sha256,
                 'runtimeManifestSHA256': package.install.required_anchor().manifest_sha256,
                 'previousFixedBackup': str(destination / backup_name / 'previous'),
                 'guiAcceptance': 'pending', 'cliAcceptance': 'pending',
-                'releaseStatus': 'local testing candidate; not notarized or publicly published'}
+                'releaseStatus': 'local release; not notarized or publicly published'}
             (stage / 'release-current.json').write_text(json.dumps(metadata, indent=2) + '\n')
         with progress.step('复核构建后源码和锚'):
             if verify_swift_anchor(artifact) != anchor_source or package.build.source_inventory('testing') != json.loads((attempt / 'source-after.json').read_text()):

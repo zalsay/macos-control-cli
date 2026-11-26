@@ -2,7 +2,7 @@
 #include <Carbon/Carbon.h>
 #include <string.h>
 #if defined(SAFARIER_INTERNAL_TEST_APP) && defined(SAFARIER_BOUND_LOCAL_CANDIDATE)
-#define SAFARIER_TARGET_BID "sh.safarier.testing"
+#define SAFARIER_TARGET_BID "sh.safarier.app"
 #else
 #define SAFARIER_TARGET_BID "sh.safarier.boundcandidate"
 #endif

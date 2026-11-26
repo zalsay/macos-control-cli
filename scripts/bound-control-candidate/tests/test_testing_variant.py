@@ -63,10 +63,17 @@ class TestingVariant(unittest.TestCase):
         source = (build.ROOT / 'Sources/SafarierCore/BundleResourcePin.swift').read_text()
         self.assertEqual(source.count('"' + build.ICON_SHA256 + '"'), 2)
 
-    def test_runtime_mihomo_pin_matches_packager(self):
-        # The Swift candidate contract and the packager must name the same reviewed mihomo bytes.
+    def test_runtime_mihomo_has_no_predefined_digest(self):
         source = (build.ROOT / 'Sources/SafarierCore/BundleResourcePin.swift').read_text()
-        self.assertIn('("' + build.MIHOMO_REL + '",false,"' + build.EXPECTED['mihomo'] + '")', source)
+        self.assertIn('("' + build.MIHOMO_REL + '",false,nil)', source)
+
+    def test_mihomo_release_version_and_platform(self):
+        for suffix in ('go1.25.6 unknown time', 'go1.26.1 rebuilt'):
+            build.check_mihomo_version('Mihomo Meta 1.19.33 darwin arm64 with ' + suffix, 'arm64')
+        for output in ('', 'Mihomo Meta 1.19.330 darwin arm64', 'Mihomo Meta v1.19.33-beta darwin arm64',
+                       'Mihomo Meta 1.19.33 linux arm64', 'Mihomo Meta 1.19.33 darwin amd64'):
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                build.check_mihomo_version(output, 'arm64')
 
     def test_testing_resources_reject_missing_and_changed_icons(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,8 +99,8 @@ class TestingVariant(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app = Path(tmp)
             (app / 'Contents/Helpers/Safarier AI Browser.app/Contents').mkdir(parents=True)
-            main = {'CFBundleIdentifier':'sh.safarier.testing','CFBundleExecutable':'Safarier AI','CFBundlePackageType':'APPL','LSUIElement':True,'NSAppleScriptEnabled':True,'OSAScriptingDefinition':'Safarier.sdef','CFBundleDisplayName':'Safarier AI','CFBundleName':'Safarier AI','CFBundleIconFile':'AppIcon'}
-            runner = {'CFBundleIdentifier':'sh.safarier.testing.runner','CFBundleExecutable':'Safarier AI Browser','CFBundleName':'Safarier AI Browser','CFBundleDisplayName':'Safarier AI Browser','CFBundlePackageType':'APPL','LSUIElement':True,'NSAppleScriptEnabled':False,'CFBundleIconFile':'AppIcon'}
+            main = {'CFBundleIdentifier':'sh.safarier.app','CFBundleExecutable':'Safarier AI','CFBundlePackageType':'APPL','LSUIElement':True,'NSAppleScriptEnabled':True,'OSAScriptingDefinition':'Safarier.sdef','CFBundleDisplayName':'Safarier AI','CFBundleName':'Safarier AI','CFBundleIconFile':'AppIcon'}
+            runner = {'CFBundleIdentifier':'sh.safarier.browser','CFBundleExecutable':'Safarier AI Browser','CFBundleName':'Safarier AI Browser','CFBundleDisplayName':'Safarier AI Browser','CFBundlePackageType':'APPL','LSUIElement':True,'NSAppleScriptEnabled':False,'CFBundleIconFile':'AppIcon'}
             mainfile=app/'Contents/Info.plist'; runnerfile=app/build.variant_layout('testing')['runner_rel']/'Contents/Info.plist'
             main['NSAppleEventsUsageDescription'] = build.AUTHORIZATION_USAGE
             mainfile.write_bytes(plistlib.dumps(main));runnerfile.write_bytes(plistlib.dumps(runner))
@@ -111,8 +118,12 @@ class TestingVariant(unittest.TestCase):
                     saved = info[key]; info[key] = old; file.write_bytes(plistlib.dumps(info))
                     with self.assertRaises(RuntimeError): build.validate_metadata(app, 'testing')
                     info[key] = saved; file.write_bytes(plistlib.dumps(info))
-            main['CFBundleIdentifier']='sh.safarier.boundcandidate'; mainfile.write_bytes(plistlib.dumps(main))
-            with self.assertRaises(RuntimeError): build.validate_metadata(app, 'testing')
+            for info, file, rejected in ((main, mainfile, 'sh.safarier.boundcandidate'),
+                                         (main, mainfile, 'sh.safarier.testing'),
+                                         (runner, runnerfile, 'sh.safarier.testing.runner')):
+                file.write_bytes(plistlib.dumps(dict(info, CFBundleIdentifier=rejected)))
+                with self.assertRaises(RuntimeError): build.validate_metadata(app, 'testing')
+                file.write_bytes(plistlib.dumps(info))
 
 class TestingConsentMode(unittest.TestCase):
     def test_testing_input_reaches_receipt_but_disallows_consent(self):

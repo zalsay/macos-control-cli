@@ -9,7 +9,7 @@ enum OfflineBundleContract {
     case localCandidate, localCandidateRunner
     var bid: String {
         #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
-        return self == .localCandidate ? "sh.safarier.testing" : "sh.safarier.testing.runner"
+        return self == .localCandidate ? "sh.safarier.app" : "sh.safarier.browser"
         #else
         return self == .localCandidate ? "sh.safarier.boundcandidate" : "sh.safarier.boundcandidate.runner"
         #endif
@@ -48,8 +48,8 @@ enum OfflineBundleContract {
         ]
         #if SAFARIER_INTERNAL_TEST_APP && SAFARIER_BOUND_LOCAL_CANDIDATE
         base.append(("Contents/Resources/AppIcon.icns",false,"ae937f29c597080775e53a52c8337aa5e0dc1d268a8b26ad25ec193c2e7d374c"))
-        // Clash 订阅节点的内核（mihomo），和 scripts/bound-control-candidate/build.py 的 MIHOMO_REL / EXPECTED['mihomo'] 一致。
-        base.append(("Contents/Helpers/mihomo",false,"ee492e45fe3843634fbb0e53f45f008eef3cee77b0178e58036bd0324a393d1b"))
+        // Version/platform are checked at packaging; the signed bundle seals the shipped helper.
+        base.append(("Contents/Helpers/mihomo",false,nil))
         #endif
         return base + runner.map { (BoundBundleRoles.runnerBundleRelative + "/" + $0.0, $0.1, $0.2) }
     }

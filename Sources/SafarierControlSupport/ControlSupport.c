@@ -228,7 +228,7 @@ int32_t cs_control_send_apple_event(const char *bundle_id, const uint8_t *reques
                                     int *sent, int *sender_audit, uint32_t *phase, const uint8_t request_id[16]) {
     if (!bundle_id || !request || !request_len || request_len > 65536 || !manager || !expected_executable || !reply_bytes || !capacity || capacity > 65536 || !reply_len || !sent || !sender_audit || !phase || !request_id || !timeout_seconds || timeout_seconds > 70) return paramErr;
     uuid_string_t trace_id; uuid_unparse_upper(request_id, trace_id);
-    os_log_t trace = os_log_create("sh.safarier.testing", "navigation-trace");
+    os_log_t trace = os_log_create("sh.safarier.app", "navigation-trace");
 #define TRACE(stage) os_log_with_type(trace, OS_LOG_TYPE_DEFAULT, "request=%{public}s phase=sender.native.%{public}s", trace_id, stage)
     TRACE("enter");
     size_t bid_len = strnlen(bundle_id, 256);
