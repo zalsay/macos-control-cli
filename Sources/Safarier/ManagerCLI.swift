@@ -27,6 +27,7 @@ enum ManagerCLI {
       safarier device list
       safarier launch PROFILE_ID [--url URL] [--spi LIST]
       safarier probe PROFILE_ID [--url URL] [--spi LIST]
+      safarier foreground PROFILE_ID
     authorize：默认仅查询 AppleEvents 权限；--request 才允许系统询问。不启动 App 或发送业务事件。
     --sub/--node：出站走订阅里的节点（按节点名匹配，名字带空格时加引号）；启动时自动起 sing-box 转成本地 SOCKS5。
            和 --proxy 二选一：设了一个就清掉另一个。
@@ -84,6 +85,7 @@ enum ManagerCLI {
             case ("device", "list"): return listDevices()
             case ("launch", _): return try launch(workspace, try ParsedArguments(arguments.dropFirst()), probe: false)
             case ("probe", _): return try launch(workspace, try ParsedArguments(arguments.dropFirst()), probe: true)
+            case ("foreground", _): return try foreground(workspace, Array(arguments.dropFirst()))
             case ("help", _), ("--help", _), ("-h", _), (nil, _):
                 print(usage)
                 return 0
@@ -508,6 +510,34 @@ enum ManagerCLI {
         print("已启动 \(profile.name)，pid \(pid)，日志 \(workspace.runnerLogURL(for: profile.id).path)")
         return 0
         #endif
+    }
+
+    private static func foreground(_ workspace: SafarierWorkspace, _ arguments: [String]) throws -> Int32 {
+        let id = try foregroundProfileID(arguments)
+        guard let profile = try workspace.profiles.record(id: id) else {
+            throw CLIError("找不到 profile \(id.uuidString)")
+        }
+        do {
+            switch try RunnerForeground.activate(profileID: id, workspace: workspace) {
+            case .verified(let pid):
+                print("已将「\(profile.name)」的 Runner 置于前台（pid \(pid)）。")
+                return 0
+            case .requestedButUnverified:
+                printError("已请求激活「\(profile.name)」，但未能确认它已成为前台应用。")
+                return 1
+            }
+        } catch {
+            printError("无法将「\(profile.name)」置于前台：\(error.localizedDescription)")
+            return 1
+        }
+    }
+
+    static func foregroundProfileID(_ arguments: [String]) throws -> UUID {
+        guard arguments.count == 1 else { throw CLIError("用法：sfa foreground PROFILE_ID") }
+        guard let id = UUID(uuidString: arguments[0]) else {
+            throw CLIError("PROFILE_ID 不是合法 UUID：\(arguments[0])")
+        }
+        return id
     }
 
     /// 探针要等结果，所以直接起子进程并转发它的 stdout/stderr。

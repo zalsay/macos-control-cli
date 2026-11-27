@@ -471,11 +471,14 @@ enum ControlDaemon {
             throw ControlRuntime.Failure.indeterminate
         }
         defer { startupLock.release() }
+        let finder = Bundle.main.bundleURL.pathExtension == "app" ? DaemonFinderEvents() : nil
+        try finder?.prepare()
         let (listener, socketPin) = try runtime.listenSocket(lockedBy: startupLock)
         let source = DispatchSource.makeReadSource(fileDescriptor: listener, queue: DispatchQueue.global(qos: .userInitiated))
         source.setCancelHandler {
             Darwin.close(listener)
-            CFRunLoopStop(CFRunLoopGetMain())
+            if let finder { Task { @MainActor in finder.stop() } }
+            else { CFRunLoopStop(CFRunLoopGetMain()) }
         }
         source.setEventHandler {
             let descriptor = Darwin.accept(listener, nil, nil)
@@ -543,6 +546,6 @@ enum ControlDaemon {
             }
         }
         source.resume()
-        CFRunLoopRun()
+        if let finder { finder.run() } else { CFRunLoopRun() }
     }
 }

@@ -288,9 +288,7 @@ final class ManagerModel: ObservableObject {
     }
 
     func bringToFront(_ profile: Profile) {
-        guard let pid = workspace.runnerPID(profile.id),
-              let app = NSRunningApplication(processIdentifier: pid) else { return }
-        app.activate(options: [.activateAllWindows])
+        _ = try? RunnerForeground.activate(profileID: profile.id, workspace: workspace, verificationTimeout: 0)
     }
 
     /// 和在 Runner 里按 ⌘Q 一样，正常退出、释放锁。

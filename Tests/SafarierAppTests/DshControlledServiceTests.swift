@@ -191,7 +191,8 @@ final class DshControlledServiceTests: XCTestCase {
         let service = DshService(
             controlledProvider: { Lease(script) },
             homeURL: root,
-            availableIPv4Addresses: { ["10.0.0.108"] }
+            availableIPv4Addresses: { ["10.0.0.108"] },
+            portOccupied: { _ in false }
         )
         defer { service.stop() }
         service.start()
@@ -221,6 +222,37 @@ final class DshControlledServiceTests: XCTestCase {
 
         service.stop()
         XCTAssertFalse(FileManager.default.fileExists(atPath: receiptURL.path), "stop must remove the native token handoff")
+    }
+
+    func testPortWaitPreservesExistingReceiptAndStartsOnceWhenFree() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let home = root.appendingPathComponent("Library/Application Support/Safarier/dsh")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let receipt = home.appendingPathComponent(DshNativeLaunchReceipt.fileName)
+        let previous = Data("another listener".utf8)
+        try previous.write(to: receipt)
+        let script = root.appendingPathComponent("entry.sh")
+        try "echo 'dsh web: http://127.0.0.1:61919/?token=fixture'\nexec /bin/sleep 60\n"
+            .write(to: script, atomically: true, encoding: .utf8)
+        var acquired = 0, busy = true
+        let service = DshService(controlledProvider: { acquired += 1; return Lease(script) },
+                                 homeURL: root, portOccupied: { _ in busy })
+        defer { service.stop() }
+        service.start()
+        XCTAssertEqual(service.status, .starting)
+        XCTAssertEqual(acquired, 0)
+        XCTAssertEqual(try Data(contentsOf: receipt), previous)
+        service.stop()
+        XCTAssertEqual(try Data(contentsOf: receipt), previous)
+        service.start()
+        busy = false
+        for _ in 0..<100 {
+            if case .running = service.status { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard case .running = service.status else { return XCTFail("did not resume after port release") }
+        XCTAssertEqual(acquired, 1)
     }
 
     actor Gate {

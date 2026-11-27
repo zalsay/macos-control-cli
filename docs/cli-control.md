@@ -53,6 +53,14 @@ sfa launch "$PROFILE_UUID"
 
 `launch` 请求已有 Manager，不会代为启动 Manager。启动会请求激活浏览器窗口；返回成功不等于窗口已获得焦点或控制连接已建立。接管要求浏览器已不在前台且窗口不是 key/main；用户切换到其他应用后再 connect。不会在 connect 时自动切换前台应用，以 connect 的真实结果为准。
 
+只需切换到已经运行的环境窗口时，可用：
+
+```sh
+sfa foreground "$PROFILE_UUID"
+```
+
+该命令只接受一个 profile UUID，不启动、重启或连接 Runner。它会核对 profile 锁、锁中的 PID 和当前安装包的 Runner executable，再请求 macOS 激活；只有观察到该 Runner 成为前台应用才报告成功。系统拒绝激活或最终前台状态无法确认时会返回失败，不把请求已接受当成已置前。**置前会改变当前应用焦点，可能打断依赖后台状态的自动化**；确认目标后再执行。
+
 从 Manager 启动允许 Agent 控制的环境时，Manager 会在后台确保默认本地控制 daemon 已启动。多个环境共用 `~/.safarier-control/control.sock`；这不会启动独立的环境 SSH Host、申请系统授权或建立浏览器控制会话。DSH 使用默认 runtime 时，先用 `sfa control status` 确认监听，再用 `sfa control capabilities` 确认 daemon 能与当前 Manager 通信。下文显式 `--runtime` 的隔离示例仍需单独执行 `daemon start`。
 
 Manager 唯一性检查只计入已完成 GUI 启动且未退出的应用；同 bundle ID 下未启动 GUI 的 CLI/daemon 注册记录不会被计作第二个 Manager。多个真正的 GUI Manager 仍拒绝歧义路由。
@@ -66,6 +74,10 @@ Safarier 内置 DSH 可安装独立的 [SFA tool bundle](../scripts/dsh-sfa-tool
 冷启动必须由显式 `connect` 请求取得环境锁后进行；已运行的浏览器不应重复 launch。任务完成时通过 tool 交还控制，保留窗口。当前 CLI 没有停止单个浏览器环境的正常退出接口，`daemon stop` 只针对控制服务，不是浏览器退出命令。
 
 ### Manager 重启后重新接管
+
+从访达双击正式安装的 App 即可重新打开面板。若系统把重新打开事件交给仍在服务的控制 daemon，它会把事件交给当前 Manager；没有 Manager 时才请求系统启动图形实例。首次更新到支持此行为的版本后，需要让旧 daemon 正常退出并使用新版。
+
+DSH 工作台使用固定地址与端口。若旧进程仍在监听，面板会显示等待原因，保留旧连接及其本机启动凭据；原监听释放后自动继续启动。取消启动也会取消等待。长期等待时应先确认旧实例的会话已经结束，再从旧实例正常停止服务。
 
 新版 Runner 在 Manager 退出后保留已打开的窗口和标签。旧控制会话必须先清理并还回输入，再允许新 Manager 重新认证。重新打开 Manager 后，对同一环境发出新的 `connect`，以返回的新 connection 开始 `observe`，不复用旧 frame 或重发之前的输入。如果 daemon 仍在运行，显式 `connect` 会在确认原 Manager 已退出后验证和切换接收端；旧连接不能发送给新的 Manager。
 

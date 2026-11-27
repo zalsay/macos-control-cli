@@ -854,7 +854,7 @@ import AppKit
             // CLI and daemon share the bundle without launching a GUI Manager.
             // Their LaunchServices entries are not competing Manager instances.
             let registrations = NSRunningApplication.runningApplications(withBundleIdentifier: diagnosticBundleID)
-                .filter { $0.isFinishedLaunching && !$0.isTerminated }
+                .filter { $0.isFinishedLaunching && !$0.isTerminated && !DaemonFinderEvents.isServingDaemon($0) }
             let managerPID = getpid()
             let managerCount = registrations.filter { $0.processIdentifier == managerPID }.count
             guard let concrete = Self.concreteOwnedClient(endpoint) else {

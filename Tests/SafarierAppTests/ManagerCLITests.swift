@@ -35,4 +35,23 @@ final class ManagerCLITests: XCTestCase {
         XCTAssertFalse(custom.follow)
         XCTAssertEqual(custom.identifier, "Asia/Bangkok")
     }
+
+    func testForegroundRequiresExactlyOneUUID() throws {
+        let id = UUID()
+        XCTAssertEqual(try ManagerCLI.foregroundProfileID([id.uuidString]), id)
+
+        for arguments in [[], [id.uuidString, "extra"], ["not-a-uuid"]] {
+            XCTAssertThrowsError(try ManagerCLI.foregroundProfileID(arguments), "arguments: \(arguments)")
+        }
+    }
+
+    func testForegroundRunnerExecutableIdentityUsesCanonicalPaths() {
+        let expected = URL(fileURLWithPath: "/tmp/Safarier AI Browser.app/Contents/MacOS/Safarier AI Browser")
+        XCTAssertTrue(RunnerForeground.isExpectedRunnerExecutable(expected, expected: expected))
+        XCTAssertFalse(
+            RunnerForeground.isExpectedRunnerExecutable(
+                URL(fileURLWithPath: "/tmp/other-runner"), expected: expected
+            )
+        )
+    }
 }

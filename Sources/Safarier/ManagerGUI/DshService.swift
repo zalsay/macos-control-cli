@@ -12,6 +12,26 @@ struct DshLANConfiguration: Equatable {
 
     let bindAddress: String
 
+    /// Probe only for an address collision. Let the actual server report all
+    /// other bind errors; never connect to or assume ownership of the listener.
+    static func portOccupied(_ host: String) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var reuse: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout.size(ofValue: reuse)))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(port).bigEndian
+        guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else { return false }
+        return withUnsafePointer(to: &address) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) != 0 && errno == EADDRINUSE
+            }
+        }
+    }
+
     static func load(from url: URL, localIPv4Addresses: Set<String>) -> Self? {
         guard let data = readUserOwned0600File(at: url),
               let object = try? JSONSerialization.jsonObject(with: data),
@@ -232,6 +252,8 @@ final class DshService: ObservableObject {
     private var stderrPipe: Pipe?
     private var terminationObserver: NSObjectProtocol?
     private let availableIPv4Addresses: () -> Set<String>
+    private let portOccupied: (String) -> Bool
+    private var portWait: Task<Void, Never>?
     private var activeLANConfiguration: DshLANConfiguration?
     private var launchReceiptURL: URL?
     private var pendingStdoutLine = ""
@@ -255,15 +277,18 @@ final class DshService: ObservableObject {
     init(controlledProvider: @escaping ControlledProvider = { try await DshControlledRuntime().acquire() },
          homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
          environment: @escaping () -> [String: String] = { ProcessInfo.processInfo.environment },
-         availableIPv4Addresses: @escaping () -> Set<String> = { DshLANConfiguration.localIPv4Addresses() }) {
+         availableIPv4Addresses: @escaping () -> Set<String> = { DshLANConfiguration.localIPv4Addresses() },
+         portOccupied: @escaping (String) -> Bool = DshLANConfiguration.portOccupied) {
         self.controlledProvider = controlledProvider
         self.controlledHome = homeURL
         self.controlledEnvironment = environment
+        self.portOccupied = portOccupied
         self.availableIPv4Addresses = availableIPv4Addresses
         installTerminationObserver()
     }
     #else
     private init() {
+        self.portOccupied = DshLANConfiguration.portOccupied
         self.availableIPv4Addresses = { DshLANConfiguration.localIPv4Addresses() }
         installTerminationObserver()
     }
@@ -350,7 +375,7 @@ final class DshService: ObservableObject {
         #else
         guard status == .stopped || isFailed else { return }
 
-        prepareListenerConfiguration(home: FileManager.default.homeDirectoryForCurrentUser)
+        guard prepareListenerConfiguration(home: FileManager.default.homeDirectoryForCurrentUser) else { return }
 
         guard let executable = locateBinary() else {
             status = .failed("未检测到 Safarier 专用 DeepSeek Harness 运行时。\n请在项目根目录运行 scripts/build-dsh.sh 进行构建。")
@@ -442,6 +467,8 @@ final class DshService: ObservableObject {
     }
 
     func stop(gracefulOnly: Bool = false) {
+        portWait?.cancel()
+        portWait = nil
         cachedWebView?.stopLoading()
         cachedWebView?.removeFromSuperview()
         cachedWebView = nil
@@ -502,8 +529,8 @@ final class DshService: ObservableObject {
         logs.removeAll()
         pendingStdoutLine = ""
         pendingStderrLine = ""
-        prepareListenerConfiguration(home: controlledHome)
         guard controlledProcess == nil && acquisition == nil else { return }
+        guard prepareListenerConfiguration(home: controlledHome) else { return }
         generation += 1
         let token = generation
         if let lease = launchedLease {
@@ -700,15 +727,34 @@ final class DshService: ObservableObject {
         }
     }
 
-    private func prepareListenerConfiguration(home: URL) {
+    private func prepareListenerConfiguration(home: URL) -> Bool {
         let dshHome = home.appendingPathComponent("Library/Application Support/Safarier/dsh", isDirectory: true)
         let receiptURL = dshHome.appendingPathComponent(DshNativeLaunchReceipt.fileName)
-        DshNativeLaunchReceipt.remove(at: receiptURL)
-        launchReceiptURL = receiptURL
         activeLANConfiguration = DshLANConfiguration.load(
             from: dshHome.appendingPathComponent(DshLANConfiguration.fileName),
             localIPv4Addresses: availableIPv4Addresses()
         )
+        let host = activeLANConfiguration?.bindAddress ?? "127.0.0.1"
+        if portOccupied(host) {
+            status = .starting
+            logs = ["\(host):\(DshLANConfiguration.port) 仍由其他进程监听。等待端口释放后自动启动；现有连接保持运行。"]
+            portWait?.cancel()
+            portWait = Task { [weak self] in
+                repeat {
+                    do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                    guard let self, !Task.isCancelled else { return }
+                    if self.portOccupied(host) { continue }
+                    self.portWait = nil
+                    self.status = .stopped
+                    self.start()
+                    return
+                } while true
+            }
+            return false
+        }
+        DshNativeLaunchReceipt.remove(at: receiptURL)
+        launchReceiptURL = receiptURL
+        return true
     }
 
     /// 获取或复用持久化的 dsh Web 视图，支持在切换 Tab 时保活会话与 DOM 状态，避免重复加载
